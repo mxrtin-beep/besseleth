@@ -142,8 +142,10 @@ sources:
       max_results_per_keyword: 25
     twitter:
       # X's free API tier has no search endpoint (removed 2023) — a paid
-      # Basic/Pro plan + X_BEARER_TOKEN env var is required for live
-      # search. Without a token this falls back to social_drops/ paste-in.
+      # Basic plan (~$200/mo as of writing) + X_BEARER_TOKEN env var is
+      # required for live search. Without a token this falls back to
+      # social_drops/ paste-in — or the browser extension in extension/,
+      # which adds a selected tweet with one click, no API needed at all.
       enabled: true
       max_results_per_keyword: 25
 

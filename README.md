@@ -221,6 +221,12 @@ with a 🗑 to delete one outright — unlike a scraped item (which would just
 come back on the next fetch), a paste is only ever removed if you remove
 it. Same from the CLI: `besseleth.cli item-delete --item-id <id>`.
 
+**Browser extension**: `extension/` is a one-click clipper — select text
+on any page (LinkedIn, X, Bluesky, wherever) and a "+ besseleth" button
+appears; click it and the selection + page URL go straight to `/api/paste`,
+no copy-paste round trip through the dashboard. See `extension/README.md`
+for installing it (unpacked, a couple of clicks in `chrome://extensions`).
+
 **Avoiding duplicate coverage**: a pasted item goes into the same pool as
 everything scraped, so if you paste a LinkedIn post about a funding round
 that a news feed also picked up, besseleth notices the overlap (by title
@@ -493,6 +499,7 @@ besseleth/
   web/
     app.py                # Flask dashboard: reports, papers, map, trends, paste box, scheduler status
     templates/dashboard.html
+extension/                # browser extension: select text anywhere -> POST /api/paste (see extension/README.md)
 ```
 
 ## Notes

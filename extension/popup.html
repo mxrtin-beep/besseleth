@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>besseleth Clipper</title>
+<style>
+  body {
+    width: 320px;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 13px;
+    margin: 0;
+    padding: 14px;
+    color: #1a1a1a;
+    background: #fff;
+  }
+  h1 { font-size: 14px; margin: 0 0 10px; }
+  label { display: block; font-size: 11px; opacity: 0.7; margin: 10px 0 4px; }
+  textarea, input[type=text] {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 6px 8px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 13px;
+  }
+  textarea { min-height: 90px; resize: vertical; }
+  button {
+    margin-top: 10px;
+    padding: 7px 14px;
+    border: none;
+    border-radius: 6px;
+    background: #4a90d9;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:hover { background: #3a7bc0; }
+  button.secondary {
+    background: none;
+    border: 1px solid #ccc;
+    color: #333;
+  }
+  #status { margin-top: 8px; font-size: 12px; }
+  #status.ok { color: #1e7d6f; }
+  #status.err { color: #c0392b; }
+  details { margin-top: 14px; border-top: 1px solid #eee; padding-top: 8px; }
+  summary { cursor: pointer; font-size: 12px; opacity: 0.75; }
+  .hint { font-size: 11px; opacity: 0.6; margin-top: 4px; }
+</style>
+</head>
+<body>
+  <h1>Add to besseleth</h1>
+  <label for="text">Content</label>
+  <textarea id="text" placeholder="Selected text from the page, or paste anything here."></textarea>
+  <label for="url">URL</label>
+  <input type="text" id="url" placeholder="https://...">
+  <button id="addBtn">Add</button>
+  <div id="status"></div>
+
+  <details>
+    <summary>Settings</summary>
+    <label for="serverUrl">besseleth server URL</label>
+    <input type="text" id="serverUrl" placeholder="http://127.0.0.1:5050">
+    <button class="secondary" id="saveBtn">Save</button>
+    <p class="hint">Only localhost/127.0.0.1 works without an extra permission grant. For a besseleth
+      running elsewhere on your network, saving a non-local URL will prompt for one-time access.</p>
+  </details>
+
+  <script src="popup.js"></script>
+</body>
+</html>
