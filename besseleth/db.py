@@ -36,6 +36,9 @@ ENRICHMENT_COLUMNS = {
     "therapeutic_target": "TEXT",      # e.g. motor, speech, vision, memory, mood/psychiatric, epilepsy, pain, other
     "novelty_score": "INTEGER",        # 1-5, how surprising vs. other items on the same topic
     "novelty_rationale": "TEXT",       # one-sentence LLM rationale for the score
+    "location_text": "TEXT",           # "City, Country" as guessed by the LLM from the item's text, or NULL
+    "lat": "REAL",                     # geocoded from location_text (Nominatim/OSM, free) — NULL if ungeocodable
+    "lon": "REAL",
     "enriched_at": "TEXT",             # ISO8601 once enrichment has run for this item (even if it found nothing)
 }
 
@@ -57,6 +60,9 @@ class Item:
     therapeutic_target: Optional[str] = None
     novelty_score: Optional[int] = None
     novelty_rationale: Optional[str] = None
+    location_text: Optional[str] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
 
 
 class DB:
@@ -171,10 +177,14 @@ class DB:
         therapeutic_target: Optional[str],
         novelty_score: Optional[int],
         novelty_rationale: Optional[str],
+        location_text: Optional[str] = None,
+        lat: Optional[float] = None,
+        lon: Optional[float] = None,
     ):
         self.conn.execute(
             """UPDATE items SET org = ?, org_type = ?, modality = ?, therapeutic_target = ?,
-               novelty_score = ?, novelty_rationale = ?, enriched_at = ? WHERE id = ?""",
+               novelty_score = ?, novelty_rationale = ?, location_text = ?, lat = ?, lon = ?,
+               enriched_at = ? WHERE id = ?""",
             (
                 org,
                 org_type,
@@ -182,11 +192,27 @@ class DB:
                 therapeutic_target,
                 novelty_score,
                 novelty_rationale,
+                location_text,
+                lat,
+                lon,
                 datetime.now(timezone.utc).isoformat(),
                 item_id,
             ),
         )
         self.conn.commit()
+
+    def locations(self) -> list[sqlite3.Row]:
+        """Orgs with a geocoded location, aggregated for the map — count
+        of items and the most common org_type at each point."""
+        self.conn.row_factory = sqlite3.Row
+        q = """
+            SELECT org, location_text, lat, lon, org_type, source, COUNT(*) as n
+            FROM items
+            WHERE lat IS NOT NULL AND lon IS NOT NULL AND org IS NOT NULL
+            GROUP BY org, lat, lon, org_type, source
+            ORDER BY n DESC
+        """
+        return list(self.conn.execute(q).fetchall())
 
     def papers(self, sources: list[str]) -> list[sqlite3.Row]:
         """All items in the given sources, enriched or not — the papers

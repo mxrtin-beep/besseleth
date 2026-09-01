@@ -80,6 +80,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
                     "source_url": d.source_url,
                     "date_reported": d.date_reported,
                     "notes": d.notes,
+                    "auto_extracted": d.auto_extracted,
                 }
                 for d in devices
             ]
@@ -100,6 +101,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
                     "last_funding_date": c.last_funding_date,
                     "source_url": c.source_url,
                     "notes": c.notes,
+                    "auto_extracted": c.auto_extracted,
                 }
                 for c in companies
             ]
@@ -132,6 +134,35 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
                 for r in rows
             ]
         )
+
+    @app.get("/api/locations")
+    def api_locations():
+        db = DB(config.db_path)
+        try:
+            rows = db.locations()
+        finally:
+            db.close()
+        # Aggregate the per-(org, source) rows from db.locations() into
+        # one marker per org — the Map tab shows one point per
+        # company/lab, not one per source.
+        by_org: dict[tuple, dict] = {}
+        for r in rows:
+            key = (r["org"], r["lat"], r["lon"])
+            entry = by_org.setdefault(
+                key,
+                {
+                    "org": r["org"],
+                    "location_text": r["location_text"],
+                    "lat": r["lat"],
+                    "lon": r["lon"],
+                    "org_type": r["org_type"],
+                    "total": 0,
+                    "by_source": {},
+                },
+            )
+            entry["total"] += r["n"]
+            entry["by_source"][r["source"]] = entry["by_source"].get(r["source"], 0) + r["n"]
+        return jsonify(list(by_org.values()))
 
     @app.get("/api/metrics")
     def api_metrics():

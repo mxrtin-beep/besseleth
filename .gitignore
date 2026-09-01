@@ -12,3 +12,4 @@ devices.yaml
 companies.yaml
 event_drops/
 social_drops/
+.geocode_cache.json

@@ -32,7 +32,7 @@
          cursor: pointer; font-size: .88rem; }
   .btn:hover { background: #4a90d922; }
   .btn:disabled { opacity: .5; cursor: default; }
-  #chart { width: 100%; height: 560px; }
+  #chart, #mapChart { width: 100%; height: 560px; }
   #reportPane img { max-width: 100%; }
   table.datatable { border-collapse: collapse; width: 100%; margin-top: 1rem; font-size: .85rem; }
   table.datatable th, table.datatable td { border: 1px solid #8883; padding: .5rem .7rem; text-align: left; vertical-align: top; }
@@ -88,6 +88,7 @@
   <div class="tabs">
     <button id="tabReport" class="active">Report</button>
     <button id="tabPapers">Papers</button>
+    <button id="tabMap">Map</button>
     <button id="tabTrends">Trends explorer</button>
     <button id="tabPaste">Paste</button>
   </div>
@@ -119,6 +120,16 @@
     </div>
     <p class="hint" id="papersCount"></p>
     <table class="datatable" id="papersTable"></table>
+  </div>
+
+  <div id="mapPane" style="display:none">
+    <p class="hint">Where the companies/labs behind your papers and news are located — one marker per org, sized by
+      how much has been fetched about it. Locations are the local LLM's best guess from item text (only saved when
+      it's confident, not a guess), geocoded via <a href="https://www.openstreetmap.org/copyright" target="_blank"
+      rel="noopener">OpenStreetMap</a>. Click a marker to filter the Papers tab by that org.</p>
+    <div id="mapChart"></div>
+    <p class="hint" id="mapCount"></p>
+    <table class="datatable" id="mapTable"></table>
   </div>
 
   <div id="trendsPane" style="display:none">
@@ -178,27 +189,33 @@
 <script>
 const reportPane = document.getElementById('reportPane');
 const papersPane = document.getElementById('papersPane');
+const mapPane = document.getElementById('mapPane');
 const trendsPane = document.getElementById('trendsPane');
 const pastePane = document.getElementById('pastePane');
 const tabReport = document.getElementById('tabReport');
 const tabPapers = document.getElementById('tabPapers');
+const tabMap = document.getElementById('tabMap');
 const tabTrends = document.getElementById('tabTrends');
 const tabPaste = document.getElementById('tabPaste');
 
 function showTab(which) {
   reportPane.style.display = which === 'report' ? 'block' : 'none';
   papersPane.style.display = which === 'papers' ? 'block' : 'none';
+  mapPane.style.display = which === 'map' ? 'block' : 'none';
   trendsPane.style.display = which === 'trends' ? 'block' : 'none';
   pastePane.style.display = which === 'paste' ? 'block' : 'none';
   tabReport.classList.toggle('active', which === 'report');
   tabPapers.classList.toggle('active', which === 'papers');
+  tabMap.classList.toggle('active', which === 'map');
   tabTrends.classList.toggle('active', which === 'trends');
   tabPaste.classList.toggle('active', which === 'paste');
   if (which === 'papers' && !papersLoaded) loadPapers();
+  if (which === 'map' && !mapLoaded) loadMap();
   if (which === 'paste') loadPasted();
 }
 tabReport.onclick = () => showTab('report');
 tabPapers.onclick = () => showTab('papers');
+tabMap.onclick = () => showTab('map');
 tabTrends.onclick = () => showTab('trends');
 tabPaste.onclick = () => showTab('paste');
 
@@ -376,6 +393,76 @@ async function loadPasted() {
       await fetch(`/api/item/${btn.dataset.delItem}`, { method: 'DELETE' });
       document.querySelector(`[data-item-row="${btn.dataset.delItem}"]`)?.remove();
     };
+  });
+}
+
+// --- Map ---------------------------------------------------------------
+let mapLoaded = false;
+let mapLocations = [];
+
+const ORG_TYPE_COLORS = { industry: '#4a90d9', academic: '#e9c46a', government: '#2a9d8f', nonprofit: '#f4a261', unknown: '#adb5bd' };
+
+async function loadMap() {
+  mapLoaded = true;
+  const res = await fetch('/api/locations');
+  mapLocations = await res.json();
+  renderMap();
+}
+
+function renderMap() {
+  document.getElementById('mapCount').textContent = `${mapLocations.length} located org(s).`;
+
+  const table = document.getElementById('mapTable');
+  table.innerHTML = `
+    <thead><tr><th>Org</th><th>Location</th><th>Org type</th><th>Items</th></tr></thead>
+    <tbody>${mapLocations.slice().sort((a, b) => b.total - a.total).map(m => `
+      <tr>
+        <td>${m.org}</td>
+        <td>${m.location_text || ''}</td>
+        <td>${m.org_type || ''}</td>
+        <td>${m.total} (${Object.entries(m.by_source).map(([s, n]) => `${s}: ${n}`).join(', ')})</td>
+      </tr>`).join('')}</tbody>`;
+
+  if (typeof Plotly === 'undefined') {
+    document.getElementById('mapChart').innerHTML =
+      '<p class="hint">Chart library failed to load from the CDN (no internet access?). The table below still works.</p>';
+    return;
+  }
+  if (!mapLocations.length) {
+    document.getElementById('mapChart').innerHTML =
+      '<p class="hint">No located orgs yet — run <code>besseleth.cli enrich --all</code> (needs Ollama running) to backfill locations for existing items, or wait for the next fetch.</p>';
+    return;
+  }
+
+  const trace = {
+    type: 'scattergeo',
+    lat: mapLocations.map(m => m.lat),
+    lon: mapLocations.map(m => m.lon),
+    text: mapLocations.map(m => `${m.org}<br>${m.location_text || ''}<br>${m.total} item(s)`),
+    hoverinfo: 'text',
+    mode: 'markers',
+    marker: {
+      size: mapLocations.map(m => Math.min(10 + Math.sqrt(m.total) * 6, 40)),
+      color: mapLocations.map(m => ORG_TYPE_COLORS[m.org_type] || ORG_TYPE_COLORS.unknown),
+      line: { width: 1, color: '#ffffffaa' },
+      opacity: 0.85,
+    },
+  };
+  const layout = {
+    geo: { projection: { type: 'natural earth' }, showland: true, landcolor: '#8882', showcountries: true, countrycolor: '#8886' },
+    margin: { t: 10, b: 0, l: 0, r: 0 },
+    hoverlabel: { bgcolor: '#1e1e1eee', bordercolor: '#4a90d9', font: { color: '#f5f5f5', size: 12 } },
+  };
+  Plotly.newPlot('mapChart', [trace], layout, { responsive: true }).then(gd => {
+    gd.removeAllListeners && gd.removeAllListeners('plotly_click');
+    gd.on('plotly_click', (ev) => {
+      const org = mapLocations[ev.points[0].pointNumber].org;
+      showTab('papers');
+      loadPapers().then(() => {
+        document.getElementById('pfOrg').value = org;
+        renderPapers();
+      });
+    });
   });
 }
 
@@ -607,7 +694,7 @@ function renderTable() {
       <thead><tr><th>Device</th><th>Org</th><th>Type</th><th>FDA status</th><th>Metrics</th><th>Reported</th><th>Source</th></tr></thead>
       <tbody>${devices.map(d => `
         <tr>
-          <td>${d.name}</td>
+          <td>${d.name}${d.auto_extracted ? ' <span class="metric-tag" title="Auto-extracted by besseleth — verify before trusting">auto</span>' : ''}</td>
           <td>${d.org}</td>
           <td>${d.org_type}</td>
           <td>${d.fda_status || 'unknown'}</td>
@@ -620,7 +707,7 @@ function renderTable() {
       <thead><tr><th>Company</th><th>Funding</th><th>Last round</th><th>Stock</th><th>Source</th><th>Notes</th></tr></thead>
       <tbody>${companies.map(c => `
         <tr>
-          <td>${c.name}</td>
+          <td>${c.name}${c.auto_extracted ? ' <span class="metric-tag" title="Auto-extracted by besseleth — verify before trusting">auto</span>' : ''}</td>
           <td>${c.funding_total_usd ? '$' + c.funding_total_usd.toLocaleString() : '—'}</td>
           <td>${c.last_funding_round ? `${c.last_funding_round} (${c.last_funding_date})` : '—'}</td>
           <td>${c.stock_price ? `${c.stock_ticker}: $${c.stock_price.toLocaleString()}` : (c.stock_ticker || '—')}</td>

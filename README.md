@@ -11,7 +11,8 @@ A weekly industry-briefing bot. Point it at an industry (e.g.
 - Pulls **Bluesky** posts (free public search API) and **X/Twitter** (paid API if you have a token, otherwise paste-in)
 - Flags **LinkedIn** as a source with a compliant path (see below — no ToS-violating scraping)
 - **Personalizes**: if an item mentions a company one of your contacts works at (e.g. a job posting at your friend's company), it's pulled into its own "For you specifically" section
-- **Tracks industry trends**: a hand-maintained (optionally LLM-drafted) dataset of devices/systems and their metrics — for neurotech: information transfer rate, implant longevity, electrode count, device type, material, and FDA status — plus a separate **companies** dataset for business metrics (funding, stock price — auto-refreshable for free for public tickers). Both accumulate forever, across every report.
+- **Tracks industry trends**: a self-populating (auto-extracted, human-editable) dataset of devices/systems and their metrics — for neurotech: information transfer rate, implant longevity, electrode count, device type, material, and FDA status — plus a separate **companies** dataset for business metrics (funding, stock price — auto-refreshable for free for public tickers). Both accumulate forever, across every report; auto-added entries are tagged so they're distinct from ones you've verified.
+- **Maps** the companies/labs behind your papers by location — geocoded free via OpenStreetMap, extracted by the same enrichment pass, no separate step.
 - **Summarizes** each section with a free local LLM via [Ollama](https://ollama.ai) — falls back to a plain extractive summary if Ollama isn't running, so it never blocks
 - Writes a Markdown report to `reports/` on a configurable cadence (daily/weekly/monthly/whatever), and can email it — old reports are deletable, individually, from the dashboard
 - Dedupes across runs in a local SQLite DB, so re-running never repeats old items; a **backfill** control lets you pull history further back than the usual lookback window
@@ -167,7 +168,7 @@ Local-only (no auth, don't expose it on the open internet as-is). Unlike
 the CLI, this doesn't need a `besseleth.cli run` first — starting it also
 starts the background schedule (see Usage above), so it fetches and
 reports on its own from here on; the status bar up top shows what it's
-doing and when. Two tabs:
+doing and when. Tabs:
 
 - **Report** — the latest (or any past) report, rendered from Markdown;
   delete old ones from the sidebar.
@@ -176,6 +177,9 @@ doing and when. Two tabs:
   range, source, org, org type (industry/academic/government/nonprofit),
   modality, therapeutic target, and a minimum novelty score; sort by date
   or novelty. See "Papers table" below for what populates the columns.
+- **Map** — the companies/labs behind those papers, plotted by location
+  (free via OpenStreetMap), sized by how much has been fetched about
+  each. See "Map" below.
 - **Trends explorer** — devices and companies as an interactive chart
   (Plotly, client-side, no static PNGs) — a Devices/Companies toggle
   switches dataset. Pick any metric for the X axis — including **time**
@@ -303,68 +307,69 @@ the conferences watchlist.
 
 ## Industry trends (ITR, longevity, electrode count, device type, material, FDA status — and business metrics)
 
-`devices.yaml` (copy from `devices.example.yaml`) is a small, hand-maintained
-dataset of devices/systems in your industry and their metrics, accumulating
-forever — nothing here is ever reset by a later report:
+`devices.yaml` and `companies.yaml` (copy from their `.example.yaml`
+files) hold devices/systems and companies in your industry and their
+metrics, accumulating forever — nothing here is ever reset by a later
+report. **Both build themselves automatically**: the same enrichment
+pass that fills in the Papers table (see below) also drafts an entry
+whenever an item reports concrete numbers, and appends it —
 
 ```yaml
-- name: "Neuralink N1"
-  org: "Neuralink"
-  org_type: "industry"          # "industry" or "academic"
-  fda_status: "Breakthrough Device Designation"
+- name: "Synchron CNS implant"
+  org: "Synchron"
+  org_type: "industry"
+  fda_status: "unknown"
   metrics:
-    information_transfer_rate: 40   # bits/min
-    longevity_days: 730
-    electrode_count: 1024
-    device_type: "CNS implant"      # EEG | ECoG | CNS implant | PNS implant | EMG | ...
-    material: "not publicly specified"
-  source_url: "https://neuralink.com/updates/first-patient/"   # the specific update/paper — NOT the homepage
-  date_reported: "2025-06-01"
+    information_transfer_rate: 15
+    electrode_count: 16
+    device_type: "CNS implant"
+  source_url: "https://example.com/synchron-funding"   # the actual item, never a homepage
+  date_reported: "2026-08-01"
+  notes: "Auto-extracted by besseleth from a scraped item — verify before trusting."
+  auto_extracted: true
 ```
 
-**`source_url` must be the specific article/paper/press-release the
-numbers came from, not the company's homepage** — a homepage tells a
-reader nothing about where "40 bits/min" came from, and a generic link is
-the same as no citation. If you don't have a specific URL, leave it
-blank rather than pointing at a homepage.
+— tagged `auto_extracted: true` (shown as an **auto** badge in the
+dashboard) so it's visibly distinct from something you've reviewed, and
+**additive only**: if an entry for that name+org already exists,
+nothing gets appended or overwritten — auto-extraction only ever adds
+new rows, so a number you've corrected by hand stays corrected. Every
+entry keeps `source_url` pointing at the actual item, so a wrong
+auto-extracted number is easy to spot-check.
 
-The metric keys are whatever `industry.trend_metrics` in `config.yaml`
-defines — the neurotech defaults cover information transfer rate, implant
-longevity, electrode count, device type, material, and FDA status, but
-swap in whatever your industry measures (e.g. `battery_life_hours`,
-`accuracy_pct`). Every `run` renders a scatter chart per pair of numeric
-metrics (colored by FDA status, shaped by industry vs. academic) plus an
-FDA-status bar chart, embeds them in the report, and lists every tracked
-device in a table with human-readable metric tags (not raw
-`key=value` pairs) and its cited source. The dashboard's Trends explorer
-tab is the live, interactive version of the same dataset — adjustable
-X/Y axes (including **time**, to watch a metric improve release over
-release), color by any categorical field, click a point to open its
-source.
+Nothing here is invented — the LLM is instructed to use `null`/omit
+rather than guess, and a metric that isn't concretely reported in the
+text just doesn't get added. That said, an LLM extracting numbers from
+prose is still fallible; treat `auto_extracted: true` entries as a draft,
+not ground truth, until you've spot-checked them (or flip the field to
+`false` once you have). If you'd rather review every entry *before* it's
+added instead of after, `device-suggest` remains available as the
+manual, nothing-written-until-you-paste-it-in path:
 
-**Business metrics** live separately in `companies.yaml` (copy from
-`companies.example.yaml`), since one company ships several devices —
-funding rounds (hand-maintained, same source-citation rule) and stock
-price, which refreshes for free for any entry with a `stock_ticker` set:
+```bash
+.venv/bin/python -m besseleth.cli device-suggest --item-id <id-from-report-or-db>
+```
+
+The metric keys are whatever `industry.trend_metrics`/`company_metrics`
+in `config.yaml` define — the neurotech defaults cover information
+transfer rate, implant longevity, electrode count, device type,
+material, and FDA status, but swap in whatever your industry measures
+(e.g. `battery_life_hours`, `accuracy_pct`). Stock price for any company
+with a `stock_ticker` set refreshes for free:
 
 ```bash
 .venv/bin/python -m besseleth.cli company-refresh-stock
 ```
 
-The dashboard's Trends explorer has a Devices/Companies toggle so both
-datasets live on the one page rather than being scattered across tabs.
-
-Adding entries to either file is intentionally **not** fully automated —
-extracting a real number like "62 bits/min" reliably out of a paper's
-prose is exactly the kind of thing that goes quietly wrong unsupervised,
-and a trend chart is something you want to trust. Instead, `device-suggest`
-gives you a head start: point it at a scraped item and the local LLM
-drafts a `devices.yaml` entry (source_url set to that item's actual URL)
-for you to review and paste in — nothing is written automatically.
-
-```bash
-.venv/bin/python -m besseleth.cli device-suggest --item-id <id-from-report-or-db>
-```
+Every `run` renders a scatter chart per pair of numeric metrics (colored
+by FDA status, shaped by industry vs. academic) plus an FDA-status bar
+chart, embeds them in the report, and lists every tracked device/company
+in a table with human-readable metric tags (not raw `key=value` pairs)
+and its cited source. The dashboard's **Trends explorer** tab is the
+live, interactive version of the same two datasets — a Devices/Companies
+toggle, adjustable X/Y axes (including **time**, to watch a metric
+improve release over release), color by any categorical field, click a
+point to open its source.
 
 ## Papers table (filter by date, org, modality, therapeutic target, novelty)
 
@@ -401,6 +406,24 @@ than left unprocessed forever, since there's nothing more to learn
 without an LLM. The vocab above is a *suggestion* in the prompt, not a
 hard enum, so an unusual paper isn't forced into the wrong bucket — the
 filter dropdowns are populated from whatever values actually show up.
+
+## Map
+
+The same enrichment pass also asks for a **location** — "City, Country"
+for the org's relevant site/HQ, only filled in when it's actually stated
+or clearly implied by the text, never guessed. When present, it's
+geocoded for free via [OpenStreetMap/Nominatim](https://www.openstreetmap.org/copyright)
+(rate-limited to ~1 request/second per Nominatim's usage policy, cached
+in `.geocode_cache.json` so a place is only ever looked up once) and
+stored on the item.
+
+The dashboard's **Map** tab plots one marker per company/lab — sized by
+how much has been fetched about it, colored by org type — over a world
+map (client-side Plotly, like the trends charts). Click a marker to jump
+to the Papers tab pre-filtered to that org. A plain table beneath lists
+the same data for when you'd rather scan than pan/zoom. Locations aren't
+retroactive — items enriched before this feature won't have one until
+you re-run `besseleth.cli enrich --all`.
 
 ## Backfilling history
 
@@ -450,7 +473,8 @@ besseleth/
   pipeline.py        # orchestrates scrape -> personalize -> summarize -> report
   cli.py             # fetch / report / run / serve / *-add / *-delete / enrich commands
   scheduler.py        # background fetch/report jobs (used by both web.app and cli serve)
-  enrich.py            # LLM tagging (org, modality, therapeutic target, novelty) for the Papers table
+  enrich.py            # LLM tagging (org, modality, target, location, novelty) + auto-populates devices/companies.yaml
+  geocode.py            # free OpenStreetMap/Nominatim geocoding, rate-limited + cached, for the Map tab
   dedupe.py            # collapses near-duplicate items across sources before they hit the report
   scrapers/
     arxiv_scraper.py
@@ -462,12 +486,12 @@ besseleth/
     linkedin_scraper.py      # paste-in — see above
     manual_drop.py           # shared paste/upload mechanism
   trends/
-    store.py             # devices.yaml load/save + LLM-drafted suggestions
-    company_store.py     # companies.yaml load/save + free stock-price refresh
+    store.py             # devices.yaml load/save + auto-append + manual device-suggest
+    company_store.py     # companies.yaml load/save + auto-upsert + free stock-price refresh
     format.py            # human-readable metric formatting (shared by report + web)
     plot.py               # static matplotlib charts embedded in the report
   web/
-    app.py                # Flask dashboard: reports, trends, paste box, scheduler status
+    app.py                # Flask dashboard: reports, papers, map, trends, paste box, scheduler status
     templates/dashboard.html
 ```
 

@@ -1,11 +1,15 @@
 """Company-level business metrics (funding, stock price) — kept separate
 from devices.yaml since one company can ship several devices. Same
-philosophy as store.py: hand-maintained (with `source_url` citing the
-specific press release/filing, not a homepage), accumulates over time,
-never auto-written by the pipeline.
+auto-extraction philosophy as store.py: `enrich.py` drafts new entries
+from scraped items (tagged `auto_extracted: true`, `source_url` citing
+the specific article, never a homepage) and appends them via
+`auto_upsert_company()` — which only ever adds brand-new companies, never
+overwrites an existing entry (hand-edited or previously auto-extracted),
+so nothing you've corrected gets clobbered on the next fetch.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,6 +27,7 @@ class Company:
     last_funding_date: str = ""
     source_url: str = ""
     notes: str = ""
+    auto_extracted: bool = False
 
 
 def load_companies(path: str | Path = "companies.yaml") -> list[Company]:
@@ -39,6 +44,42 @@ def save_companies(companies: list[Company], path: str | Path = "companies.yaml"
     raw = [c.__dict__ for c in companies]
     with open(p, "w") as f:
         yaml.safe_dump(raw, f, sort_keys=False)
+
+
+def _normalize(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def auto_upsert_company(
+    path: str | Path,
+    name: str,
+    funding_total_usd: float | None,
+    last_funding_round: str,
+    last_funding_date: str,
+    source_url: str,
+) -> bool:
+    """Appends a new company entry if `name` isn't already present
+    (case/punctuation-insensitive); never overwrites an existing one.
+    Returns True if it appended."""
+    if not name or not (funding_total_usd or last_funding_round):
+        return False
+    companies = load_companies(path)
+    key = _normalize(name)
+    if any(_normalize(c.name) == key for c in companies):
+        return False
+    companies.append(
+        Company(
+            name=name,
+            funding_total_usd=funding_total_usd,
+            last_funding_round=last_funding_round or "",
+            last_funding_date=last_funding_date or "",
+            source_url=source_url,
+            notes="Auto-extracted by besseleth from a scraped item — verify before trusting.",
+            auto_extracted=True,
+        )
+    )
+    save_companies(companies, path)
+    return True
 
 
 def refresh_stock_prices(path: str | Path = "companies.yaml") -> list[str]:

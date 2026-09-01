@@ -181,13 +181,22 @@ contacts:
 enrichment:
   # After every fetch, besseleth asks the local LLM to tag each new
   # arXiv/news/blog item with structured metadata (org, org type,
-  # modality, therapeutic target) and a 1-5 novelty score (how
+  # modality, therapeutic target, location) and a 1-5 novelty score (how
   # surprising it is vs. other recent items on the same topic) — this is
-  # what powers the dashboard's filterable Papers table. Bounded per run
-  # so one fetch cycle can't trigger unbounded LLM calls; catches up
-  # over successive fetches if there's a backlog. Requires
+  # what powers the dashboard's filterable Papers table and Map tab.
+  # When an item reports concrete numbers, the same pass also drafts and
+  # appends entries to devices.yaml (metrics) and companies.yaml
+  # (funding) automatically — additive only, never overwrites an
+  # existing entry, and every auto-added row is tagged auto_extracted:
+  # true so it's visibly distinct from a hand-verified one. Bounded per
+  # run so one fetch cycle can't trigger unbounded LLM calls; catches up
+  # over successive fetches if there's a backlog, or run
+  # `besseleth.cli enrich --all` to process everything at once. Requires
   # summarizer.backend: "ollama" to actually extract anything — without
   # it, items are marked "unknown" rather than left unprocessed forever.
+  # Locations are geocoded for free via OpenStreetMap/Nominatim (rate-
+  # limited to ~1 req/sec per its usage policy, cached in
+  # .geocode_cache.json so a place is only ever looked up once).
   enabled: true
   max_items_per_run: 20
   sources: ["arxiv", "news", "blog"]

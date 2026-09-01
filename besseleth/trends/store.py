@@ -1,21 +1,27 @@
-"""A small, hand-maintained (or LLM-assisted) dataset of devices/systems
-in your industry, tracked over time — e.g. for neurotech, each BCI's
-information transfer rate, implant longevity, and FDA regulatory status.
+"""A dataset of devices/systems in your industry, tracked over time —
+e.g. for neurotech, each BCI's information transfer rate, implant
+longevity, and FDA regulatory status.
 
-This is deliberately NOT scraped automatically: extracting a real number
-like "information transfer rate: 62 bits/min" reliably out of a paper's
-prose is exactly the kind of thing that goes quietly wrong if fully
-automated, and industry-trend charts are the kind of thing you want to
-trust. Instead:
+`devices.yaml` (gitignored, copy from `devices.example.yaml`) is the
+single file, but two things write to it:
 
-  - `devices.yaml` (gitignored, copy from `devices.example.yaml`) is a
-    flat list you maintain by hand as you read papers/news — a couple of
-    minutes per device.
-  - `suggest_from_item()` gives you a head start: it asks the local LLM to
-    *draft* a device record from a scraped item's text (a new arXiv paper,
-    a news story) so you're editing/confirming numbers instead of typing
-    them from scratch. Nothing is added to devices.yaml automatically —
-    drafts are printed for you to review and paste in yourself.
+  - **Auto-extraction**, via `enrich.py`, after every fetch: when an
+    arXiv/news/blog item reports concrete numbers for a metric in
+    `industry.trend_metrics`, the local LLM drafts an entry and
+    `auto_append_device()` appends it — tagged `auto_extracted: true` so
+    it's visibly distinct from a hand-confirmed one, and skipped if an
+    entry with the same name+org already exists (so it never overwrites
+    something you've edited, and never re-adds a duplicate).
+  - **You**, by hand — editing an auto-extracted entry to mark it
+    reviewed (flip `auto_extracted` to `false`, or just fix a wrong
+    number), or adding one from a source that predates besseleth.
+
+This is genuinely automatic now, but stays auditable: every entry keeps
+its `source_url` (the actual paper/article, never a homepage) so a wrong
+auto-extracted number is easy to spot-check and fix, rather than
+untraceable. `suggest_from_item()` remains available for a manual,
+review-before-adding path if you'd rather not trust auto-extraction for
+a given item.
 
 The schema is intentionally generic (`metrics: {key: value}` + free-text
 `fda_status`) so it isn't neurotech-specific — swap the metric keys for
@@ -23,6 +29,7 @@ whatever your industry tracks (e.g. "battery_life_hours", "accuracy_pct").
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -40,6 +47,7 @@ class Device:
     source_url: str = ""
     date_reported: str = ""
     notes: str = ""
+    auto_extracted: bool = False
 
 
 def load_devices(path: str | Path = "devices.yaml") -> list[Device]:
@@ -64,10 +72,53 @@ def append_device(device: Device, path: str | Path = "devices.yaml"):
     save_devices(devices, path)
 
 
+def _normalize(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def auto_append_device(
+    path: str | Path,
+    name: str,
+    org: str,
+    org_type: str,
+    fda_status: str,
+    metrics: dict[str, Any],
+    source_url: str,
+    date_reported: str,
+) -> bool:
+    """Appends a new, LLM-drafted device entry — unless one with the same
+    (normalized) name+org already exists, in which case this is a no-op:
+    existing entries (auto-extracted or hand-edited) are never overwritten.
+    Returns True if it appended."""
+    if not name or not org or not metrics:
+        return False
+    devices = load_devices(path)
+    key = (_normalize(name), _normalize(org))
+    if any((_normalize(d.name), _normalize(d.org)) == key for d in devices):
+        return False
+    devices.append(
+        Device(
+            name=name,
+            org=org,
+            org_type=org_type or "unknown",
+            fda_status=fda_status or "unknown",
+            metrics={k: v for k, v in metrics.items() if v is not None},
+            source_url=source_url,
+            date_reported=date_reported,
+            notes="Auto-extracted by besseleth from a scraped item — verify before trusting.",
+            auto_extracted=True,
+        )
+    )
+    save_devices(devices, path)
+    return True
+
+
 def suggest_from_item(item, trend_metrics: list[dict], summarizer_cfg: dict) -> str | None:
     """Asks the local LLM to draft a Device YAML block from a scraped
     item's text. Returns the raw drafted YAML (for the user to review and
-    paste into devices.yaml), or None if it's unavailable/fails."""
+    paste into devices.yaml), or None if it's unavailable/fails. A manual
+    alternative to auto-extraction, for anyone who'd rather review every
+    entry before it's added."""
     from .. import summarizer as summarizer_mod
 
     metric_keys = ", ".join(f"{m['key']} ({m.get('unit', '')})" for m in trend_metrics)
