@@ -11,6 +11,8 @@ Usage:
     python -m besseleth.cli device-suggest --item-id <id>  # draft a devices.yaml entry from a scraped item
     python -m besseleth.cli company-refresh-stock          # update stock_price for companies.yaml's tickers (free)
     python -m besseleth.cli report-delete <report-id>       # e.g. report-delete 2026-09-01
+    python -m besseleth.cli item-delete --item-id <id>       # remove a pasted (or any) item outright
+    python -m besseleth.cli enrich [--all]                   # tag arXiv/news/blog items for the Papers table
     python -m besseleth.cli serve          [--config config.yaml]   # run continuously per `schedule` in config.yaml
 
 `serve` is the "regularly updating" mode — start it once (e.g. as a
@@ -63,6 +65,8 @@ COMMANDS = [
     "device-suggest",
     "company-refresh-stock",
     "report-delete",
+    "item-delete",
+    "enrich",
     "serve",
 ]
 
@@ -82,6 +86,9 @@ def main(argv=None):
     parser.add_argument("--item-id", default=None, help="Item id to draft a devices.yaml entry from (device-suggest)")
     parser.add_argument(
         "--since", default=None, help="Backfill from this date (YYYY-MM-DD) instead of each source's usual days_back."
+    )
+    parser.add_argument(
+        "--all", action="store_true", help="For `enrich`: process the whole backlog, ignoring max_items_per_run."
     )
     args = parser.parse_args(argv)
 
@@ -123,6 +130,34 @@ def main(argv=None):
             print("[cli] No companies with a stock_ticker set in companies.yaml.")
         for line in log:
             print(f"[cli] {line}")
+        return
+
+    if args.command == "enrich":
+        from .enrich import enrich_items
+
+        db = DB(config.db_path)
+        try:
+            if args.all:
+                config.raw.setdefault("enrichment", {})["max_items_per_run"] = 1_000_000
+            n = enrich_items(config, db)
+            print(f"[cli] Enriched {n} item(s).")
+        finally:
+            db.close()
+        return
+
+    if args.command == "item-delete":
+        if not args.item_id:
+            print("[cli] Usage: besseleth.cli item-delete --item-id <id>", file=sys.stderr)
+            sys.exit(1)
+        db = DB(config.db_path)
+        try:
+            if db.delete_item(args.item_id):
+                print(f"[cli] Deleted item {args.item_id}.")
+            else:
+                print(f"[cli] No item found with id {args.item_id!r}.", file=sys.stderr)
+                sys.exit(1)
+        finally:
+            db.close()
         return
 
     if args.command == "report-delete":

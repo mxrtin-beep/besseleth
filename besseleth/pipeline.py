@@ -16,6 +16,8 @@ from .scrapers import (
     social_scraper,
 )
 from . import report as report_mod
+from .dedupe import merge_near_duplicates
+from .enrich import enrich_items
 from .trends import company_store
 from .trends import store as trend_store
 from .trends import plot as trend_plot
@@ -90,6 +92,9 @@ def fetch_all(config: Config, db: DB, since: date | None = None) -> dict[str, li
         items = linkedin_scraper.fetch(config, linkedin_cfg)
         results["linkedin"] = _dedupe_and_store(items, db)
 
+    print("[pipeline] Enriching papers/news/blog items (org, modality, therapeutic target, novelty)...")
+    enrich_items(config, db)
+
     return results
 
 
@@ -123,15 +128,27 @@ def generate_weekly_report(config: Config, db: DB) -> str:
             )
         )
 
-    all_items = [i for src in SOURCES for i in items_by_source[src]]
+    all_items_raw = [i for src in SOURCES for i in items_by_source[src]]
+
+    # Collapse near-duplicates across sources (e.g. a pasted LinkedIn post
+    # about the same story as a scraped news article) into one item, so
+    # the report doesn't repeat the same fact twice. The kept item's
+    # summary absorbs any distinct detail from the ones it swallows.
+    all_items, dropped_by_kept = merge_near_duplicates(all_items_raw)
+    dropped_ids = {did for ids in dropped_by_kept.values() for did in ids}
+    if dropped_ids:
+        print(f"[pipeline] Merged {len(dropped_ids)} near-duplicate item(s) into {len(dropped_by_kept)} kept item(s).")
+    for src in items_by_source:
+        items_by_source[src] = [i for i in items_by_source[src] if i.id not in dropped_ids]
+
     personalize_items(all_items, config.contacts)
     personalized = [i for i in all_items if i.matched_contact]
 
-    # Persist personalization matches back to the DB.
-    for i in personalized:
+    # Persist personalization matches (and merged summaries) back to the DB.
+    for i in all_items:
         db.conn.execute(
-            "UPDATE items SET matched_contact = ?, matched_company = ? WHERE id = ?",
-            (i.matched_contact, i.matched_company, i.id),
+            "UPDATE items SET matched_contact = ?, matched_company = ?, summary = ? WHERE id = ?",
+            (i.matched_contact, i.matched_company, i.summary, i.id),
         )
     db.conn.commit()
 
@@ -170,7 +187,10 @@ def generate_weekly_report(config: Config, db: DB) -> str:
     report_mod.email_report(markdown, report_id, config.industry_name, report_cfg.get("email", {}))
     _prune_old_reports(config)
 
-    all_ids = [i.id for i in all_items]
+    # Mark kept items AND the duplicates merged into them as reported —
+    # a dropped duplicate's content is now folded into its winner, so it
+    # shouldn't linger "unreported" and get re-considered every future run.
+    all_ids = [i.id for i in all_items] + list(dropped_ids)
     db.mark_reported(all_ids, report_id)
 
     print(f"[pipeline] Report written to {path}")

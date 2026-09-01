@@ -105,6 +105,34 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             ]
         )
 
+    @app.get("/api/papers")
+    def api_papers():
+        db = DB(config.db_path)
+        try:
+            rows = db.papers(config.raw.get("enrichment", {}).get("sources", ["arxiv", "news", "blog"]))
+        finally:
+            db.close()
+        return jsonify(
+            [
+                {
+                    "id": r["id"],
+                    "source": r["source"],
+                    "title": r["title"],
+                    "url": r["url"],
+                    "published_at": r["published_at"],
+                    "matched_keywords": (r["matched_keywords"] or "").split(",") if r["matched_keywords"] else [],
+                    "org": r["org"],
+                    "org_type": r["org_type"],
+                    "modality": r["modality"],
+                    "therapeutic_target": r["therapeutic_target"],
+                    "novelty_score": r["novelty_score"],
+                    "novelty_rationale": r["novelty_rationale"],
+                    "enriched": r["enriched_at"] is not None,
+                }
+                for r in rows
+            ]
+        )
+
     @app.get("/api/metrics")
     def api_metrics():
         # Axis options for the trend explorer: config-defined numeric
@@ -145,6 +173,17 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         run_now(config, status)
         return jsonify(status.as_dict())
 
+    @app.post("/api/enrich")
+    def api_enrich():
+        from ..enrich import enrich_items
+
+        db = DB(config.db_path)
+        try:
+            n = enrich_items(config, db)
+        finally:
+            db.close()
+        return jsonify({"ok": True, "enriched": n})
+
     @app.post("/api/backfill")
     def api_backfill():
         status = app.config["BESSELETH_STATUS"]
@@ -184,6 +223,39 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         finally:
             db.close()
         return jsonify({"ok": True, "title": item.title, "id": item.id, "detected_as": detected_label})
+
+    @app.get("/api/pasted")
+    def api_pasted():
+        db = DB(config.db_path)
+        try:
+            rows = db.manual_items(["linkedin", "event", "social", "clip"])
+        finally:
+            db.close()
+        return jsonify(
+            [
+                {
+                    "id": r["id"],
+                    "source": r["source"],
+                    "title": r["title"],
+                    "url": r["url"],
+                    "summary": r["summary"],
+                    "fetched_at": r["fetched_at"],
+                    "included_in_report": r["included_in_report"],
+                }
+                for r in rows
+            ]
+        )
+
+    @app.delete("/api/item/<item_id>")
+    def api_delete_item(item_id):
+        db = DB(config.db_path)
+        try:
+            deleted = db.delete_item(item_id)
+        finally:
+            db.close()
+        if not deleted:
+            abort(404)
+        return jsonify({"ok": True, "deleted": item_id})
 
     return app
 

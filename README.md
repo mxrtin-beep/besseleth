@@ -171,6 +171,11 @@ doing and when. Two tabs:
 
 - **Report** — the latest (or any past) report, rendered from Markdown;
   delete old ones from the sidebar.
+- **Papers** — every arXiv/news/blog item besseleth has ever fetched, in
+  one browsable table — not just this week's snapshot. Filter by date
+  range, source, org, org type (industry/academic/government/nonprofit),
+  modality, therapeutic target, and a minimum novelty score; sort by date
+  or novelty. See "Papers table" below for what populates the columns.
 - **Trends explorer** — devices and companies as an interactive chart
   (Plotly, client-side, no static PNGs) — a Devices/Companies toggle
   switches dataset. Pick any metric for the X axis — including **time**
@@ -206,6 +211,20 @@ rather than guessing wrong. You never have to pick which source it is;
 just paste. The same thing works from the CLI: `besseleth.cli paste`
 (reads stdin, or `--text`/`--url`), or force a specific source with
 `linkedin-add`/`event-add`/`social-add` if you want to skip detection.
+
+The Paste tab also lists everything you've pasted so far, newest first,
+with a 🗑 to delete one outright — unlike a scraped item (which would just
+come back on the next fetch), a paste is only ever removed if you remove
+it. Same from the CLI: `besseleth.cli item-delete --item-id <id>`.
+
+**Avoiding duplicate coverage**: a pasted item goes into the same pool as
+everything scraped, so if you paste a LinkedIn post about a funding round
+that a news feed also picked up, besseleth notices the overlap (by title
+similarity, across all sources, not just within one) before building the
+report and merges them into a single entry — keeping the more detailed
+summary, folding in anything materially different from the other, and
+noting `(Also reported via: linkedin)` so the merge is visible rather
+than one version silently vanishing. See `besseleth/dedupe.py`.
 
 Prefer files over a browser tab open? The same content also works dropped
 as `.txt`/`.md` files into `linkedin_drops/`, `event_drops/`, or
@@ -347,6 +366,42 @@ for you to review and paste in — nothing is written automatically.
 .venv/bin/python -m besseleth.cli device-suggest --item-id <id-from-report-or-db>
 ```
 
+## Papers table (filter by date, org, modality, therapeutic target, novelty)
+
+Unlike the weekly report (a rolling snapshot of what's new), the
+dashboard's **Papers** tab is a standing index of every arXiv/news/blog
+item besseleth has ever fetched, filterable and sortable. After each
+fetch, besseleth asks the local LLM to tag every new item with:
+
+- **org** — the company/lab/institution the item is about
+- **org_type** — industry / academic / government / nonprofit / unknown
+- **modality** — EEG, ECoG, CNS implant, PNS implant, EMG, fMRI, fNIRS,
+  or another short label if none fit
+- **therapeutic_target** — what it addresses: motor, speech, vision,
+  hearing, memory, mood/psychiatric, epilepsy, pain, other
+- **novelty_score** (1-5) — how surprising the item is **compared to
+  other recent items on the same topic** (besseleth pulls a handful of
+  similar items from the DB and includes them in the prompt so the score
+  is relative, not just "does this sound impressive in isolation"),
+  with a one-sentence rationale shown on hover
+
+This is bounded per fetch (`enrichment.max_items_per_run`, default 20) so
+one fetch cycle can't trigger unbounded LLM calls — it catches up over
+successive fetches if there's a backlog, or run it against everything at
+once:
+
+```bash
+.venv/bin/python -m besseleth.cli enrich --all
+```
+
+...or hit **Enrich now** on the Papers tab. Requires
+`summarizer.backend: "ollama"` to actually extract anything (Ollama
+running) — without it, items are marked `org_type: unknown` etc. rather
+than left unprocessed forever, since there's nothing more to learn
+without an LLM. The vocab above is a *suggestion* in the prompt, not a
+hard enum, so an unusual paper isn't forced into the wrong bucket — the
+filter dropdowns are populated from whatever values actually show up.
+
 ## Backfilling history
 
 Each source's `days_back` in config.yaml controls its normal lookback
@@ -393,8 +448,10 @@ besseleth/
   summarizer.py      # Ollama-backed (or extractive) summaries
   report.py          # markdown rendering + email
   pipeline.py        # orchestrates scrape -> personalize -> summarize -> report
-  cli.py             # fetch / report / run / serve / *-add / device-suggest commands
+  cli.py             # fetch / report / run / serve / *-add / *-delete / enrich commands
   scheduler.py        # background fetch/report jobs (used by both web.app and cli serve)
+  enrich.py            # LLM tagging (org, modality, therapeutic target, novelty) for the Papers table
+  dedupe.py            # collapses near-duplicate items across sources before they hit the report
   scrapers/
     arxiv_scraper.py
     news_scraper.py

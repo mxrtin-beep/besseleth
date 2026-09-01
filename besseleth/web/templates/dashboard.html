@@ -87,11 +87,39 @@
 
   <div class="tabs">
     <button id="tabReport" class="active">Report</button>
+    <button id="tabPapers">Papers</button>
     <button id="tabTrends">Trends explorer</button>
     <button id="tabPaste">Paste</button>
   </div>
 
   <div id="reportPane"><p class="hint">Pick a report from the sidebar.</p></div>
+
+  <div id="papersPane" style="display:none">
+    <p class="hint">Every arXiv/news/blog item besseleth has ever fetched, in one browsable, filterable table —
+      not just this week's. Org, modality, and therapeutic target are extracted by the local LLM after each fetch
+      (bounded per run — <code>besseleth.cli enrich --all</code> catches up a backlog); the novelty score rates
+      how surprising an item is compared to other recent items on the same topic.
+      <button class="btn" id="enrichNowBtn" style="margin-left:.5rem">Enrich now</button>
+    </p>
+    <div class="controls">
+      <div><label for="pfFrom">From</label><input type="date" id="pfFrom"></div>
+      <div><label for="pfTo">To</label><input type="date" id="pfTo"></div>
+      <div><label for="pfSource">Source</label><select id="pfSource"><option value="">All</option></select></div>
+      <div><label for="pfOrgType">Org type</label><select id="pfOrgType"><option value="">All</option></select></div>
+      <div><label for="pfOrg">Org</label><select id="pfOrg"><option value="">All</option></select></div>
+      <div><label for="pfModality">Modality</label><select id="pfModality"><option value="">All</option></select></div>
+      <div><label for="pfTarget">Therapeutic target</label><select id="pfTarget"><option value="">All</option></select></div>
+      <div><label for="pfNovelty">Min novelty</label><select id="pfNovelty">
+        <option value="0">Any</option><option value="1">1+</option><option value="2">2+</option>
+        <option value="3">3+</option><option value="4">4+</option><option value="5">5 only</option>
+      </select></div>
+      <div><label for="pfSort">Sort by</label><select id="pfSort">
+        <option value="date">Date (newest)</option><option value="novelty">Novelty (highest)</option>
+      </select></div>
+    </div>
+    <p class="hint" id="papersCount"></p>
+    <table class="datatable" id="papersTable"></table>
+  </div>
 
   <div id="trendsPane" style="display:none">
     <div class="controls">
@@ -139,26 +167,38 @@
       <div><button class="btn" id="pasteBtn">Add</button></div>
     </div>
     <div id="pasteResult"></div>
+
+    <h3 style="margin-top:2rem; font-size:1rem;">Recently pasted</h3>
+    <p class="hint">Deleting here removes it outright — unlike scraped items, a paste can't be re-fetched, so this
+      is the way to take one back (wrong link, changed your mind, duplicate).</p>
+    <table class="datatable" id="pastedTable"></table>
   </div>
 </main>
 
 <script>
 const reportPane = document.getElementById('reportPane');
+const papersPane = document.getElementById('papersPane');
 const trendsPane = document.getElementById('trendsPane');
 const pastePane = document.getElementById('pastePane');
 const tabReport = document.getElementById('tabReport');
+const tabPapers = document.getElementById('tabPapers');
 const tabTrends = document.getElementById('tabTrends');
 const tabPaste = document.getElementById('tabPaste');
 
 function showTab(which) {
   reportPane.style.display = which === 'report' ? 'block' : 'none';
+  papersPane.style.display = which === 'papers' ? 'block' : 'none';
   trendsPane.style.display = which === 'trends' ? 'block' : 'none';
   pastePane.style.display = which === 'paste' ? 'block' : 'none';
   tabReport.classList.toggle('active', which === 'report');
+  tabPapers.classList.toggle('active', which === 'papers');
   tabTrends.classList.toggle('active', which === 'trends');
   tabPaste.classList.toggle('active', which === 'paste');
+  if (which === 'papers' && !papersLoaded) loadPapers();
+  if (which === 'paste') loadPasted();
 }
 tabReport.onclick = () => showTab('report');
+tabPapers.onclick = () => showTab('papers');
 tabTrends.onclick = () => showTab('trends');
 tabPaste.onclick = () => showTab('paste');
 
@@ -298,6 +338,7 @@ document.getElementById('pasteBtn').onclick = async () => {
       result.textContent = `Added as ${data.detected_as}: "${data.title}". It'll appear in the next report.`;
       document.getElementById('pasteText').value = '';
       document.getElementById('pasteUrl').value = '';
+      loadPasted();
     } else {
       result.className = 'err';
       result.textContent = data.message || 'Failed to add.';
@@ -307,6 +348,137 @@ document.getElementById('pasteBtn').onclick = async () => {
     result.textContent = 'Failed to add — see server log.';
   }
 };
+
+const SOURCE_LABELS = { linkedin: 'LinkedIn', event: 'Event', social: 'Social', clip: 'Clipped' };
+
+async function loadPasted() {
+  const res = await fetch('/api/pasted');
+  const items = await res.json();
+  const table = document.getElementById('pastedTable');
+  if (!items.length) {
+    table.innerHTML = '<tbody><tr><td class="hint">Nothing pasted yet.</td></tr></tbody>';
+    return;
+  }
+  table.innerHTML = `
+    <thead><tr><th>Added</th><th>Source</th><th>Title / snippet</th><th>Report</th><th></th></tr></thead>
+    <tbody>${items.map(it => `
+      <tr data-item-row="${it.id}">
+        <td>${(it.fetched_at || '').slice(0, 16).replace('T', ' ')}</td>
+        <td>${SOURCE_LABELS[it.source] || it.source}</td>
+        <td>${it.url ? `<a href="${it.url}" target="_blank" rel="noopener">${it.title}</a>` : it.title}<br>
+            <span class="hint">${(it.summary || '').slice(0, 140)}${(it.summary || '').length > 140 ? '…' : ''}</span></td>
+        <td>${it.included_in_report ? it.included_in_report : '<span class="hint">not yet</span>'}</td>
+        <td><button class="delBtn" data-del-item="${it.id}" title="Delete">🗑</button></td>
+      </tr>`).join('')}</tbody>`;
+  table.querySelectorAll('[data-del-item]').forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm('Delete this pasted item? This removes it outright.')) return;
+      await fetch(`/api/item/${btn.dataset.delItem}`, { method: 'DELETE' });
+      document.querySelector(`[data-item-row="${btn.dataset.delItem}"]`)?.remove();
+    };
+  });
+}
+
+// --- Papers table ----------------------------------------------------
+let papersLoaded = false;
+let papers = [];
+
+function uniqueSorted(values) {
+  return [...new Set(values.filter(v => v))].sort();
+}
+
+function populateSelect(id, values) {
+  const sel = document.getElementById(id);
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All</option>' + values.map(v => `<option value="${v}">${v}</option>`).join('');
+  if (values.includes(current)) sel.value = current;
+}
+
+async function loadPapers() {
+  papersLoaded = true;
+  const res = await fetch('/api/papers');
+  papers = await res.json();
+  populateSelect('pfSource', uniqueSorted(papers.map(p => p.source)));
+  populateSelect('pfOrgType', uniqueSorted(papers.map(p => p.org_type)));
+  populateSelect('pfOrg', uniqueSorted(papers.map(p => p.org)));
+  populateSelect('pfModality', uniqueSorted(papers.map(p => p.modality)));
+  populateSelect('pfTarget', uniqueSorted(papers.map(p => p.therapeutic_target)));
+  ['pfFrom', 'pfTo', 'pfSource', 'pfOrgType', 'pfOrg', 'pfModality', 'pfTarget', 'pfNovelty', 'pfSort']
+    .forEach(id => document.getElementById(id).onchange = renderPapers);
+  renderPapers();
+}
+
+document.getElementById('enrichNowBtn').onclick = async (ev) => {
+  const btn = ev.target;
+  btn.disabled = true;
+  btn.textContent = 'Enriching…';
+  try {
+    const res = await fetch('/api/enrich', { method: 'POST' });
+    const data = await res.json();
+    papersLoaded = false;
+    await loadPapers();
+    btn.textContent = `Enrich now (+${data.enriched})`;
+  } catch (e) {
+    btn.textContent = 'Enrich now (failed)';
+  } finally {
+    setTimeout(() => { btn.disabled = false; btn.textContent = 'Enrich now'; }, 2500);
+  }
+};
+
+function novelBadge(score) {
+  if (score === null || score === undefined) return '<span class="hint">—</span>';
+  const colors = { 1: '#8886', 2: '#8886', 3: '#e9c46a55', 4: '#f4a26155', 5: '#e7636355' };
+  return `<span class="metric-tag" style="background:${colors[score] || '#8886'}">${score}/5</span>`;
+}
+
+function renderPapers() {
+  const from = document.getElementById('pfFrom').value;
+  const to = document.getElementById('pfTo').value;
+  const source = document.getElementById('pfSource').value;
+  const orgType = document.getElementById('pfOrgType').value;
+  const org = document.getElementById('pfOrg').value;
+  const modality = document.getElementById('pfModality').value;
+  const target = document.getElementById('pfTarget').value;
+  const minNovelty = parseInt(document.getElementById('pfNovelty').value, 10);
+  const sortBy = document.getElementById('pfSort').value;
+
+  let rows = papers.filter(p => {
+    const d = (p.published_at || '').slice(0, 10);
+    if (from && d < from) return false;
+    if (to && d > to) return false;
+    if (source && p.source !== source) return false;
+    if (orgType && p.org_type !== orgType) return false;
+    if (org && p.org !== org) return false;
+    if (modality && p.modality !== modality) return false;
+    if (target && p.therapeutic_target !== target) return false;
+    if (minNovelty === 5 && p.novelty_score !== 5) return false;
+    if (minNovelty > 0 && minNovelty < 5 && (p.novelty_score || 0) < minNovelty) return false;
+    return true;
+  });
+
+  rows = rows.slice().sort((a, b) => {
+    if (sortBy === 'novelty') return (b.novelty_score || 0) - (a.novelty_score || 0);
+    return (b.published_at || '').localeCompare(a.published_at || '');
+  });
+
+  document.getElementById('papersCount').textContent =
+    `${rows.length} of ${papers.length} items` + (papers.some(p => !p.enriched) ? ' (some not yet enriched)' : '');
+
+  const table = document.getElementById('papersTable');
+  table.innerHTML = `
+    <thead><tr><th>Date</th><th>Title</th><th>Source</th><th>Org</th><th>Org type</th><th>Modality</th><th>Target</th><th>Novelty</th></tr></thead>
+    <tbody>${rows.map(p => `
+      <tr>
+        <td>${(p.published_at || '').slice(0, 10)}</td>
+        <td>${p.url ? `<a href="${p.url}" target="_blank" rel="noopener">${p.title}</a>` : p.title}</td>
+        <td>${p.source}</td>
+        <td>${p.org || (p.enriched ? '—' : '<span class="hint">pending</span>')}</td>
+        <td>${p.org_type || ''}</td>
+        <td>${p.modality || ''}</td>
+        <td>${p.therapeutic_target || ''}</td>
+        <td title="${p.novelty_rationale || ''}">${novelBadge(p.novelty_score)}</td>
+      </tr>`).join('')}</tbody>`;
+}
 
 // --- Trends explorer (devices + companies) -------------------------------
 let metricsData = { numeric: [], categorical: [], company_numeric: [] };

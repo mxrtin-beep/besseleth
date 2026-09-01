@@ -97,16 +97,19 @@ sources:
     # add `news_feed` (an RSS/Atom feed the conference itself publishes —
     # accepted-talk announcements, CFP deadlines, its own blog) and those
     # get pulled in as a separate "conference news" section.
+    #
+    # ⚠️ Verify every URL below yourself before relying on it — these were
+    # written from general knowledge, not confirmed by browsing, and
+    # conference URLs/dates change. SfN and the BCI Society are real
+    # organizations; the exact URL/month may have moved. Delete anything
+    # you haven't checked, and add the real events for your industry.
     watchlist:
       - name: "Society for Neuroscience (SfN) Annual Meeting"
         url: "https://www.sfn.org/meetings"
-        month: "October"
+        month: "October"    # verify — SfN's meeting date varies by year
       - name: "BCI Society Meeting"
         url: "https://bcisociety.org/"
-        month: "June"
-      - name: "Neurotech Leaders Forum"
-        url: "https://neurotechleadersforum.com/"
-        month: "November"
+        month: "June"       # verify — check bcisociety.org for the current date
 
   # IRL events near you — meetups, demo nights, local talks. See
   # besseleth/scrapers/events_scraper.py for the real capabilities/limits
@@ -116,12 +119,11 @@ sources:
   events:
     enabled: true
     dropbox_dir: "event_drops"
-    # Recurring meetups/series you already know about.
-    watchlist:
-      - name: "Neurotech SF Meetup"
-        url: "https://lu.ma/neurotech-sf"
-        location: "San Francisco, CA"
-        cadence: "Monthly"
+    # Recurring meetups/series you already know about. Empty by default —
+    # add your own; don't invent one. Find yours by searching Luma/
+    # Eventbrite/Meetup for your industry + your city, e.g. "neurotech
+    # meetup san francisco" on lu.ma, then paste the real URL here.
+    watchlist: []
     luma:
       # .ics feed URL per Luma calendar you follow — see the "Subscribe"
       # button on the calendar's page for the link.
@@ -175,6 +177,20 @@ contacts:
   - name: "Sam Lee"
     company: "Synchron"
     role: "Product Manager"
+
+enrichment:
+  # After every fetch, besseleth asks the local LLM to tag each new
+  # arXiv/news/blog item with structured metadata (org, org type,
+  # modality, therapeutic target) and a 1-5 novelty score (how
+  # surprising it is vs. other recent items on the same topic) — this is
+  # what powers the dashboard's filterable Papers table. Bounded per run
+  # so one fetch cycle can't trigger unbounded LLM calls; catches up
+  # over successive fetches if there's a backlog. Requires
+  # summarizer.backend: "ollama" to actually extract anything — without
+  # it, items are marked "unknown" rather than left unprocessed forever.
+  enabled: true
+  max_items_per_run: 20
+  sources: ["arxiv", "news", "blog"]
 
 summarizer:
   # Uses a local LLM via Ollama (https://ollama.ai) — free, runs offline.
