@@ -15,6 +15,7 @@ A weekly industry-briefing bot. Point it at an industry (e.g.
 - **Summarizes** each section with a free local LLM via [Ollama](https://ollama.ai) — falls back to a plain extractive summary if Ollama isn't running, so it never blocks
 - Writes a Markdown report to `reports/`, and can email it via SMTP
 - Dedupes across runs in a local SQLite DB, so re-running never repeats old items
+- Ships a **browser dashboard** (`besseleth.web.app`) to read reports and explore the trends dataset as an interactive, adjustable-axis chart with a source link on every data point
 
 ## Setup
 
@@ -103,6 +104,36 @@ approval: https://learn.microsoft.com/en-us/linkedin/
 **4. Company newsroom/blog RSS feeds** — a free substitute for "what's
 happening at company X". Add these to `sources.news.feeds` in
 `config.yaml` and they flow through the normal news pipeline.
+
+## Browser dashboard
+
+```bash
+.venv/bin/python -m besseleth.web.app
+# -> http://127.0.0.1:5050
+```
+
+Local-only (no auth, don't expose it on the open internet as-is), and it's
+a viewer, not a second pipeline — it reads the same `reports/`,
+`devices.yaml`, and `config.yaml` the CLI writes/uses, so run `besseleth.cli
+run` first. Two tabs:
+
+- **Report** — the latest (or any past) weekly report, rendered from
+  Markdown.
+- **Trends explorer** — the device dataset as an interactive chart
+  (Plotly, client-side, no static PNGs): pick any metric for the X axis
+  — including **time** (`date_reported`), to see e.g. information transfer
+  rate improving release over release — and any metric for the Y axis,
+  color by FDA status or industry/academic. Hover a point to see its
+  device/org; click it to open its `source_url` in a new tab. A plain
+  table below repeats every point with an explicit source link, so
+  nothing here is a number without a citation.
+
+Uses Plotly.js from a CDN (`cdn.jsdelivr.net`), so it needs internet
+access once, in the browser, to load the chart library — the report tab
+and device table work regardless. To run fully offline, download
+[`plotly.js-dist-min`](https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.32.0/plotly.min.js)
+to `besseleth/web/static/plotly.min.js` and change the `<script src=...>`
+in `besseleth/web/templates/dashboard.html` to `/static/plotly.min.js`.
 
 ## What can I paste in? (LinkedIn, events, social)
 
@@ -241,7 +272,10 @@ besseleth/
     manual_drop.py           # shared paste/upload mechanism
   trends/
     store.py           # devices.yaml load/save + LLM-drafted suggestions
-    plot.py             # matplotlib charts for the report
+    plot.py             # static matplotlib charts embedded in the report
+  web/
+    app.py              # Flask dashboard: report viewer + interactive trends
+    templates/dashboard.html
 ```
 
 ## Notes

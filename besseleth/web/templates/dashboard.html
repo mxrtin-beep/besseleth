@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ industry }} — besseleth</title>
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.32.0/plotly.min.js"></script>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; display: flex; height: 100vh; }
+  aside { width: 240px; border-right: 1px solid #8883; padding: 1rem; overflow-y: auto; flex-shrink: 0; }
+  main { flex: 1; overflow-y: auto; padding: 1.5rem 2rem; }
+  h1 { font-size: 1.3rem; margin: 0 0 1rem; }
+  nav button { display: block; width: 100%; text-align: left; padding: .5rem; margin-bottom: .25rem;
+               border: none; background: none; cursor: pointer; border-radius: 6px; font-size: .9rem; }
+  nav button:hover, nav button.active { background: #8882; }
+  .tabs { display: flex; gap: .5rem; margin-bottom: 1rem; border-bottom: 1px solid #8883; }
+  .tabs button { padding: .5rem 1rem; border: none; background: none; cursor: pointer; font-size: .95rem;
+                 border-bottom: 2px solid transparent; }
+  .tabs button.active { border-bottom-color: #4a90d9; font-weight: 600; }
+  .controls { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: end; }
+  .controls label { display: block; font-size: .8rem; opacity: .75; margin-bottom: .25rem; }
+  select { padding: .35rem .5rem; border-radius: 6px; border: 1px solid #8886; font-size: .9rem; }
+  #chart { width: 100%; height: 560px; }
+  #reportPane img { max-width: 100%; }
+  table.devtable { border-collapse: collapse; width: 100%; margin-top: 1rem; font-size: .85rem; }
+  table.devtable th, table.devtable td { border: 1px solid #8883; padding: .4rem .6rem; text-align: left; }
+  .hint { opacity: .65; font-size: .85rem; }
+  a { color: #4a90d9; }
+</style>
+</head>
+<body>
+<aside>
+  <h1>{{ industry }}</h1>
+  <p class="hint">Weekly reports</p>
+  <nav id="reportNav">
+    {% for rid in report_ids %}
+    <button data-report="{{ rid }}">{{ rid }}</button>
+    {% else %}
+    <p class="hint">No reports yet — run <code>besseleth.cli run</code>.</p>
+    {% endfor %}
+  </nav>
+</aside>
+<main>
+  <div class="tabs">
+    <button id="tabReport" class="active">Report</button>
+    <button id="tabTrends">Trends explorer</button>
+  </div>
+
+  <div id="reportPane"><p class="hint">Pick a report from the sidebar.</p></div>
+
+  <div id="trendsPane" style="display:none">
+    <div class="controls">
+      <div>
+        <label for="xAxis">X axis</label>
+        <select id="xAxis"></select>
+      </div>
+      <div>
+        <label for="yAxis">Y axis</label>
+        <select id="yAxis"></select>
+      </div>
+      <div>
+        <label for="colorBy">Color by</label>
+        <select id="colorBy">
+          <option value="fda_status">FDA status</option>
+          <option value="org_type">Org type</option>
+        </select>
+      </div>
+    </div>
+    <div id="chart"></div>
+    <p class="hint">Hover a point for its source; click it to open the source link.</p>
+    <table class="devtable" id="devTable">
+      <thead><tr><th>Device</th><th>Org</th><th>Type</th><th>FDA status</th><th>Metrics</th><th>Reported</th><th>Source</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</main>
+
+<script>
+const reportPane = document.getElementById('reportPane');
+const trendsPane = document.getElementById('trendsPane');
+const tabReport = document.getElementById('tabReport');
+const tabTrends = document.getElementById('tabTrends');
+
+function showTab(which) {
+  reportPane.style.display = which === 'report' ? 'block' : 'none';
+  trendsPane.style.display = which === 'trends' ? 'block' : 'none';
+  tabReport.classList.toggle('active', which === 'report');
+  tabTrends.classList.toggle('active', which === 'trends');
+}
+tabReport.onclick = () => showTab('report');
+tabTrends.onclick = () => showTab('trends');
+
+document.querySelectorAll('#reportNav button').forEach(btn => {
+  btn.onclick = async () => {
+    document.querySelectorAll('#reportNav button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    showTab('report');
+    const res = await fetch(`/api/report/${btn.dataset.report}`);
+    const data = await res.json();
+    reportPane.innerHTML = data.html;
+  };
+});
+{% if report_ids %}
+document.querySelector('#reportNav button').click();
+{% endif %}
+
+// --- Trends explorer -------------------------------------------------
+let metricsMeta = [];
+let devices = [];
+
+async function loadTrends() {
+  const [metricsRes, devicesRes] = await Promise.all([fetch('/api/metrics'), fetch('/api/devices')]);
+  const metricsData = await metricsRes.json();
+  devices = await devicesRes.json();
+  metricsMeta = metricsData.numeric;
+
+  const xSel = document.getElementById('xAxis');
+  const ySel = document.getElementById('yAxis');
+  const options = [metricsData.time_axis, ...metricsMeta];
+  xSel.innerHTML = options.map(m => `<option value="${m.key}">${m.label}${m.unit ? ' (' + m.unit + ')' : ''}</option>`).join('');
+  ySel.innerHTML = metricsMeta.map(m => `<option value="${m.key}">${m.label}${m.unit ? ' (' + m.unit + ')' : ''}</option>`).join('');
+  // sensible defaults: time on X, first numeric metric on Y
+  xSel.value = 'date_reported';
+  if (metricsMeta.length) ySel.value = metricsMeta[0].key;
+
+  xSel.onchange = renderChart;
+  ySel.onchange = renderChart;
+  document.getElementById('colorBy').onchange = renderChart;
+  renderTable();
+  renderChart();
+}
+
+function labelFor(key) {
+  if (key === 'date_reported') return 'Date reported';
+  const m = metricsMeta.find(m => m.key === key);
+  return m ? `${m.label}${m.unit ? ' (' + m.unit + ')' : ''}` : key;
+}
+
+function renderChart() {
+  if (typeof Plotly === 'undefined') {
+    document.getElementById('chart').innerHTML =
+      '<p class="hint">Chart library failed to load from the CDN (no internet access?). ' +
+      'The device table below still works. See README for how to vendor plotly.min.js locally.</p>';
+    return;
+  }
+  const xKey = document.getElementById('xAxis').value;
+  const yKey = document.getElementById('yAxis').value;
+  const colorBy = document.getElementById('colorBy').value;
+
+  const groups = {};
+  devices.forEach(d => {
+    const xVal = xKey === 'date_reported' ? d.date_reported : d.metrics[xKey];
+    const yVal = d.metrics[yKey];
+    if (xVal === undefined || xVal === null || xVal === '' || yVal === undefined) return;
+    const groupKey = colorBy === 'org_type' ? d.org_type : (d.fda_status || 'unknown');
+    (groups[groupKey] ||= []).push({ x: xVal, y: yVal, d });
+  });
+
+  const traces = Object.entries(groups).map(([groupName, pts]) => ({
+    x: pts.map(p => p.x),
+    y: pts.map(p => p.y),
+    text: pts.map(p => `${p.d.name} (${p.d.org})`),
+    customdata: pts.map(p => p.d.source_url || ''),
+    mode: 'markers',
+    type: xKey === 'date_reported' ? 'scatter' : 'scatter',
+    name: groupName,
+    marker: { size: 12, symbol: pts.map(p => p.d.org_type === 'academic' ? 'triangle-up' : 'circle') },
+    hovertemplate: '%{text}<br>%{xaxis.title.text}: %{x}<br>%{yaxis.title.text}: %{y}<extra>' + groupName + '</extra>',
+  }));
+
+  const layout = {
+    xaxis: { title: labelFor(xKey), type: xKey === 'date_reported' ? 'date' : 'linear' },
+    yaxis: { title: labelFor(yKey) },
+    margin: { t: 20 },
+    legend: { orientation: 'h' },
+    hovermode: 'closest',
+  };
+
+  Plotly.newPlot('chart', traces, layout, { responsive: true }).then(gd => {
+    gd.removeAllListeners && gd.removeAllListeners('plotly_click');
+    gd.on('plotly_click', (ev) => {
+      const url = ev.points[0].customdata;
+      if (url) window.open(url, '_blank');
+    });
+  });
+}
+
+function renderTable() {
+  const tbody = document.querySelector('#devTable tbody');
+  tbody.innerHTML = devices.map(d => `
+    <tr>
+      <td>${d.name}</td>
+      <td>${d.org}</td>
+      <td>${d.org_type}</td>
+      <td>${d.fda_status || 'unknown'}</td>
+      <td>${Object.entries(d.metrics).map(([k, v]) => `${k}=${v}`).join(', ')}</td>
+      <td>${d.date_reported || ''}</td>
+      <td>${d.source_url ? `<a href="${d.source_url}" target="_blank" rel="noopener">source</a>` : ''}</td>
+    </tr>`).join('');
+}
+
+loadTrends();
+</script>
+</body>
+</html>
