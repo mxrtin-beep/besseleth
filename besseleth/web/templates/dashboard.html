@@ -26,6 +26,15 @@
   table.devtable th, table.devtable td { border: 1px solid #8883; padding: .4rem .6rem; text-align: left; }
   .hint { opacity: .65; font-size: .85rem; }
   a { color: #4a90d9; }
+  #statusBar { display: flex; align-items: center; gap: .75rem; padding: .6rem 1rem; margin-bottom: 1rem;
+               border: 1px solid #8883; border-radius: 8px; font-size: .82rem; flex-wrap: wrap; }
+  #statusBar .dot { width: 8px; height: 8px; border-radius: 50%; background: #adb5bd; flex-shrink: 0; }
+  #statusBar .dot.live { background: #2a9d8f; }
+  #statusBar .dot.busy { background: #e9c46a; animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  #statusBar button { margin-left: auto; padding: .35rem .8rem; border-radius: 6px; border: 1px solid #4a90d9;
+                       background: none; color: #4a90d9; cursor: pointer; font-size: .82rem; }
+  #statusBar button:disabled { opacity: .5; cursor: default; }
 </style>
 </head>
 <body>
@@ -41,6 +50,12 @@
   </nav>
 </aside>
 <main>
+  <div id="statusBar">
+    <span class="dot" id="statusDot"></span>
+    <span id="statusText">Loading status…</span>
+    <button id="runNowBtn">Run now</button>
+  </div>
+
   <div class="tabs">
     <button id="tabReport" class="active">Report</button>
     <button id="tabTrends">Trends explorer</button>
@@ -103,6 +118,72 @@ document.querySelectorAll('#reportNav button').forEach(btn => {
 {% if report_ids %}
 document.querySelector('#reportNav button').click();
 {% endif %}
+
+// --- Status bar / scheduler control -----------------------------------
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+const runNowBtn = document.getElementById('runNowBtn');
+
+function fmtAgo(iso) {
+  if (!iso) return 'never';
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.round(diffMs / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+function fmtUntil(iso) {
+  if (!iso) return 'not scheduled';
+  const diffMs = new Date(iso).getTime() - Date.now();
+  if (diffMs <= 0) return 'due now';
+  const mins = Math.round(diffMs / 60000);
+  if (mins < 60) return `in ${mins}m`;
+  const hours = Math.round(mins / 60);
+  if (hours < 48) return `in ${hours}h`;
+  return `in ${Math.round(hours / 24)}d`;
+}
+
+async function pollStatus() {
+  try {
+    const res = await fetch('/api/status');
+    const s = await res.json();
+    statusDot.className = 'dot ' + (s.running_now ? 'busy' : (s.enabled ? 'live' : ''));
+    runNowBtn.disabled = s.running_now;
+    runNowBtn.textContent = s.running_now ? 'Running…' : 'Run now';
+
+    if (!s.enabled) {
+      statusText.textContent = 'Auto-schedule disabled — fetch/report only run when triggered manually.';
+    } else if (s.running_now) {
+      statusText.textContent = 'Fetching/summarizing now…';
+    } else {
+      const parts = [`Last fetch: ${fmtAgo(s.last_fetch_at)}`, `next ${fmtUntil(s.next_fetch_at)}`,
+                      `· Last report: ${fmtAgo(s.last_report_at)}`, `next ${fmtUntil(s.next_report_at)}`];
+      if (s.last_error) parts.push(`· ⚠ ${s.last_error}`);
+      statusText.textContent = parts.join(' ');
+    }
+  } catch (e) {
+    statusText.textContent = 'Status unavailable.';
+  }
+}
+
+runNowBtn.onclick = async () => {
+  runNowBtn.disabled = true;
+  runNowBtn.textContent = 'Running…';
+  statusDot.className = 'dot busy';
+  statusText.textContent = 'Fetching/summarizing now…';
+  try {
+    await fetch('/api/run-now', { method: 'POST' });
+  } finally {
+    // A run-now can produce a new report, so reload to pick it up in the sidebar.
+    window.location.reload();
+  }
+};
+
+pollStatus();
+setInterval(pollStatus, 15000);
 
 // --- Trends explorer -------------------------------------------------
 let metricsMeta = [];

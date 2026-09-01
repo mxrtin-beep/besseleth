@@ -8,14 +8,23 @@ Usage:
     python -m besseleth.cli event-add      [--url URL] [--text "..."]  # paste a Luma/Eventbrite/Meetup page in
     python -m besseleth.cli social-add     [--url URL] [--text "..."]  # paste a tweet/post in
     python -m besseleth.cli device-suggest --item-id <id>  # draft a devices.yaml entry from a scraped item
+    python -m besseleth.cli serve          [--config config.yaml]   # run continuously per `schedule` in config.yaml
 
-Schedule `run` weekly with cron, e.g.:
+`serve` is the "regularly updating" mode — start it once (e.g. as a
+launchd/systemd service) and it keeps fetching/reporting on the schedule
+in config.yaml's `schedule` section forever, no cron needed. Prefer the
+browser dashboard (`python -m besseleth.web.app`) if you also want to
+*view* things — it runs the same schedule in the background plus serves
+the UI. Use `serve` for a headless box with no browser.
+
+Alternatively, schedule `run` with system cron, e.g.:
     0 8 * * MON  cd /path/to/besseleth && .venv/bin/python -m besseleth.cli run
 """
 from __future__ import annotations
 
 import argparse
 import sys
+import time
 
 from .config import load_config
 from .db import DB
@@ -38,7 +47,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="besseleth")
     parser.add_argument(
         "command",
-        choices=["fetch", "report", "run", "linkedin-add", "event-add", "social-add", "device-suggest"],
+        choices=["fetch", "report", "run", "linkedin-add", "event-add", "social-add", "device-suggest", "serve"],
     )
     parser.add_argument("--config", default=None, help="Path to config.yaml")
     parser.add_argument("--url", default="", help="Source URL for a paste-in command (auto-detected if omitted)")
@@ -56,6 +65,22 @@ def main(argv=None):
     except FileNotFoundError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
+
+    if args.command == "serve":
+        from .scheduler import start_scheduler
+
+        scheduler, status = start_scheduler(config)
+        if scheduler is None:
+            print("[cli] schedule.enabled is false in config.yaml; nothing to serve. Exiting.", file=sys.stderr)
+            sys.exit(1)
+        print("[cli] Serving. Ctrl-C to stop.")
+        try:
+            while True:
+                time.sleep(60)
+        except KeyboardInterrupt:
+            scheduler.shutdown()
+            print("\n[cli] Stopped.")
+        return
 
     db = DB(config.db_path)
     try:

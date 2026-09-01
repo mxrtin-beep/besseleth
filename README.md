@@ -36,13 +36,63 @@ ollama serve
 
 ## Usage
 
+besseleth is meant to run **continuously**, not as a one-off command you
+have to remember to re-run. The easiest way: start the dashboard and leave
+it running —
+
+```bash
+.venv/bin/python -m besseleth.web.app
+```
+
+— it fetches sources on `schedule.fetch_interval_hours` (default: every 6h)
+and renders a report on `schedule.report_cron` (default: Monday 8am UTC)
+for as long as the process is alive, no cron needed. Adjust both in
+`config.yaml`'s `schedule` section. The dashboard's status bar shows when
+it last ran and when it's next due, and has a **Run now** button for an
+immediate fetch+report outside the schedule.
+
+For a headless box (no browser), the same schedule runs without the web UI:
+
+```bash
+.venv/bin/python -m besseleth.cli serve
+```
+
+**Keeping it running on a Mac** — `nohup` is fine for a quick session, but
+survives a terminal close, not a reboot or logout. For something that
+comes back on its own, use `launchd`:
+
+```xml
+<!-- ~/Library/LaunchAgents/com.besseleth.serve.plist -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.besseleth.serve</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/path/to/besseleth/.venv/bin/python</string>
+    <string>-m</string><string>besseleth.web.app</string>
+  </array>
+  <key>WorkingDirectory</key><string>/path/to/besseleth</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/besseleth.log</string>
+  <key>StandardErrorPath</key><string>/tmp/besseleth.log</string>
+</dict></plist>
+```
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.besseleth.serve.plist
+# stop it later with: launchctl unload ~/Library/LaunchAgents/com.besseleth.serve.plist
+```
+
+Prefer a one-shot, cron-triggered run instead of a standing process? That
+still works — set `schedule.enabled: false` in `config.yaml` and:
+
 ```bash
 .venv/bin/python -m besseleth.cli fetch    # scrape sources, store new items
 .venv/bin/python -m besseleth.cli report   # summarize+render unreported items into a report
 .venv/bin/python -m besseleth.cli run      # both, in one shot
 ```
-
-Schedule it weekly with cron:
 
 ```
 0 8 * * MON  cd /path/to/besseleth && .venv/bin/python -m besseleth.cli run >> besseleth.log 2>&1
@@ -112,10 +162,11 @@ happening at company X". Add these to `sources.news.feeds` in
 # -> http://127.0.0.1:5050
 ```
 
-Local-only (no auth, don't expose it on the open internet as-is), and it's
-a viewer, not a second pipeline — it reads the same `reports/`,
-`devices.yaml`, and `config.yaml` the CLI writes/uses, so run `besseleth.cli
-run` first. Two tabs:
+Local-only (no auth, don't expose it on the open internet as-is). Unlike
+the CLI, this doesn't need a `besseleth.cli run` first — starting it also
+starts the background schedule (see Usage above), so it fetches and
+reports on its own from here on; the status bar up top shows what it's
+doing and when. Two tabs:
 
 - **Report** — the latest (or any past) weekly report, rendered from
   Markdown.
@@ -260,7 +311,8 @@ besseleth/
   summarizer.py      # Ollama-backed (or extractive) summaries
   report.py          # markdown rendering + email
   pipeline.py        # orchestrates scrape -> personalize -> summarize -> report
-  cli.py             # fetch / report / run / *-add / device-suggest commands
+  cli.py             # fetch / report / run / serve / *-add / device-suggest commands
+  scheduler.py        # background fetch/report jobs (used by both web.app and cli serve)
   scrapers/
     arxiv_scraper.py
     news_scraper.py

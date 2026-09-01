@@ -170,6 +170,16 @@ report:
 database:
   path: "data/besseleth.db"
 
+schedule:
+  # Runs besseleth continuously in-process — start `besseleth.web.app` or
+  # `besseleth.cli serve` once (e.g. as a launchd/systemd service) and it
+  # keeps itself updated on this schedule, no cron needed. Set enabled:
+  # false to go back to only running when you trigger it (CLI `run`, or
+  # the dashboard's "Run now" button).
+  enabled: true
+  fetch_interval_hours: 6      # how often to pull fresh items into the DB
+  report_cron: "0 8 * * MON"   # 5-field cron (UTC) for rendering the weekly report
+
 trends:
   # Manually (or LLM-drafted, then human-confirmed) maintained device
   # dataset — see besseleth/trends/store.py. Copy devices.example.yaml to
