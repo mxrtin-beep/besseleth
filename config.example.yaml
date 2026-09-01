@@ -1,0 +1,99 @@
+# besseleth config — copy to config.yaml and edit.
+
+industry:
+  name: "Neurotechnology"
+  # Keywords used across arXiv, news and event searches. Be specific —
+  # broad single words like "brain" will flood the report with noise.
+  keywords:
+    - "neurotechnology"
+    - "brain-computer interface"
+    - "neural implant"
+    - "neuroprosthetics"
+    - "EEG wearable"
+  # arXiv categories to search (see https://arxiv.org/category_taxonomy)
+  arxiv_categories:
+    - "q-bio.NC"
+    - "eess.SP"
+    - "cs.HC"
+
+sources:
+  arxiv:
+    enabled: true
+    max_results_per_keyword: 15
+    days_back: 8
+
+  news:
+    enabled: true
+    days_back: 8
+    # Any RSS/Atom feed works. Google News RSS search is a good free
+    # catch-all; add trade-press feeds for better signal.
+    feeds:
+      - "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+      - "https://www.technologyreview.com/feed/"
+      - "https://spectrum.ieee.org/feeds/topic/biomedical.rss"
+    # Optional: set NEWSAPI_KEY env var to also pull from newsapi.org.
+    use_newsapi: false
+
+  conferences:
+    enabled: true
+    # No good free structured API for conferences exists, so this is a
+    # curated, hand-maintained list. Add/edit freely — each entry is
+    # matched against `industry.keywords` by name/description.
+    watchlist:
+      - name: "Society for Neuroscience (SfN) Annual Meeting"
+        url: "https://www.sfn.org/meetings"
+        month: "October"
+      - name: "BCI Society Meeting"
+        url: "https://bcisociety.org/"
+        month: "June"
+      - name: "Neurotech Leaders Forum"
+        url: "https://neurotechleadersforum.com/"
+        month: "November"
+
+  linkedin:
+    enabled: false
+    # LinkedIn actively blocks and prohibits automated scraping in its
+    # Terms of Service — this repo does not scrape linkedin.com directly.
+    # Instead, plug in a licensed data source, e.g.:
+    #  - LinkedIn's own Jobs API / Talent Solutions (paid, official)
+    #  - Proxycurl or a similar licensed LinkedIn data provider (paid API)
+    #  - RSS feeds of company blogs / newsrooms as a free substitute
+    # Set `provider` + `api_key_env` and implement the call in
+    # besseleth/scrapers/linkedin_scraper.py (a stub is provided).
+    provider: "proxycurl"       # informational only until implemented
+    api_key_env: "PROXYCURL_API_KEY"
+    company_pages: []           # e.g. ["neuralink", "synchron-med"]
+
+# People you know — used to personalize the report. If a scraped item
+# (esp. a job posting or company news) mentions a company in this list,
+# it gets flagged and surfaced separately with the contact's name.
+contacts:
+  - name: "Jane Doe"
+    company: "Neuralink"
+    role: "Research Scientist"
+  - name: "Sam Lee"
+    company: "Synchron"
+    role: "Product Manager"
+
+summarizer:
+  # Uses a local LLM via Ollama (https://ollama.ai) — free, runs offline.
+  # `ollama pull llama3.1` (or any model you like) before running.
+  backend: "ollama"          # "ollama" or "none" (extractive fallback)
+  ollama_url: "http://localhost:11434"
+  model: "llama3.1"
+  max_items_per_summary_call: 8
+
+report:
+  output_dir: "reports"
+  format: "markdown"         # "markdown" or "html"
+  max_items_per_section: 12
+  email:
+    enabled: false
+    smtp_host: "smtp.gmail.com"
+    smtp_port: 587
+    smtp_user_env: "REPORT_SMTP_USER"
+    smtp_pass_env: "REPORT_SMTP_PASS"
+    to: []
+
+database:
+  path: "data/besseleth.db"
