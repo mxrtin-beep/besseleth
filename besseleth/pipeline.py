@@ -1,6 +1,8 @@
 """Orchestrates: scrape -> dedup/store -> personalize -> summarize -> report."""
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
+
 from .config import Config
 from .db import DB, Item
 from .personalize import personalize_items
@@ -14,15 +16,27 @@ from .scrapers import (
     social_scraper,
 )
 from . import report as report_mod
+from .trends import company_store
 from .trends import store as trend_store
 from .trends import plot as trend_plot
 
-SOURCES = ["arxiv", "news", "blog", "conference", "conference_news", "event", "social", "linkedin"]
+SOURCES = ["arxiv", "news", "blog", "conference", "conference_news", "event", "social", "linkedin", "clip"]
 
 
-def fetch_all(config: Config, db: DB) -> dict[str, list[Item]]:
+def _days_back(configured: int, since: date | None) -> int:
+    """A backfill (`since`) overrides the configured lookback window,
+    never shrinks it — you asked for history, not less than usual."""
+    if since is None:
+        return configured
+    return max(configured, (date.today() - since).days)
+
+
+def fetch_all(config: Config, db: DB, since: date | None = None) -> dict[str, list[Item]]:
     """Runs every enabled scraper, dedupes against the DB, and returns the
-    newly-seen items grouped by source (existing items are not re-included)."""
+    newly-seen items grouped by source (existing items are not
+    re-included). Pass `since` to backfill further back than each
+    source's configured `days_back` — e.g. to seed history right after
+    setup, or after being away for a while."""
     results: dict[str, list[Item]] = {s: [] for s in SOURCES}
 
     arxiv_cfg = config.source("arxiv")
@@ -30,7 +44,7 @@ def fetch_all(config: Config, db: DB) -> dict[str, list[Item]]:
         print("[pipeline] Fetching arXiv...")
         items = arxiv_scraper.fetch(
             config,
-            days_back=arxiv_cfg.get("days_back", 8),
+            days_back=_days_back(arxiv_cfg.get("days_back", 8), since),
             max_results_per_keyword=arxiv_cfg.get("max_results_per_keyword", 15),
         )
         results["arxiv"] = _dedupe_and_store(items, db)
@@ -38,13 +52,13 @@ def fetch_all(config: Config, db: DB) -> dict[str, list[Item]]:
     news_cfg = config.source("news")
     if news_cfg.get("enabled"):
         print("[pipeline] Fetching news...")
-        items = news_scraper.fetch(config, news_cfg, days_back=news_cfg.get("days_back", 8))
+        items = news_scraper.fetch(config, news_cfg, days_back=_days_back(news_cfg.get("days_back", 8), since))
         results["news"] = _dedupe_and_store(items, db)
 
     blog_cfg = config.source("blogs")
     if blog_cfg.get("enabled"):
         print("[pipeline] Fetching blogs...")
-        items = blog_scraper.fetch(config, blog_cfg, days_back=blog_cfg.get("days_back", 8))
+        items = blog_scraper.fetch(config, blog_cfg, days_back=_days_back(blog_cfg.get("days_back", 8), since))
         results["blog"] = _dedupe_and_store(items, db)
 
     conf_cfg = config.source("conferences")
@@ -53,7 +67,9 @@ def fetch_all(config: Config, db: DB) -> dict[str, list[Item]]:
         items = conference_scraper.fetch(config, conf_cfg)
         results["conference"] = _dedupe_and_store(items, db)
         print("[pipeline] Fetching conference news feeds...")
-        news_items = conference_scraper.fetch_conference_news(config, conf_cfg, days_back=conf_cfg.get("days_back", 8))
+        news_items = conference_scraper.fetch_conference_news(
+            config, conf_cfg, days_back=_days_back(conf_cfg.get("days_back", 8), since)
+        )
         results["conference_news"] = _dedupe_and_store(news_items, db)
 
     events_cfg = config.source("events")
@@ -65,7 +81,7 @@ def fetch_all(config: Config, db: DB) -> dict[str, list[Item]]:
     social_cfg = config.source("social")
     if social_cfg.get("enabled"):
         print("[pipeline] Fetching social (Bluesky/X)...")
-        items = social_scraper.fetch(config, social_cfg, days_back=social_cfg.get("days_back", 8))
+        items = social_scraper.fetch(config, social_cfg, days_back=_days_back(social_cfg.get("days_back", 8), since))
         results["social"] = _dedupe_and_store(items, db)
 
     linkedin_cfg = config.source("linkedin")
@@ -124,6 +140,7 @@ def generate_weekly_report(config: Config, db: DB) -> str:
     days_back = config.source("news").get("days_back", 8)
 
     trend_devices = trend_store.load_devices(config.devices_path)
+    trend_companies = company_store.load_companies(config.companies_path)
     trend_charts: list = []
     if trend_devices:
         charts_dir = config.raw.get("trends", {}).get("charts_dir", "reports/trends")
@@ -140,17 +157,34 @@ def generate_weekly_report(config: Config, db: DB) -> str:
         event_items=items_by_source["event"][:max_n],
         social_items=items_by_source["social"][:max_n],
         linkedin_items=items_by_source["linkedin"][:max_n],
+        clip_items=items_by_source["clip"][:max_n],
         personalized_items=personalized,
         summarizer_cfg=config.summarizer,
         trend_devices=trend_devices,
+        trend_metrics=config.trend_metrics,
         trend_chart_paths=trend_charts,
+        trend_companies=trend_companies,
     )
 
     path = report_mod.save_report(markdown, report_id, report_cfg.get("output_dir", "reports"))
     report_mod.email_report(markdown, report_id, config.industry_name, report_cfg.get("email", {}))
+    _prune_old_reports(config)
 
     all_ids = [i.id for i in all_items]
     db.mark_reported(all_ids, report_id)
 
     print(f"[pipeline] Report written to {path}")
     return str(path)
+
+
+def _prune_old_reports(config: Config):
+    keep_last = config.raw.get("reports", {}).get("keep_last", 0)
+    if not keep_last:
+        return
+    from pathlib import Path
+
+    reports_dir = Path(config.report.get("output_dir", "reports"))
+    reports = sorted(reports_dir.glob("report-*.md"), reverse=True)
+    for stale in reports[keep_last:]:
+        stale.unlink(missing_ok=True)
+        print(f"[pipeline] Pruned old report {stale.name} (reports.keep_last={keep_last})")

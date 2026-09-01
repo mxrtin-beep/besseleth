@@ -10,20 +10,36 @@
   aside { width: 240px; border-right: 1px solid #8883; padding: 1rem; overflow-y: auto; flex-shrink: 0; }
   main { flex: 1; overflow-y: auto; padding: 1.5rem 2rem; }
   h1 { font-size: 1.3rem; margin: 0 0 1rem; }
-  nav button { display: block; width: 100%; text-align: left; padding: .5rem; margin-bottom: .25rem;
-               border: none; background: none; cursor: pointer; border-radius: 6px; font-size: .9rem; }
-  nav button:hover, nav button.active { background: #8882; }
-  .tabs { display: flex; gap: .5rem; margin-bottom: 1rem; border-bottom: 1px solid #8883; }
+  nav .reportRow { display: flex; align-items: center; margin-bottom: .25rem; border-radius: 6px; }
+  nav .reportRow:hover, nav .reportRow.active { background: #8882; }
+  nav .reportRow button.reportBtn { flex: 1; text-align: left; padding: .5rem; border: none; background: none;
+               cursor: pointer; font-size: .9rem; color: inherit; }
+  nav .reportRow button.delBtn { border: none; background: none; cursor: pointer; opacity: .5; padding: .3rem .5rem;
+               font-size: .85rem; border-radius: 4px; }
+  nav .reportRow button.delBtn:hover { opacity: 1; background: #e7636333; }
+  .tabs { display: flex; gap: .5rem; margin-bottom: 1rem; border-bottom: 1px solid #8883; flex-wrap: wrap; }
   .tabs button { padding: .5rem 1rem; border: none; background: none; cursor: pointer; font-size: .95rem;
-                 border-bottom: 2px solid transparent; }
+                 border-bottom: 2px solid transparent; color: inherit; }
   .tabs button.active { border-bottom-color: #4a90d9; font-weight: 600; }
   .controls { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: end; }
   .controls label { display: block; font-size: .8rem; opacity: .75; margin-bottom: .25rem; }
-  select { padding: .35rem .5rem; border-radius: 6px; border: 1px solid #8886; font-size: .9rem; }
+  select, input[type=text], input[type=date], textarea {
+    padding: .4rem .6rem; border-radius: 6px; border: 1px solid #8886; font-size: .9rem;
+    background: transparent; color: inherit; font-family: inherit;
+  }
+  textarea { width: 100%; min-height: 160px; resize: vertical; box-sizing: border-box; }
+  .btn { padding: .45rem 1rem; border-radius: 6px; border: 1px solid #4a90d9; background: none; color: #4a90d9;
+         cursor: pointer; font-size: .88rem; }
+  .btn:hover { background: #4a90d922; }
+  .btn:disabled { opacity: .5; cursor: default; }
   #chart { width: 100%; height: 560px; }
   #reportPane img { max-width: 100%; }
-  table.devtable { border-collapse: collapse; width: 100%; margin-top: 1rem; font-size: .85rem; }
-  table.devtable th, table.devtable td { border: 1px solid #8883; padding: .4rem .6rem; text-align: left; }
+  table.datatable { border-collapse: collapse; width: 100%; margin-top: 1rem; font-size: .85rem; }
+  table.datatable th, table.datatable td { border: 1px solid #8883; padding: .5rem .7rem; text-align: left; vertical-align: top; }
+  table.datatable th { background: #8881; }
+  .metric-tags { display: flex; flex-wrap: wrap; gap: .3rem; }
+  .metric-tag { display: inline-block; border: 1px solid #4a90d966; background: #4a90d914; border-radius: 999px;
+                padding: .15rem .6rem; font-size: .78rem; white-space: nowrap; }
   .hint { opacity: .65; font-size: .85rem; }
   a { color: #4a90d9; }
   #statusBar { display: flex; align-items: center; gap: .75rem; padding: .6rem 1rem; margin-bottom: 1rem;
@@ -32,20 +48,29 @@
   #statusBar .dot.live { background: #2a9d8f; }
   #statusBar .dot.busy { background: #e9c46a; animation: pulse 1s infinite; }
   @keyframes pulse { 50% { opacity: .3; } }
-  #statusBar button { margin-left: auto; padding: .35rem .8rem; border-radius: 6px; border: 1px solid #4a90d9;
-                       background: none; color: #4a90d9; cursor: pointer; font-size: .82rem; }
-  #statusBar button:disabled { opacity: .5; cursor: default; }
+  #statusBar .spacer { margin-left: auto; }
+  #pasteResult { margin-top: .75rem; font-size: .88rem; }
+  #pasteResult.ok { color: #2a9d8f; }
+  #pasteResult.err { color: #e76363; }
+  .dataset-toggle button { padding: .35rem .8rem; border: 1px solid #8886; background: none; color: inherit;
+                            cursor: pointer; font-size: .85rem; }
+  .dataset-toggle button:first-child { border-radius: 6px 0 0 6px; }
+  .dataset-toggle button:last-child { border-radius: 0 6px 6px 0; border-left: none; }
+  .dataset-toggle button.active { background: #4a90d9; border-color: #4a90d9; color: white; }
 </style>
 </head>
 <body>
 <aside>
   <h1>{{ industry }}</h1>
-  <p class="hint">Weekly reports</p>
+  <p class="hint">Reports</p>
   <nav id="reportNav">
     {% for rid in report_ids %}
-    <button data-report="{{ rid }}">{{ rid }}</button>
+    <div class="reportRow" data-row="{{ rid }}">
+      <button class="reportBtn" data-report="{{ rid }}">{{ rid }}</button>
+      <button class="delBtn" data-del="{{ rid }}" title="Delete this report">🗑</button>
+    </div>
     {% else %}
-    <p class="hint">No reports yet — run <code>besseleth.cli run</code>.</p>
+    <p class="hint">No reports yet — wait for the schedule or hit "Run now".</p>
     {% endfor %}
   </nav>
 </aside>
@@ -53,18 +78,26 @@
   <div id="statusBar">
     <span class="dot" id="statusDot"></span>
     <span id="statusText">Loading status…</span>
-    <button id="runNowBtn">Run now</button>
+    <span class="spacer"></span>
+    <label class="hint" for="backfillDate" style="margin:0">Backfill from</label>
+    <input type="date" id="backfillDate">
+    <button class="btn" id="backfillBtn">Backfill</button>
+    <button class="btn" id="runNowBtn">Run now</button>
   </div>
 
   <div class="tabs">
     <button id="tabReport" class="active">Report</button>
     <button id="tabTrends">Trends explorer</button>
+    <button id="tabPaste">Paste</button>
   </div>
 
   <div id="reportPane"><p class="hint">Pick a report from the sidebar.</p></div>
 
   <div id="trendsPane" style="display:none">
     <div class="controls">
+      <div class="dataset-toggle">
+        <button id="dsDevices" class="active">Devices</button><button id="dsCompanies">Companies</button>
+      </div>
       <div>
         <label for="xAxis">X axis</label>
         <select id="xAxis"></select>
@@ -73,56 +106,94 @@
         <label for="yAxis">Y axis</label>
         <select id="yAxis"></select>
       </div>
-      <div>
+      <div id="colorByWrap">
         <label for="colorBy">Color by</label>
         <select id="colorBy">
           <option value="fda_status">FDA status</option>
           <option value="org_type">Org type</option>
+          <option value="device_type">Device type</option>
+          <option value="material">Material</option>
         </select>
       </div>
     </div>
     <div id="chart"></div>
-    <p class="hint">Hover a point for its source; click it to open the source link.</p>
-    <table class="devtable" id="devTable">
-      <thead><tr><th>Device</th><th>Org</th><th>Type</th><th>FDA status</th><th>Metrics</th><th>Reported</th><th>Source</th></tr></thead>
-      <tbody></tbody>
-    </table>
+    <p class="hint">Hover a point for its details and source; click it to open the source link. This accumulates over time — every device/company you or device-suggest add stays here across every future report.</p>
+    <table class="datatable" id="dataTable"></table>
+  </div>
+
+  <div id="pastePane" style="display:none">
+    <p class="hint">One box for anything — a LinkedIn post, a Bluesky/X post, a Luma/Eventbrite page, a Substack
+      post, whatever. Paste the text (and its URL, if it's not already in the text) and besseleth figures out
+      which source it belongs to from the link.</p>
+    <div class="controls" style="align-items:stretch">
+      <div style="flex:1; min-width: 300px">
+        <label for="pasteText">Paste content</label>
+        <textarea id="pasteText" placeholder="Paste a post, job listing, event page, article — anything."></textarea>
+      </div>
+    </div>
+    <div class="controls">
+      <div style="flex:1; min-width:240px">
+        <label for="pasteUrl">URL (optional — auto-detected from the pasted text if present)</label>
+        <input type="text" id="pasteUrl" style="width:100%; box-sizing:border-box" placeholder="https://...">
+      </div>
+      <div><button class="btn" id="pasteBtn">Add</button></div>
+    </div>
+    <div id="pasteResult"></div>
   </div>
 </main>
 
 <script>
 const reportPane = document.getElementById('reportPane');
 const trendsPane = document.getElementById('trendsPane');
+const pastePane = document.getElementById('pastePane');
 const tabReport = document.getElementById('tabReport');
 const tabTrends = document.getElementById('tabTrends');
+const tabPaste = document.getElementById('tabPaste');
 
 function showTab(which) {
   reportPane.style.display = which === 'report' ? 'block' : 'none';
   trendsPane.style.display = which === 'trends' ? 'block' : 'none';
+  pastePane.style.display = which === 'paste' ? 'block' : 'none';
   tabReport.classList.toggle('active', which === 'report');
   tabTrends.classList.toggle('active', which === 'trends');
+  tabPaste.classList.toggle('active', which === 'paste');
 }
 tabReport.onclick = () => showTab('report');
 tabTrends.onclick = () => showTab('trends');
+tabPaste.onclick = () => showTab('paste');
 
-document.querySelectorAll('#reportNav button').forEach(btn => {
-  btn.onclick = async () => {
-    document.querySelectorAll('#reportNav button').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    showTab('report');
-    const res = await fetch(`/api/report/${btn.dataset.report}`);
-    const data = await res.json();
-    reportPane.innerHTML = data.html;
-  };
-});
+function wireReportNav() {
+  document.querySelectorAll('.reportBtn').forEach(btn => {
+    btn.onclick = async () => {
+      document.querySelectorAll('.reportRow').forEach(r => r.classList.remove('active'));
+      btn.closest('.reportRow').classList.add('active');
+      showTab('report');
+      const res = await fetch(`/api/report/${btn.dataset.report}`);
+      const data = await res.json();
+      reportPane.innerHTML = data.html;
+    };
+  });
+  document.querySelectorAll('.delBtn').forEach(btn => {
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      const rid = btn.dataset.del;
+      if (!confirm(`Delete report ${rid}? This can't be undone.`)) return;
+      await fetch(`/api/report/${rid}`, { method: 'DELETE' });
+      btn.closest('.reportRow').remove();
+    };
+  });
+}
+wireReportNav();
 {% if report_ids %}
-document.querySelector('#reportNav button').click();
+document.querySelector('.reportBtn').click();
 {% endif %}
 
-// --- Status bar / scheduler control -----------------------------------
+// --- Status bar / scheduler control / backfill --------------------------
 const statusDot = document.getElementById('statusDot');
 const statusText = document.getElementById('statusText');
 const runNowBtn = document.getElementById('runNowBtn');
+const backfillBtn = document.getElementById('backfillBtn');
+const backfillDate = document.getElementById('backfillDate');
 
 function fmtAgo(iso) {
   if (!iso) return 'never';
@@ -152,6 +223,7 @@ async function pollStatus() {
     const s = await res.json();
     statusDot.className = 'dot ' + (s.running_now ? 'busy' : (s.enabled ? 'live' : ''));
     runNowBtn.disabled = s.running_now;
+    backfillBtn.disabled = s.running_now;
     runNowBtn.textContent = s.running_now ? 'Running…' : 'Run now';
 
     if (!s.enabled) {
@@ -182,27 +254,93 @@ runNowBtn.onclick = async () => {
   }
 };
 
+backfillBtn.onclick = async () => {
+  if (!backfillDate.value) { alert('Pick a date to backfill from.'); return; }
+  backfillBtn.disabled = true;
+  statusText.textContent = `Backfilling from ${backfillDate.value}…`;
+  try {
+    const res = await fetch('/api/backfill', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ since: backfillDate.value }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      const total = Object.values(data.counts).reduce((a, b) => a + b, 0);
+      statusText.textContent = `Backfill done: ${total} new items fetched since ${backfillDate.value}.`;
+    } else {
+      statusText.textContent = `Backfill failed: ${data.message}`;
+    }
+  } catch (e) {
+    statusText.textContent = 'Backfill failed — see server log.';
+  } finally {
+    backfillBtn.disabled = false;
+  }
+};
+
 pollStatus();
 setInterval(pollStatus, 15000);
 
-// --- Trends explorer -------------------------------------------------
-let metricsMeta = [];
+// --- Paste box -----------------------------------------------------------
+document.getElementById('pasteBtn').onclick = async () => {
+  const text = document.getElementById('pasteText').value.trim();
+  const url = document.getElementById('pasteUrl').value.trim();
+  const result = document.getElementById('pasteResult');
+  if (!text) { result.className = 'err'; result.textContent = 'Paste something first.'; return; }
+  result.className = ''; result.textContent = 'Adding…';
+  try {
+    const res = await fetch('/api/paste', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, url }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      result.className = 'ok';
+      result.textContent = `Added as ${data.detected_as}: "${data.title}". It'll appear in the next report.`;
+      document.getElementById('pasteText').value = '';
+      document.getElementById('pasteUrl').value = '';
+    } else {
+      result.className = 'err';
+      result.textContent = data.message || 'Failed to add.';
+    }
+  } catch (e) {
+    result.className = 'err';
+    result.textContent = 'Failed to add — see server log.';
+  }
+};
+
+// --- Trends explorer (devices + companies) -------------------------------
+let metricsData = { numeric: [], categorical: [], company_numeric: [] };
 let devices = [];
+let companies = [];
+let currentDataset = 'devices';
 
 async function loadTrends() {
-  const [metricsRes, devicesRes] = await Promise.all([fetch('/api/metrics'), fetch('/api/devices')]);
-  const metricsData = await metricsRes.json();
+  const [metricsRes, devicesRes, companiesRes] = await Promise.all([
+    fetch('/api/metrics'), fetch('/api/devices'), fetch('/api/companies'),
+  ]);
+  metricsData = await metricsRes.json();
   devices = await devicesRes.json();
-  metricsMeta = metricsData.numeric;
+  companies = await companiesRes.json();
+
+  document.getElementById('dsDevices').onclick = () => switchDataset('devices');
+  document.getElementById('dsCompanies').onclick = () => switchDataset('companies');
+  switchDataset('devices');
+}
+
+function switchDataset(which) {
+  currentDataset = which;
+  document.getElementById('dsDevices').classList.toggle('active', which === 'devices');
+  document.getElementById('dsCompanies').classList.toggle('active', which === 'companies');
+  document.getElementById('colorByWrap').style.display = which === 'devices' ? 'block' : 'none';
 
   const xSel = document.getElementById('xAxis');
   const ySel = document.getElementById('yAxis');
-  const options = [metricsData.time_axis, ...metricsMeta];
+  const numeric = which === 'devices' ? metricsData.numeric : metricsData.company_numeric;
+  const options = [metricsData.time_axis, ...numeric];
   xSel.innerHTML = options.map(m => `<option value="${m.key}">${m.label}${m.unit ? ' (' + m.unit + ')' : ''}</option>`).join('');
-  ySel.innerHTML = metricsMeta.map(m => `<option value="${m.key}">${m.label}${m.unit ? ' (' + m.unit + ')' : ''}</option>`).join('');
-  // sensible defaults: time on X, first numeric metric on Y
+  ySel.innerHTML = numeric.map(m => `<option value="${m.key}">${m.label}${m.unit ? ' (' + m.unit + ')' : ''}</option>`).join('');
   xSel.value = 'date_reported';
-  if (metricsMeta.length) ySel.value = metricsMeta[0].key;
+  if (numeric.length) ySel.value = numeric[0].key;
 
   xSel.onchange = renderChart;
   ySel.onchange = renderChart;
@@ -211,41 +349,64 @@ async function loadTrends() {
   renderChart();
 }
 
+function allMetricsMeta() {
+  return [...metricsData.numeric, ...metricsData.categorical];
+}
+
 function labelFor(key) {
   if (key === 'date_reported') return 'Date reported';
-  const m = metricsMeta.find(m => m.key === key);
-  return m ? `${m.label}${m.unit ? ' (' + m.unit + ')' : ''}` : key;
+  const pool = currentDataset === 'devices' ? allMetricsMeta() : metricsData.company_numeric;
+  const m = pool.find(m => m.key === key);
+  return m ? `${m.label}${m.unit ? ' (' + m.unit + ')' : ''}` : key.replace(/_/g, ' ');
+}
+
+function formatMetricValue(key, value) {
+  const meta = allMetricsMeta().find(m => m.key === key);
+  const label = meta ? meta.label : key.replace(/_/g, ' ');
+  const unit = meta && meta.unit ? ` ${meta.unit}` : '';
+  const num = typeof value === 'number' ? value.toLocaleString() : value;
+  return `<span class="metric-tag">${label}: ${num}${unit}</span>`;
 }
 
 function renderChart() {
   if (typeof Plotly === 'undefined') {
     document.getElementById('chart').innerHTML =
       '<p class="hint">Chart library failed to load from the CDN (no internet access?). ' +
-      'The device table below still works. See README for how to vendor plotly.min.js locally.</p>';
+      'The table below still works. See README for how to vendor plotly.min.js locally.</p>';
     return;
   }
   const xKey = document.getElementById('xAxis').value;
   const yKey = document.getElementById('yAxis').value;
   const colorBy = document.getElementById('colorBy').value;
+  const rows = currentDataset === 'devices' ? devices : companies;
+  if (!xKey || !yKey) { Plotly.purge('chart'); return; }
 
   const groups = {};
-  devices.forEach(d => {
-    const xVal = xKey === 'date_reported' ? d.date_reported : d.metrics[xKey];
-    const yVal = d.metrics[yKey];
-    if (xVal === undefined || xVal === null || xVal === '' || yVal === undefined) return;
-    const groupKey = colorBy === 'org_type' ? d.org_type : (d.fda_status || 'unknown');
-    (groups[groupKey] ||= []).push({ x: xVal, y: yVal, d });
+  rows.forEach(row => {
+    const source = currentDataset === 'devices' ? row.metrics : row;
+    const xVal = xKey === 'date_reported'
+      ? (currentDataset === 'devices' ? row.date_reported : row.stock_price_updated_at || row.last_funding_date)
+      : source[xKey];
+    const yVal = source[yKey];
+    if (xVal === undefined || xVal === null || xVal === '' || yVal === undefined || yVal === null) return;
+    const groupKey = currentDataset === 'devices'
+      ? (row.metrics[colorBy] || row[colorBy] || 'unknown')
+      : row.name;
+    (groups[groupKey] ||= []).push({ x: xVal, y: yVal, row });
   });
 
   const traces = Object.entries(groups).map(([groupName, pts]) => ({
     x: pts.map(p => p.x),
     y: pts.map(p => p.y),
-    text: pts.map(p => `${p.d.name} (${p.d.org})`),
-    customdata: pts.map(p => p.d.source_url || ''),
-    mode: 'markers',
-    type: xKey === 'date_reported' ? 'scatter' : 'scatter',
+    text: pts.map(p => currentDataset === 'devices' ? `${p.row.name} (${p.row.org})` : p.row.name),
+    customdata: pts.map(p => p.row.source_url || ''),
+    mode: currentDataset === 'devices' ? 'markers' : 'markers+lines',
+    type: 'scatter',
     name: groupName,
-    marker: { size: 12, symbol: pts.map(p => p.d.org_type === 'academic' ? 'triangle-up' : 'circle') },
+    marker: {
+      size: 12,
+      symbol: currentDataset === 'devices' ? pts.map(p => p.row.org_type === 'academic' ? 'triangle-up' : 'circle') : 'circle',
+    },
     hovertemplate: '%{text}<br>%{xaxis.title.text}: %{x}<br>%{yaxis.title.text}: %{y}<extra>' + groupName + '</extra>',
   }));
 
@@ -255,6 +416,7 @@ function renderChart() {
     margin: { t: 20 },
     legend: { orientation: 'h' },
     hovermode: 'closest',
+    hoverlabel: { bgcolor: '#1e1e1eee', bordercolor: '#4a90d9', font: { color: '#f5f5f5', size: 12 } },
   };
 
   Plotly.newPlot('chart', traces, layout, { responsive: true }).then(gd => {
@@ -267,17 +429,33 @@ function renderChart() {
 }
 
 function renderTable() {
-  const tbody = document.querySelector('#devTable tbody');
-  tbody.innerHTML = devices.map(d => `
-    <tr>
-      <td>${d.name}</td>
-      <td>${d.org}</td>
-      <td>${d.org_type}</td>
-      <td>${d.fda_status || 'unknown'}</td>
-      <td>${Object.entries(d.metrics).map(([k, v]) => `${k}=${v}`).join(', ')}</td>
-      <td>${d.date_reported || ''}</td>
-      <td>${d.source_url ? `<a href="${d.source_url}" target="_blank" rel="noopener">source</a>` : ''}</td>
-    </tr>`).join('');
+  const table = document.getElementById('dataTable');
+  if (currentDataset === 'devices') {
+    table.innerHTML = `
+      <thead><tr><th>Device</th><th>Org</th><th>Type</th><th>FDA status</th><th>Metrics</th><th>Reported</th><th>Source</th></tr></thead>
+      <tbody>${devices.map(d => `
+        <tr>
+          <td>${d.name}</td>
+          <td>${d.org}</td>
+          <td>${d.org_type}</td>
+          <td>${d.fda_status || 'unknown'}</td>
+          <td><div class="metric-tags">${Object.entries(d.metrics).map(([k, v]) => formatMetricValue(k, v)).join('')}</div></td>
+          <td>${d.date_reported || ''}</td>
+          <td>${d.source_url ? `<a href="${d.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
+        </tr>`).join('')}</tbody>`;
+  } else {
+    table.innerHTML = `
+      <thead><tr><th>Company</th><th>Funding</th><th>Last round</th><th>Stock</th><th>Source</th><th>Notes</th></tr></thead>
+      <tbody>${companies.map(c => `
+        <tr>
+          <td>${c.name}</td>
+          <td>${c.funding_total_usd ? '$' + c.funding_total_usd.toLocaleString() : '—'}</td>
+          <td>${c.last_funding_round ? `${c.last_funding_round} (${c.last_funding_date})` : '—'}</td>
+          <td>${c.stock_price ? `${c.stock_ticker}: $${c.stock_price.toLocaleString()}` : (c.stock_ticker || '—')}</td>
+          <td>${c.source_url ? `<a href="${c.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
+          <td class="hint">${c.notes || ''}</td>
+        </tr>`).join('')}</tbody>`;
+  }
 }
 
 loadTrends();

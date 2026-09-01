@@ -112,3 +112,51 @@ def add_manual_item(config, db, text: str, source: str, url: str = "") -> Item:
     )
     db.upsert_item(item)
     return item
+
+
+# --- One paste box, auto-classified -----------------------------------
+#
+# Domain-based heuristics for "figure out what this is" — used by the
+# dashboard's single paste box and `besseleth.cli paste` so you don't
+# have to know or care which specific source a link belongs to.
+
+_DOMAIN_SOURCE_MAP = [
+    (("linkedin.com",), "linkedin"),
+    (("bsky.app", "twitter.com", "x.com"), "social"),
+    (("lu.ma", "eventbrite.com", "meetup.com"), "event"),
+    (("substack.com",), "blog"),
+    (("arxiv.org",), "arxiv"),
+]
+
+# Human-facing labels for the source values above, used anywhere the UI
+# shows "detected as: ...".
+SOURCE_LABELS = {
+    "linkedin": "LinkedIn",
+    "social": "Social (Bluesky/X)",
+    "event": "Event",
+    "blog": "Blog",
+    "arxiv": "arXiv",
+    "news": "News",
+    "clip": "Clipped (unrecognized source)",
+}
+
+
+def classify_source(text: str, url: str = "") -> str:
+    """Guesses which besseleth source a pasted snippet belongs to, from
+    its URL's domain (falls back to "clip" — a generic bucket — when
+    nothing matches, rather than guessing wrong)."""
+    _, parsed_url, _ = parse_snippet(text)
+    candidate_url = (url or parsed_url or "").lower()
+    for domains, source in _DOMAIN_SOURCE_MAP:
+        if any(d in candidate_url for d in domains):
+            return source
+    return "clip"
+
+
+def add_smart_item(config, db, text: str, url: str = "") -> tuple[Item, str]:
+    """Auto-detects the source from the pasted text/URL and stores it
+    accordingly. Returns (item, detected_source_label) — this is the
+    single entry point behind the dashboard's one paste box."""
+    source = classify_source(text, url)
+    item = add_manual_item(config, db, text, source=source, url=url)
+    return item, SOURCE_LABELS.get(source, source)

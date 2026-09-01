@@ -1,0 +1,35 @@
+# Copy to companies.yaml and edit. Business-side tracking for key
+# companies in the industry — separate from devices.yaml since one
+# company can ship several devices. Accumulates the same way: every
+# entry stays here across future reports.
+#
+# `stock_price` is optional and can be refreshed automatically (free,
+# no API key) for any entry with a `stock_ticker` set:
+#   python -m besseleth.cli company-refresh-stock
+# Funding rounds have no comparable free structured API, so
+# `funding_total_usd` is hand-maintained — same "cite the specific
+# source" rule as devices.yaml applies to `source_url` here.
+
+- name: "Neuralink"
+  stock_ticker: ""              # private company — leave blank
+  funding_total_usd: 700000000
+  last_funding_round: "Series E"
+  last_funding_date: "2025-06-01"
+  source_url: "https://techcrunch.com/example-neuralink-funding-round"
+  notes: ""
+
+- name: "Synchron"
+  stock_ticker: ""
+  funding_total_usd: 145000000
+  last_funding_round: "Series C"
+  last_funding_date: "2024-11-01"
+  source_url: "https://techcrunch.com/example-synchron-funding-round"
+  notes: ""
+
+- name: "Medtronic"
+  stock_ticker: "MDT"           # public — company-refresh-stock fills in stock_price
+  funding_total_usd: null
+  last_funding_round: ""
+  last_funding_date: ""
+  source_url: ""
+  notes: "Public company with a neuromodulation division; tracked for stock price, not funding rounds."

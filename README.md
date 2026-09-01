@@ -11,18 +11,19 @@ A weekly industry-briefing bot. Point it at an industry (e.g.
 - Pulls **Bluesky** posts (free public search API) and **X/Twitter** (paid API if you have a token, otherwise paste-in)
 - Flags **LinkedIn** as a source with a compliant path (see below — no ToS-violating scraping)
 - **Personalizes**: if an item mentions a company one of your contacts works at (e.g. a job posting at your friend's company), it's pulled into its own "For you specifically" section
-- **Tracks industry trends**: a hand-maintained (optionally LLM-drafted) dataset of devices/systems and their metrics — e.g. for neurotech, information transfer rate, implant longevity, and FDA status — charted automatically into the report
+- **Tracks industry trends**: a hand-maintained (optionally LLM-drafted) dataset of devices/systems and their metrics — for neurotech: information transfer rate, implant longevity, electrode count, device type, material, and FDA status — plus a separate **companies** dataset for business metrics (funding, stock price — auto-refreshable for free for public tickers). Both accumulate forever, across every report.
 - **Summarizes** each section with a free local LLM via [Ollama](https://ollama.ai) — falls back to a plain extractive summary if Ollama isn't running, so it never blocks
-- Writes a Markdown report to `reports/`, and can email it via SMTP
-- Dedupes across runs in a local SQLite DB, so re-running never repeats old items
-- Ships a **browser dashboard** (`besseleth.web.app`) to read reports and explore the trends dataset as an interactive, adjustable-axis chart with a source link on every data point
+- Writes a Markdown report to `reports/` on a configurable cadence (daily/weekly/monthly/whatever), and can email it — old reports are deletable, individually, from the dashboard
+- Dedupes across runs in a local SQLite DB, so re-running never repeats old items; a **backfill** control lets you pull history further back than the usual lookback window
+- Ships a **browser dashboard** (`besseleth.web.app`) — the whole app, really: read reports, explore devices/companies as an interactive adjustable-axis chart with a cited source on every point, and paste anything (LinkedIn, Bluesky/X, events, whatever) into one box that figures out what it is
 
 ## Setup
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp config.example.yaml config.yaml
-cp devices.example.yaml devices.yaml   # for the trends feature — optional
+cp devices.example.yaml devices.yaml       # for the trends feature — optional
+cp companies.example.yaml companies.yaml   # for company/business tracking — optional
 # edit config.yaml: industry keywords, contacts, feeds, watchlists
 ```
 
@@ -109,7 +110,7 @@ contacts:
     role: "Research Scientist"
 ```
 
-Any scraped item (news, arXiv, or conference entry) whose text mentions
+Any item — scraped or pasted, from any source — whose text mentions
 `Neuralink` gets flagged with `matched_contact: Jane Doe` and surfaced first
 in the report, with an LLM-written one-liner on why it might matter — this
 is how a job posting at a friend's company gets called out specifically.
@@ -168,16 +169,19 @@ starts the background schedule (see Usage above), so it fetches and
 reports on its own from here on; the status bar up top shows what it's
 doing and when. Two tabs:
 
-- **Report** — the latest (or any past) weekly report, rendered from
-  Markdown.
-- **Trends explorer** — the device dataset as an interactive chart
-  (Plotly, client-side, no static PNGs): pick any metric for the X axis
-  — including **time** (`date_reported`), to see e.g. information transfer
-  rate improving release over release — and any metric for the Y axis,
-  color by FDA status or industry/academic. Hover a point to see its
-  device/org; click it to open its `source_url` in a new tab. A plain
-  table below repeats every point with an explicit source link, so
-  nothing here is a number without a citation.
+- **Report** — the latest (or any past) report, rendered from Markdown;
+  delete old ones from the sidebar.
+- **Trends explorer** — devices and companies as an interactive chart
+  (Plotly, client-side, no static PNGs) — a Devices/Companies toggle
+  switches dataset. Pick any metric for the X axis — including **time**
+  (`date_reported`), to see e.g. information transfer rate improving
+  release over release, or a stock price/funding trend — and any metric
+  for the Y axis; color devices by FDA status, org type, device type, or
+  material. Hover a point to see its details; click it to open its cited
+  `source_url` in a new tab. A plain table below repeats every point with
+  human-readable metric tags and an explicit source link, so nothing here
+  is a number without a citation.
+- **Paste** — one box for LinkedIn/social/events/anything; see below.
 
 Uses Plotly.js from a CDN (`cdn.jsdelivr.net`), so it needs internet
 access once, in the browser, to load the chart library — the report tab
@@ -186,16 +190,29 @@ and device table work regardless. To run fully offline, download
 to `besseleth/web/static/plotly.min.js` and change the `<script src=...>`
 in `besseleth/web/templates/dashboard.html` to `/static/plotly.min.js`.
 
-## What can I paste in? (LinkedIn, events, social)
+## What can I paste in? (LinkedIn, events, social — one box)
 
-Three sources have no good free scraping/search API, so they all share the
-same paste/upload mechanism (`besseleth/scrapers/manual_drop.py`):
-**LinkedIn** (`linkedin_drops/`), **IRL events** (`event_drops/`), and
-**social posts** (`social_drops/`).
+LinkedIn, IRL events, and social posts have no good free scraping/search
+API, so all three share one mechanism you interact with as a **single
+paste box**: the dashboard's **Paste** tab. Copy anything — a LinkedIn
+post, a Bluesky/X post, a Luma/Eventbrite page, a Substack post, an
+article, whatever — paste the text in (and its URL, if it's not already
+in the pasted text), hit Add. besseleth looks at the URL's domain and
+files it under the right source automatically:
+`linkedin.com`→LinkedIn, `bsky.app`/`x.com`/`twitter.com`→social,
+`lu.ma`/`eventbrite.com`/`meetup.com`→event, `substack.com`→blog,
+`arxiv.org`→arXiv — anything else lands in a generic "📌 Clipped" section
+rather than guessing wrong. You never have to pick which source it is;
+just paste. The same thing works from the CLI: `besseleth.cli paste`
+(reads stdin, or `--text`/`--url`), or force a specific source with
+`linkedin-add`/`event-add`/`social-add` if you want to skip detection.
 
-For each, drop a `.txt` or `.md` file into the folder — one snippet per
-file, or several separated by a line containing only `---`. There's no
-required format (free text is fine), but a snippet parses best like this:
+Prefer files over a browser tab open? The same content also works dropped
+as `.txt`/`.md` files into `linkedin_drops/`, `event_drops/`, or
+`social_drops/` (one dropbox per source, since a file has no "paste box"
+to auto-detect from) — one snippet per file, or several separated by a
+line containing only `---`. There's no required format (free text is
+fine), but a snippet parses best like this:
 
 ```
 <title — first line, e.g. company/event/post name>
@@ -265,10 +282,11 @@ good at this on their own sites) and paste anything worth tracking into
 config for recurring meetups/series you already know about, same idea as
 the conferences watchlist.
 
-## Industry trends (e.g. neurotech: ITR, longevity, FDA status)
+## Industry trends (ITR, longevity, electrode count, device type, material, FDA status — and business metrics)
 
 `devices.yaml` (copy from `devices.example.yaml`) is a small, hand-maintained
-dataset of devices/systems in your industry and their metrics:
+dataset of devices/systems in your industry and their metrics, accumulating
+forever — nothing here is ever reset by a later report:
 
 ```yaml
 - name: "Neuralink N1"
@@ -278,28 +296,92 @@ dataset of devices/systems in your industry and their metrics:
   metrics:
     information_transfer_rate: 40   # bits/min
     longevity_days: 730
-  source_url: "https://neuralink.com/"
+    electrode_count: 1024
+    device_type: "CNS implant"      # EEG | ECoG | CNS implant | PNS implant | EMG | ...
+    material: "not publicly specified"
+  source_url: "https://neuralink.com/updates/first-patient/"   # the specific update/paper — NOT the homepage
   date_reported: "2025-06-01"
 ```
 
-The metric keys are whatever `industry.trend_metrics` in `config.yaml`
-defines — the neurotech example ships with information transfer rate,
-implant longevity, and FDA status, but swap in whatever your industry
-measures (e.g. `battery_life_hours`, `accuracy_pct`). Every `run` renders
-a scatter chart per pair of numeric metrics (colored by FDA status, shaped
-by industry vs. academic) plus an FDA-status bar chart, embeds them in the
-report, and lists every tracked device in a table.
+**`source_url` must be the specific article/paper/press-release the
+numbers came from, not the company's homepage** — a homepage tells a
+reader nothing about where "40 bits/min" came from, and a generic link is
+the same as no citation. If you don't have a specific URL, leave it
+blank rather than pointing at a homepage.
 
-This is intentionally **not** fully automated — extracting a real number
-like "62 bits/min" reliably out of a paper's prose is exactly the kind of
-thing that goes quietly wrong unsupervised, and a trend chart is something
-you want to trust. Instead, `device-suggest` gives you a head start: point
-it at a scraped item and the local LLM drafts a `devices.yaml` entry for
-you to review and paste in — nothing is written automatically.
+The metric keys are whatever `industry.trend_metrics` in `config.yaml`
+defines — the neurotech defaults cover information transfer rate, implant
+longevity, electrode count, device type, material, and FDA status, but
+swap in whatever your industry measures (e.g. `battery_life_hours`,
+`accuracy_pct`). Every `run` renders a scatter chart per pair of numeric
+metrics (colored by FDA status, shaped by industry vs. academic) plus an
+FDA-status bar chart, embeds them in the report, and lists every tracked
+device in a table with human-readable metric tags (not raw
+`key=value` pairs) and its cited source. The dashboard's Trends explorer
+tab is the live, interactive version of the same dataset — adjustable
+X/Y axes (including **time**, to watch a metric improve release over
+release), color by any categorical field, click a point to open its
+source.
+
+**Business metrics** live separately in `companies.yaml` (copy from
+`companies.example.yaml`), since one company ships several devices —
+funding rounds (hand-maintained, same source-citation rule) and stock
+price, which refreshes for free for any entry with a `stock_ticker` set:
+
+```bash
+.venv/bin/python -m besseleth.cli company-refresh-stock
+```
+
+The dashboard's Trends explorer has a Devices/Companies toggle so both
+datasets live on the one page rather than being scattered across tabs.
+
+Adding entries to either file is intentionally **not** fully automated —
+extracting a real number like "62 bits/min" reliably out of a paper's
+prose is exactly the kind of thing that goes quietly wrong unsupervised,
+and a trend chart is something you want to trust. Instead, `device-suggest`
+gives you a head start: point it at a scraped item and the local LLM
+drafts a `devices.yaml` entry (source_url set to that item's actual URL)
+for you to review and paste in — nothing is written automatically.
 
 ```bash
 .venv/bin/python -m besseleth.cli device-suggest --item-id <id-from-report-or-db>
 ```
+
+## Backfilling history
+
+Each source's `days_back` in config.yaml controls its normal lookback
+window (default ~8 days) — enough for the recurring schedule, but thin
+context right after setup or after being away a while. Backfill further
+back on demand: the dashboard's status bar has a date picker + "Backfill"
+button, or from the CLI —
+
+```bash
+.venv/bin/python -m besseleth.cli fetch --since 2026-01-01
+```
+
+This only widens each source's lookback for that one run (never narrows
+it below the configured default) and stores whatever new items it finds
+in the same DB — it doesn't touch devices.yaml/companies.yaml, which stay
+hand-maintained.
+
+## Reports: cadence and cleanup
+
+`schedule.report_cron` (in `config.yaml`) is a plain 5-field cron
+expression, so the report cadence is whatever you want, not just weekly:
+
+```yaml
+schedule:
+  report_cron: "0 8 * * *"      # daily
+  report_cron: "0 8 * * MON"    # weekly (default)
+  report_cron: "0 8 1 * *"      # monthly
+  report_cron: "0 8 1 1 *"      # yearly
+```
+
+Reports accumulate in `reports/` — each is its own dated file, never
+overwritten. Delete one you don't need from the dashboard sidebar (🗑 next
+to its date) or `besseleth.cli report-delete <report-id>`. To prune
+automatically instead, set `reports.keep_last: N` in config.yaml to keep
+only the N most recent (0/omitted = keep everything).
 
 ## Project layout
 
@@ -323,10 +405,12 @@ besseleth/
     linkedin_scraper.py      # paste-in — see above
     manual_drop.py           # shared paste/upload mechanism
   trends/
-    store.py           # devices.yaml load/save + LLM-drafted suggestions
-    plot.py             # static matplotlib charts embedded in the report
+    store.py             # devices.yaml load/save + LLM-drafted suggestions
+    company_store.py     # companies.yaml load/save + free stock-price refresh
+    format.py            # human-readable metric formatting (shared by report + web)
+    plot.py               # static matplotlib charts embedded in the report
   web/
-    app.py              # Flask dashboard: report viewer + interactive trends
+    app.py                # Flask dashboard: reports, trends, paste box, scheduler status
     templates/dashboard.html
 ```
 

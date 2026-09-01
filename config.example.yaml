@@ -19,7 +19,10 @@ industry:
   # Numeric/categorical metrics to track over time across devices/systems
   # in the industry — see the `trends` section below and devices.yaml.
   # This schema is generic on purpose; swap keys for whatever your
-  # industry measures (e.g. "battery_life_hours", "accuracy_pct").
+  # industry measures. The neurotech defaults below cover the physical
+  # performance metrics (ITR, longevity, electrode count, material,
+  # device type, FDA status) — see `company_metrics` further down for
+  # the business-side ones (funding, stock).
   trend_metrics:
     - key: "information_transfer_rate"
       label: "Information transfer rate"
@@ -29,9 +32,35 @@ industry:
       label: "Implant longevity"
       unit: "days in vivo"
       type: "numeric"
+    - key: "electrode_count"
+      label: "Electrode count"
+      unit: "electrodes"
+      type: "numeric"
+    - key: "device_type"
+      label: "Device type"
+      type: "categorical"
+      # Free text, but keeping to a consistent vocabulary makes the
+      # "color by" dropdown in the trends explorer more useful:
+      # EEG, ECoG, CNS implant (e.g. intracortical), PNS implant, EMG
+    - key: "material"
+      label: "Electrode/substrate material"
+      type: "categorical"
+      # e.g. "platinum-iridium", "silicon", "polyimide", "carbon fiber"
     - key: "fda_status"
       label: "FDA regulatory status"
       type: "categorical"
+
+  # Company-level business metrics, tracked separately from devices (a
+  # company can ship several devices) — see companies.yaml.
+  company_metrics:
+    - key: "funding_total_usd"
+      label: "Total funding raised"
+      unit: "USD"
+      type: "numeric"
+    - key: "stock_price"
+      label: "Stock price"
+      unit: "USD"
+      type: "numeric"
 
 sources:
   arxiv:
@@ -181,8 +210,21 @@ schedule:
   report_cron: "0 8 * * MON"   # 5-field cron (UTC) for rendering the weekly report
 
 trends:
-  # Manually (or LLM-drafted, then human-confirmed) maintained device
-  # dataset — see besseleth/trends/store.py. Copy devices.example.yaml to
-  # devices.yaml and edit as you read papers/news.
+  # Manually (or LLM-drafted, then human-confirmed) maintained datasets —
+  # see besseleth/trends/store.py. Copy devices.example.yaml/
+  # companies.example.yaml to devices.yaml/companies.yaml and edit as you
+  # read papers/news. Both accumulate over time — nothing here is ever
+  # replaced by a later report, only appended to (or edited by you).
   devices_path: "devices.yaml"
+  companies_path: "companies.yaml"
   charts_dir: "reports/trends"
+
+reports:
+  # How report files pile up in report.output_dir. `report_cron` (above,
+  # in `schedule`) controls *when* a report is generated — daily
+  # ("0 8 * * *"), weekly ("0 8 * * MON"), monthly ("0 8 1 * *"), yearly
+  # ("0 8 1 1 *"), whatever cron expression you want. This section
+  # controls what happens to old ones: `keep_last` prunes automatically
+  # (0/omitted = keep everything; delete manually from the dashboard's
+  # report sidebar or `besseleth.cli report-delete <id>` instead).
+  keep_last: 0

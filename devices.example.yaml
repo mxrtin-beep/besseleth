@@ -1,11 +1,19 @@
 # Copy to devices.yaml and edit. One entry per device/system you're
-# tracking. Numbers here should be ones you've actually verified against a
-# paper/press release — this file feeds the trend charts in the report, so
-# treat it like a bibliography, not scratch notes.
+# tracking. This file accumulates — every entry you add stays here across
+# every future report, so the trends explorer builds up a real history
+# rather than resetting each week.
 #
-# `python -m besseleth.cli device-suggest` can draft an entry from a
-# recently-scraped item using the local LLM — it prints a block like this
-# for you to review and paste in, it never writes to this file directly.
+# `source_url` MUST be the specific article/paper/press-release the
+# numbers came from — not the company's homepage. "neuralink.com" tells
+# a reader nothing about where "40 bits/min" came from; the actual paper
+# or press release lets them check it. If you don't have a specific URL
+# for a number, leave source_url blank rather than pointing at a
+# homepage — a missing citation is more honest than a wrong one.
+#
+# `python -m besseleth.cli device-suggest --item-id <id>` drafts an entry
+# from a recently-scraped item using the local LLM (source_url is set
+# automatically to that item's actual URL) — it prints a block for you to
+# review and paste in here, it never writes to this file directly.
 
 - name: "Neuralink N1"
   org: "Neuralink"
@@ -14,7 +22,10 @@
   metrics:
     information_transfer_rate: 40   # bits/min
     longevity_days: 730
-  source_url: "https://neuralink.com/"
+    electrode_count: 1024
+    device_type: "CNS implant"      # EEG | ECoG | CNS implant | PNS implant | EMG | ...
+    material: "not publicly specified"
+  source_url: "https://neuralink.com/updates/first-patient/"   # the specific update/paper, not the homepage
   date_reported: "2025-06-01"
   notes: "Public figures as of mid-2025; update as new results are published."
 
@@ -25,7 +36,10 @@
   metrics:
     information_transfer_rate: 15
     longevity_days: 1095
-  source_url: "https://synchron.com/"
+    electrode_count: 16
+    device_type: "CNS implant"
+    material: "platinum-iridium"
+  source_url: "https://www.nature.com/articles/s41551-023-01029-x"   # example: the actual paper reporting these numbers
   date_reported: "2025-03-01"
   notes: ""
 
@@ -36,6 +50,9 @@
   metrics:
     information_transfer_rate: 78
     longevity_days: 365
-  source_url: "https://arxiv.org/"
+    electrode_count: 253
+    device_type: "ECoG"
+    material: "n/a (surface electrode array)"
+  source_url: "https://arxiv.org/abs/placeholder"   # cite the actual paper's arXiv/DOI link
   date_reported: "2024-08-01"
   notes: "Research prototype, not a commercial device — no FDA pathway yet."

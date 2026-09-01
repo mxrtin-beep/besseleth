@@ -9,5 +9,6 @@ reports/
 *.db-shm
 linkedin_drops/
 devices.yaml
+companies.yaml
 event_drops/
 social_drops/

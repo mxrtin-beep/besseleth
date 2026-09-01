@@ -1,27 +1,34 @@
 """A small local Flask app: browse weekly reports, explore the
 industry-trends dataset with an interactive, adjustable-axis chart
-(Plotly, client-side), and — by default — keeps itself updated on a
-schedule (see besseleth/scheduler.py) so this is a standing service, not
-a one-shot command.
+(Plotly, client-side), paste anything (LinkedIn/social/events/whatever —
+auto-classified), and — by default — keeps itself updated on a schedule
+(see besseleth/scheduler.py) so this is a standing service, not a
+one-shot command.
 
 Run with:
     .venv/bin/python -m besseleth.web.app [--config config.yaml] [--port 5050]
 
-Everything here reads the same config.yaml / devices.yaml / reports/ /
-data/besseleth.db that the CLI writes — this is a viewer (plus the
-scheduler), not a second copy of the pipeline. It's meant for
-local/personal use (no auth); don't expose it on the open internet as-is.
+Everything here reads the same config.yaml / devices.yaml / companies.yaml
+/ reports/ / data/besseleth.db that the CLI writes — this is a viewer
+(plus the scheduler and the paste box), not a second copy of the
+pipeline. It's meant for local/personal use (no auth); don't expose it on
+the open internet as-is.
 """
 from __future__ import annotations
 
 import argparse
+from datetime import date
 from pathlib import Path
 
 import markdown as md
-from flask import Flask, abort, jsonify, render_template, send_from_directory
+from flask import Flask, abort, jsonify, render_template, request, send_from_directory
 
 from ..config import Config, load_config
+from ..db import DB
+from ..pipeline import fetch_all
 from ..scheduler import SchedulerStatus, run_now, start_scheduler
+from ..scrapers.manual_drop import add_smart_item
+from ..trends.company_store import load_companies
 from ..trends.store import load_devices
 
 
@@ -51,6 +58,14 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         html = md.markdown(path.read_text(), extensions=["tables"])
         return jsonify({"report_id": report_id, "html": html})
 
+    @app.delete("/api/report/<report_id>")
+    def api_delete_report(report_id):
+        path = reports_dir / f"report-{report_id}.md"
+        if not path.exists():
+            abort(404)
+        path.unlink()
+        return jsonify({"ok": True, "deleted": report_id})
+
     @app.get("/api/devices")
     def api_devices():
         devices = load_devices(config.devices_path)
@@ -70,14 +85,40 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             ]
         )
 
+    @app.get("/api/companies")
+    def api_companies():
+        companies = load_companies(config.companies_path)
+        return jsonify(
+            [
+                {
+                    "name": c.name,
+                    "stock_ticker": c.stock_ticker,
+                    "stock_price": c.stock_price,
+                    "stock_price_updated_at": c.stock_price_updated_at,
+                    "funding_total_usd": c.funding_total_usd,
+                    "last_funding_round": c.last_funding_round,
+                    "last_funding_date": c.last_funding_date,
+                    "source_url": c.source_url,
+                    "notes": c.notes,
+                }
+                for c in companies
+            ]
+        )
+
     @app.get("/api/metrics")
     def api_metrics():
         # Axis options for the trend explorer: config-defined numeric
-        # metrics plus the built-in "date_reported" time axis.
+        # metrics plus the built-in "date_reported" time axis. Includes
+        # both the device and company metric sets — the dashboard picks
+        # whichever matches the selected dataset.
         numeric = [m for m in config.trend_metrics if m.get("type", "numeric") == "numeric"]
+        categorical = [m for m in config.trend_metrics if m.get("type") == "categorical"]
+        company_numeric = [m for m in config.company_metrics if m.get("type", "numeric") == "numeric"]
         return jsonify(
             {
                 "numeric": numeric,
+                "categorical": categorical,
+                "company_numeric": company_numeric,
                 "time_axis": {"key": "date_reported", "label": "Date reported", "unit": ""},
             }
         )
@@ -103,6 +144,46 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         # a spinner for this; poll /api/status if you'd rather not wait.
         run_now(config, status)
         return jsonify(status.as_dict())
+
+    @app.post("/api/backfill")
+    def api_backfill():
+        status = app.config["BESSELETH_STATUS"]
+        if status.running_now:
+            return jsonify({"ok": False, "message": "Already running."}), 409
+        payload = request.get_json(silent=True) or {}
+        since_str = payload.get("since", "")
+        try:
+            since = date.fromisoformat(since_str)
+        except ValueError:
+            return jsonify({"ok": False, "message": f"Invalid date {since_str!r}, expected YYYY-MM-DD."}), 400
+
+        with status._lock:
+            status.running_now = True
+        try:
+            db = DB(config.db_path)
+            try:
+                results = fetch_all(config, db, since=since)
+            finally:
+                db.close()
+            counts = {k: len(v) for k, v in results.items()}
+            return jsonify({"ok": True, "since": since_str, "counts": counts})
+        finally:
+            with status._lock:
+                status.running_now = False
+
+    @app.post("/api/paste")
+    def api_paste():
+        payload = request.get_json(silent=True) or {}
+        text = (payload.get("text") or "").strip()
+        url = payload.get("url", "")
+        if not text:
+            return jsonify({"ok": False, "message": "Nothing pasted."}), 400
+        db = DB(config.db_path)
+        try:
+            item, detected_label = add_smart_item(config, db, text, url=url)
+        finally:
+            db.close()
+        return jsonify({"ok": True, "title": item.title, "id": item.id, "detected_as": detected_label})
 
     return app
 
