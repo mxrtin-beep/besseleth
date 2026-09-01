@@ -1,17 +1,48 @@
-// Shows a small floating button near any text selection, on any page.
-// Deliberately NOT hooking site-specific DOM (X/LinkedIn/etc. change
-// their markup constantly) — "select text, click button" works
-// everywhere and never breaks when a site redesigns.
+// Two ways to clip, both landing on the same clipToBesseleth() call:
+//
+// 1. A per-post "Add to Besseleth" button, injected onto individual
+//    posts on a short list of known sites (X/Twitter, Bluesky,
+//    LinkedIn) — see SITE_CONFIGS. This hooks each site's DOM
+//    structure, which WILL occasionally break when a site redesigns —
+//    that's the tradeoff for a labeled, per-post button vs. the
+//    selection method never breaking. Wrapped defensively so a missed
+//    selector just skips that site's injection rather than throwing.
+//
+// 2. A selection-based floating button that works on ANY page,
+//    regardless of the list above — select text, a "+ besseleth"
+//    button appears. This is the reliable fallback when a site isn't
+//    in SITE_CONFIGS, or if a site's markup has drifted from the
+//    selectors below.
 
-let clipButton = null;
+const SITE_CONFIGS = [
+  {
+    name: "X",
+    hostnames: ["twitter.com", "x.com"],
+    postSelector: 'article[data-testid="tweet"]',
+    textSelector: '[data-testid="tweetText"]',
+    linkSelector: 'a[href*="/status/"]',
+  },
+  {
+    name: "Bluesky",
+    hostnames: ["bsky.app"],
+    postSelector: '[data-testid^="feedItem-"], [data-testid^="postThreadItem-"]',
+    textSelector: '[data-testid="postText"]',
+    linkSelector: 'a[href*="/post/"]',
+  },
+  {
+    name: "LinkedIn",
+    hostnames: ["linkedin.com"],
+    // LinkedIn's feed classes are the least stable of the three — if
+    // the per-post button stops appearing here, selection still works.
+    postSelector: "div.feed-shared-update-v2, div.occludable-update",
+    textSelector: ".feed-shared-update-v2__description, .update-components-text",
+    linkSelector: 'a[href*="/feed/update/"], a.app-aware-link[href*="/posts/"]',
+  },
+];
+
+const activeSiteConfig = SITE_CONFIGS.find((c) => c.hostnames.some((h) => location.hostname.endsWith(h)));
+
 let toastEl = null;
-
-function removeButton() {
-  if (clipButton) {
-    clipButton.remove();
-    clipButton = null;
-  }
-}
 
 function showToast(message, ok) {
   if (toastEl) toastEl.remove();
@@ -23,6 +54,97 @@ function showToast(message, ok) {
     toastEl?.remove();
     toastEl = null;
   }, 4500);
+}
+
+async function clip(text, url, btn) {
+  if (btn) {
+    btn.textContent = "Adding…";
+    btn.disabled = true;
+  }
+  const response = await chrome.runtime.sendMessage({
+    type: "clip",
+    payload: { text, url, title: document.title },
+  });
+  if (response.ok) {
+    if (btn) {
+      btn.textContent = "✓ Added";
+      btn.classList.add("besseleth-post-btn-done");
+    }
+    showToast(`Added as ${response.detectedAs}: "${response.title}"`, true);
+  } else {
+    if (btn) {
+      btn.textContent = "Add to Besseleth";
+      btn.disabled = false;
+    }
+    showToast(response.message, false);
+  }
+}
+
+// --- 1. Per-post buttons on known sites ---------------------------------
+
+function injectPostButton(postEl, config) {
+  if (postEl.dataset.besselethInjected) return;
+  postEl.dataset.besselethInjected = "1";
+
+  try {
+    if (getComputedStyle(postEl).position === "static") {
+      postEl.style.position = "relative";
+    }
+
+    const btn = document.createElement("button");
+    btn.className = "besseleth-post-btn";
+    btn.type = "button";
+    btn.innerHTML = '<span class="besseleth-post-btn-badge">B</span> Add to Besseleth';
+
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const textEl = postEl.querySelector(config.textSelector);
+      const text = (textEl ? textEl.innerText : postEl.innerText || "").trim().slice(0, 4000);
+      if (!text) {
+        showToast("Couldn't find text in this post — try selecting it manually instead.", false);
+        return;
+      }
+      const linkEl = postEl.querySelector(config.linkSelector);
+      const url = linkEl ? new URL(linkEl.getAttribute("href"), location.href).href : location.href;
+      clip(text, url, btn);
+    });
+
+    postEl.appendChild(btn);
+  } catch (e) {
+    // A selector mismatch or unexpected DOM shape on this post — skip
+    // it silently rather than breaking the page.
+  }
+}
+
+function scanForPosts() {
+  if (!activeSiteConfig) return;
+  document.querySelectorAll(activeSiteConfig.postSelector).forEach((postEl) => injectPostButton(postEl, activeSiteConfig));
+}
+
+if (activeSiteConfig) {
+  scanForPosts();
+  let scanScheduled = false;
+  const observer = new MutationObserver(() => {
+    if (scanScheduled) return;
+    scanScheduled = true;
+    setTimeout(() => {
+      scanScheduled = false;
+      scanForPosts();
+    }, 400); // debounced — these feeds mutate constantly on scroll
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+}
+
+// --- 2. Selection-based floating button (works on any site) ------------
+
+let clipButton = null;
+
+function removeButton() {
+  if (clipButton) {
+    clipButton.remove();
+    clipButton = null;
+  }
 }
 
 function showButton(rect) {
@@ -39,24 +161,15 @@ function showButton(rect) {
     e.stopPropagation();
     const text = window.getSelection()?.toString().trim();
     if (!text) return;
-    clipButton.textContent = "Adding…";
-    clipButton.disabled = true;
-    const response = await chrome.runtime.sendMessage({
-      type: "clip",
-      payload: { text, url: location.href, title: document.title },
-    });
+    await clip(text, location.href, null);
     removeButton();
-    if (response.ok) {
-      showToast(`Added as ${response.detectedAs}: "${response.title}"`, true);
-    } else {
-      showToast(response.message, false);
-    }
   });
 
   document.body.appendChild(clipButton);
 }
 
-document.addEventListener("mouseup", () => {
+document.addEventListener("mouseup", (e) => {
+  if (e.target?.closest?.(".besseleth-post-btn")) return;
   // Let the browser finish updating the selection first.
   setTimeout(() => {
     const selection = window.getSelection();

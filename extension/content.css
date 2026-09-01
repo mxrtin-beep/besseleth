@@ -20,6 +20,53 @@
   cursor: default;
 }
 
+.besseleth-post-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 999999;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: #10213a;
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 999px;
+  padding: 3px 10px 3px 6px;
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.6;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  opacity: 0.88;
+  transition: opacity 0.15s;
+}
+.besseleth-post-btn:hover {
+  opacity: 1;
+  background: #16305a;
+}
+.besseleth-post-btn:disabled {
+  cursor: default;
+}
+.besseleth-post-btn-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #fff;
+  color: #10213a;
+  font-family: Georgia, "Liberation Serif", serif;
+  font-weight: 700;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+.besseleth-post-btn-done {
+  background: #2a9d8f;
+}
+
 .besseleth-toast {
   position: fixed;
   z-index: 2147483647;

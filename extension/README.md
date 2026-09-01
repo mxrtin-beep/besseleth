@@ -1,16 +1,24 @@
 # besseleth Clipper
 
-A tiny browser extension: select text on any page — a LinkedIn post, a
-tweet, a Bluesky post, a Luma event, anything — and a "+ besseleth"
-button appears. Click it and the text (plus the page's URL) goes
-straight to your besseleth dashboard's Paste tab, auto-classified the
-same way the dashboard does it. No copy-paste round trip.
+A tiny browser extension for adding things to besseleth without leaving
+the page you found them on. Two ways to clip, both landing in the
+dashboard's Paste tab, auto-classified the same way pasting there does:
 
-Works on any site, not just LinkedIn/X — it doesn't hook site-specific
-page structure (which breaks every time a site redesigns), just "you
-selected some text, here's a button." Same extension source works on
-Chrome/Edge/Brave and Safari — Safari's install path is just different
-(a native-app wrapper, not "load unpacked"), see below.
+- **A labeled "Add to Besseleth" button on every post**, on X/Twitter,
+  Bluesky, and LinkedIn — appears directly on each post/tweet, no
+  selecting required. This one hooks each site's page structure, which
+  *can* break when a site redesigns (X, LinkedIn, and Bluesky all change
+  their internal markup periodically) — if buttons stop appearing on a
+  site, that's why; tell me and I'll update the selectors in
+  `content.js`'s `SITE_CONFIGS`.
+- **Select any text on any page** → a small "+ besseleth" button appears
+  near the selection. Works everywhere, including sites not in the list
+  above, and never breaks from a redesign since it doesn't depend on any
+  site-specific structure — this is the reliable fallback.
+
+Same extension source works on Chrome/Edge/Brave and Safari — Safari's
+install path is just different (a native-app wrapper, not "load
+unpacked"), see below.
 
 ## Install on Safari (macOS)
 
@@ -81,9 +89,13 @@ specifically doesn't behave — the permission prompt, the popup, whatever
 
 ## Use
 
-- **Select text on any page** → a small "+ besseleth" button appears
-  right below the selection → click it. A toast confirms what it was
-  added as ("Added as LinkedIn: ...") or tells you what went wrong.
+- **On X, Bluesky, or LinkedIn** → each post gets a small navy "Add to
+  Besseleth" button in its top-right corner. Click it — no selecting
+  needed. It flips to a green "✓ Added" once done, and a toast confirms
+  what it was classified as.
+- **Select text on any page** (these three sites included, or anywhere
+  else) → a small "+ besseleth" button appears right below the selection
+  → click it. Same toast confirmation.
 - **Right-click a selection** → "Add selection to besseleth" also works,
   if you prefer the context menu to the floating button.
 - **Extension icon → popup** → a full quick-add form (pre-filled with
