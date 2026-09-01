@@ -56,7 +56,7 @@ def generate_weekly_report(config: Config, db: DB) -> str:
     """Pulls all unreported items from the DB, personalizes, summarizes,
     renders, saves (and optionally emails) the report. Returns the file path."""
     all_unreported = db.unreported_items()
-    items_by_source: dict[str, list[Item]] = {"arxiv": [], "news": [], "conference": []}
+    items_by_source: dict[str, list[Item]] = {"arxiv": [], "news": [], "conference": [], "linkedin": []}
     for row in all_unreported:
         if row["source"] not in items_by_source:
             continue
@@ -74,7 +74,12 @@ def generate_weekly_report(config: Config, db: DB) -> str:
             )
         )
 
-    all_items = items_by_source["arxiv"] + items_by_source["news"] + items_by_source["conference"]
+    all_items = (
+        items_by_source["arxiv"]
+        + items_by_source["news"]
+        + items_by_source["conference"]
+        + items_by_source["linkedin"]
+    )
     personalize_items(all_items, config.contacts)
     personalized = [i for i in all_items if i.matched_contact]
 
@@ -94,6 +99,7 @@ def generate_weekly_report(config: Config, db: DB) -> str:
         arxiv_items=items_by_source["arxiv"][: report_cfg.get("max_items_per_section", 12)],
         news_items=items_by_source["news"][: report_cfg.get("max_items_per_section", 12)],
         conference_items=items_by_source["conference"],
+        linkedin_items=items_by_source["linkedin"][: report_cfg.get("max_items_per_section", 12)],
         personalized_items=personalized,
         summarizer_cfg=config.summarizer,
     )

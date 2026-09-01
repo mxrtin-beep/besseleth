@@ -51,16 +51,22 @@ sources:
         month: "November"
 
   linkedin:
-    enabled: false
+    enabled: true
     # LinkedIn actively blocks and prohibits automated scraping in its
     # Terms of Service — this repo does not scrape linkedin.com directly.
-    # Instead, plug in a licensed data source, e.g.:
-    #  - LinkedIn's own Jobs API / Talent Solutions (paid, official)
-    #  - Proxycurl or a similar licensed LinkedIn data provider (paid API)
-    #  - RSS feeds of company blogs / newsrooms as a free substitute
-    # Set `provider` + `api_key_env` and implement the call in
-    # besseleth/scrapers/linkedin_scraper.py (a stub is provided).
-    provider: "proxycurl"       # informational only until implemented
+    # Default path: paste/upload content yourself (free, no ToS risk) —
+    #   - drop .txt/.md files into `dropbox_dir` (one snippet per file, or
+    #     several separated by a line of "---"); besseleth picks them up
+    #     on every `fetch` and files them under dropbox_dir/processed/
+    #   - or run `python -m besseleth.cli linkedin-add` and paste a post/
+    #     job listing directly, no file needed
+    # Either way it flows through the normal pipeline: keyword matching,
+    # personalization against your contacts' companies, and the report.
+    provider: "manual"          # "manual" (default) or a licensed provider name
+    dropbox_dir: "linkedin_drops"
+    # For a licensed provider instead (Proxycurl, Coresignal, official
+    # LinkedIn Talent API, ...): set provider + api_key_env and implement
+    # the call in besseleth/scrapers/linkedin_scraper.py (fetch()).
     api_key_env: "PROXYCURL_API_KEY"
     company_pages: []           # e.g. ["neuralink", "synchron-med"]
 

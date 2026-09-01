@@ -62,14 +62,42 @@ is how a job posting at a friend's company gets called out specifically.
 
 LinkedIn's Terms of Service prohibit automated scraping of linkedin.com and
 it actively blocks/detects bot traffic, so this project **does not** scrape
-LinkedIn directly. `besseleth/scrapers/linkedin_scraper.py` is a stub with
-instructions for wiring in a compliant source instead:
+LinkedIn directly. Instead, pick whichever of these fits:
 
-- LinkedIn's own Talent/Marketing APIs (official, partner-approved)
-- A licensed data provider (e.g. Proxycurl, Coresignal)
-- Company newsroom/blog RSS feeds as a free substitute — add these to
-  `sources.news.feeds` in `config.yaml` and they'll flow through the normal
-  news pipeline and personalization matching.
+**1. Paste/upload it yourself (default, free, zero setup)**
+
+When you spot something worth tracking on LinkedIn — a job posting, a
+contact's post, a company update — copy the text and either:
+
+```bash
+# drop a file (one snippet per file, or several separated by a "---" line)
+mkdir -p linkedin_drops
+echo "Neuralink - Research Scientist
+https://www.linkedin.com/jobs/view/1234567890
+We're hiring a research scientist for our neural interfaces team..." > linkedin_drops/note.txt
+
+# or paste directly, no file needed
+.venv/bin/python -m besseleth.cli linkedin-add
+# (paste the text, then Ctrl-D)
+```
+
+Either way it's picked up on the next `fetch`/`run`, matched against your
+`industry.keywords`, checked against your contacts' companies, and folded
+into the weekly report — a pasted job posting at a friend's company gets
+flagged in "For you specifically" exactly like a scraped one would.
+Processed drop files move to `linkedin_drops/processed/` so re-running
+doesn't re-ingest them.
+
+**2. A licensed data provider** — Proxycurl, Coresignal, or similar
+(pay-as-you-go API key). Implement the call in
+`besseleth/scrapers/linkedin_scraper.py::fetch()`.
+
+**3. LinkedIn's own Talent/Marketing APIs** — official, requires partner
+approval: https://learn.microsoft.com/en-us/linkedin/
+
+**4. Company newsroom/blog RSS feeds** — a free substitute for "what's
+happening at company X". Add these to `sources.news.feeds` in
+`config.yaml` and they flow through the normal news pipeline.
 
 ## Project layout
 

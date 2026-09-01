@@ -66,7 +66,7 @@ def summarize_item(item: Item, cfg: dict) -> str:
     personalized match). Falls back to the raw summary if unavailable."""
     backend = cfg.get("backend", "none")
     if backend != "ollama":
-        return item.summary[:280]
+        return " ".join(item.summary.split())[:200]
 
     model = cfg.get("model", "llama3.1")
     ollama_url = cfg.get("ollama_url", "http://localhost:11434")
