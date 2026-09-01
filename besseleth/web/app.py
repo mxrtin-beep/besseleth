@@ -39,6 +39,14 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
 
     reports_dir = Path(config.report.get("output_dir", "reports"))
 
+    @app.get("/favicon.ico")
+    def favicon():
+        # Safari fetches /favicon.ico directly for the tab icon and
+        # ignores the <link rel="icon"> tag in dashboard.html if this
+        # 404s — serve the same PNG from here too (browsers sniff content,
+        # not the extension) so the tab icon shows up there as well.
+        return send_from_directory(Path(app.static_folder), "favicon.png", mimetype="image/png")
+
     @app.get("/")
     def index():
         reports = sorted(reports_dir.glob("report-*.md"), reverse=True)
@@ -109,9 +117,16 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
 
     @app.get("/api/papers")
     def api_papers():
+        # Renamed "Sources" in the UI — this used to default to just
+        # arxiv/news/blog, which silently hid manually-pasted LinkedIn/
+        # social/event clips from the table entirely. Now it shows every
+        # source by default; the source filter dropdown narrows it down
+        # to just arXiv (or whatever) if that's all you want.
         db = DB(config.db_path)
         try:
-            rows = db.papers(config.raw.get("enrichment", {}).get("sources", ["arxiv", "news", "blog"]))
+            rows = db.papers(
+                config.raw.get("enrichment", {}).get("sources", ["arxiv", "news", "blog", "linkedin", "social", "event", "clip"])
+            )
         finally:
             db.close()
         return jsonify(

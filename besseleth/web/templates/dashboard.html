@@ -88,7 +88,7 @@
 
   <div class="tabs">
     <button id="tabReport" class="active">Report</button>
-    <button id="tabPapers">Papers</button>
+    <button id="tabPapers">Sources</button>
     <button id="tabMap">Map</button>
     <button id="tabTrends">Trends explorer</button>
     <button id="tabPaste">Paste</button>
@@ -97,8 +97,9 @@
   <div id="reportPane"><p class="hint">Pick a report from the sidebar.</p></div>
 
   <div id="papersPane" style="display:none">
-    <p class="hint">Every arXiv/news/blog item besseleth has ever fetched, in one browsable, filterable table —
-      not just this week's. Org, modality, and therapeutic target are extracted by the local LLM after each fetch
+    <p class="hint">Every item besseleth has ever fetched or you've pasted in — arXiv, news, blog, LinkedIn, social,
+      events, everything — in one browsable, filterable table, not just this week's. Use the Source filter below to
+      narrow to just arXiv, say. Org, modality, and therapeutic target are extracted by the local LLM after each fetch
       (bounded per run — <code>besseleth.cli enrich --all</code> catches up a backlog); the novelty score rates
       how surprising an item is compared to other recent items on the same topic.
       <button class="btn" id="enrichNowBtn" style="margin-left:.5rem">Enrich now</button>
@@ -125,10 +126,10 @@
   </div>
 
   <div id="mapPane" style="display:none">
-    <p class="hint">Where the companies/labs behind your papers and news are located — one marker per org, sized by
+    <p class="hint">Where the companies/labs behind your sources are located — one marker per org, sized by
       how much has been fetched about it. Locations are the local LLM's best guess from item text (only saved when
       it's confident, not a guess), geocoded via <a href="https://www.openstreetmap.org/copyright" target="_blank"
-      rel="noopener">OpenStreetMap</a>. Click a marker to filter the Papers tab by that org.</p>
+      rel="noopener">OpenStreetMap</a>. Click a marker to filter the Sources tab by that org.</p>
     <div id="mapChart"></div>
     <p class="hint" id="mapCount"></p>
     <table class="datatable" id="mapTable"></table>
