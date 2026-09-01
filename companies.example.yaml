@@ -1,0 +1,41 @@
+# Copy to companies.yaml and edit. Business-side tracking for key
+# companies in the industry — separate from devices.yaml since one
+# company can ship several devices. Accumulates the same way: every
+# entry stays here across future reports.
+#
+# ⚠️ The funding figures/URLs below are FAKE SAMPLE DATA, invented to show
+# the shape of the file — not real numbers. Replace or delete these
+# entries; don't leave them in expecting real data. `Medtronic`'s ticker
+# is real (public company) so it's a fine one to actually keep and test
+# `company-refresh-stock` against.
+#
+# `stock_price` is optional and can be refreshed automatically (free,
+# no API key) for any entry with a `stock_ticker` set:
+#   python -m besseleth.cli company-refresh-stock
+# Funding rounds have no comparable free structured API, so
+# `funding_total_usd` is hand-maintained — same "cite the specific
+# source, never a homepage" rule as devices.yaml applies to `source_url`.
+
+- name: "FAKE EXAMPLE — Neuralink (replace me)"
+  stock_ticker: ""              # private company — leave blank
+  funding_total_usd: 700000000  # INVENTED — not a real reported figure
+  last_funding_round: "Series E"
+  last_funding_date: "2025-06-01"
+  source_url: ""   # left blank on purpose — use the real funding-announcement article, never a homepage
+  notes: "PLACEHOLDER — replace with a real, verified entry (or delete this one)."
+
+- name: "FAKE EXAMPLE — Synchron (replace me)"
+  stock_ticker: ""
+  funding_total_usd: 145000000  # INVENTED
+  last_funding_round: "Series C"
+  last_funding_date: "2024-11-01"
+  source_url: ""
+  notes: "PLACEHOLDER — replace with a real, verified entry (or delete this one)."
+
+- name: "Medtronic"
+  stock_ticker: "MDT"           # real public ticker — company-refresh-stock will actually fetch a live price for this one
+  funding_total_usd: null
+  last_funding_round: ""
+  last_funding_date: ""
+  source_url: ""
+  notes: "Public company with a neuromodulation division; kept as a real example for testing stock-price refresh."

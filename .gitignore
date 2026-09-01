@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+config.yaml
+data/
+reports/
+*.db
+*.db-wal
+*.db-shm
+linkedin_drops/
+devices.yaml
+companies.yaml
+event_drops/
+social_drops/
+.geocode_cache.json

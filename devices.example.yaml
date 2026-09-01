@@ -1,0 +1,72 @@
+# Copy to devices.yaml and edit. One entry per device/system you're
+# tracking. This file accumulates — every entry you add stays here across
+# every future report, so the trends explorer builds up a real history
+# rather than resetting each week.
+#
+# ⚠️ EVERYTHING BELOW IS FAKE SAMPLE DATA — invented to show the file's
+# shape, not looked up. The numbers, dates, and especially the
+# source_urls are placeholders and mostly do NOT resolve to a real page.
+# Delete these three entries (or overwrite them) and replace with real
+# ones from papers/press releases you actually read — don't leave the
+# samples in and expect them to work.
+#
+# `source_url` MUST be the specific article/paper/press-release the
+# numbers came from — not the company's homepage. "neuralink.com" tells
+# a reader nothing about where "40 bits/min" came from; the actual paper
+# or press release lets them check it. If you don't have a specific URL
+# for a number, leave source_url blank rather than pointing at a
+# homepage — a missing citation is more honest than a wrong one.
+#
+# `python -m besseleth.cli device-suggest --item-id <id>` drafts a real
+# entry from a recently-scraped item using the local LLM (source_url is
+# set automatically to that item's actual URL, not invented) — it prints
+# a block for you to review and paste in here, it never writes to this
+# file directly. This is the reliable way to populate real entries.
+#
+# NOTE: if you already copied an older version of this file, pulling an
+# update to besseleth does NOT touch your devices.yaml (it's gitignored,
+# yours to own) — new fields like electrode_count/device_type/material
+# won't show up in your existing entries until you add them by hand, or
+# re-copy this file for entries you haven't customized yet.
+
+- name: "FAKE EXAMPLE — Neuralink N1 (replace me)"
+  org: "Neuralink"
+  org_type: "industry"          # "industry" or "academic"
+  fda_status: "Breakthrough Device Designation"
+  metrics:
+    information_transfer_rate: 40   # bits/min — INVENTED, not a real reported figure
+    longevity_days: 730             # INVENTED
+    electrode_count: 1024           # INVENTED
+    device_type: "CNS implant"      # EEG | ECoG | CNS implant | PNS implant | EMG | ...
+    material: "not publicly specified"
+  source_url: ""   # left blank on purpose — do not fill with a homepage; use the real paper/press-release URL
+  date_reported: "2025-06-01"
+  notes: "PLACEHOLDER — replace with a real, verified entry (or delete this one)."
+
+- name: "FAKE EXAMPLE — Synchron Stentrode (replace me)"
+  org: "Synchron"
+  org_type: "industry"
+  fda_status: "Breakthrough Device Designation"
+  metrics:
+    information_transfer_rate: 15   # INVENTED
+    longevity_days: 1095            # INVENTED
+    electrode_count: 16             # INVENTED
+    device_type: "CNS implant"
+    material: "platinum-iridium"
+  source_url: ""   # left blank on purpose — see note above
+  date_reported: "2025-03-01"
+  notes: "PLACEHOLDER — replace with a real, verified entry (or delete this one)."
+
+- name: "FAKE EXAMPLE — academic speech decoder (replace me)"
+  org: "Example University"
+  org_type: "academic"
+  fda_status: "unknown"
+  metrics:
+    information_transfer_rate: 78   # INVENTED
+    longevity_days: 365             # INVENTED
+    electrode_count: 253            # INVENTED
+    device_type: "ECoG"
+    material: "n/a (surface electrode array)"
+  source_url: ""   # left blank on purpose — see note above
+  date_reported: "2024-08-01"
+  notes: "PLACEHOLDER — replace with a real, verified entry (or delete this one)."
