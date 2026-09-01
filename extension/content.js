@@ -1,12 +1,13 @@
 // Two ways to clip, both landing on the same clipToBesseleth() call:
 //
-// 1. A per-post "Add to Besseleth" button, injected onto individual
-//    posts on a short list of known sites (X/Twitter, Bluesky,
-//    LinkedIn) — see SITE_CONFIGS. This hooks each site's DOM
-//    structure, which WILL occasionally break when a site redesigns —
-//    that's the tradeoff for a labeled, per-post button vs. the
-//    selection method never breaking. Wrapped defensively so a missed
-//    selector just skips that site's injection rather than throwing.
+// 1. A per-post "B" button, injected onto individual posts on a short
+//    list of known sites (X/Twitter, Bluesky, LinkedIn) — see
+//    SITE_CONFIGS. This hooks each site's DOM structure, which WILL
+//    occasionally break when a site redesigns — that's the tradeoff for
+//    a per-post button vs. the selection method never breaking. Wrapped
+//    defensively so a missed selector just skips that post rather than
+//    throwing, and console.warns so a failure is visible in DevTools
+//    instead of just "nothing happened."
 //
 // 2. A selection-based floating button that works on ANY page,
 //    regardless of the list above — select text, a "+ besseleth"
@@ -24,6 +25,12 @@ const SITE_CONFIGS = [
     postSelector: 'article[data-testid="tweet"], article[role="article"]',
     textSelector: '[data-testid="tweetText"]',
     linkSelector: 'a[href*="/status/"]',
+    // Best-effort skip for replies shown inline in a timeline — X
+    // renders a "Replying to @user" line as the post's own leading
+    // text in that case. This is a text-content heuristic, not a
+    // documented API, so it may not catch every case; tell me if it's
+    // missing some or catching too many and I'll refine it.
+    skipTextPattern: /^Replying to/i,
   },
   {
     name: "Bluesky",
@@ -61,8 +68,8 @@ function showToast(message, ok) {
 
 async function clip(text, url, btn) {
   if (btn) {
-    btn.textContent = "Adding…";
     btn.disabled = true;
+    btn.classList.add("besseleth-post-btn-busy");
   }
   const response = await chrome.runtime.sendMessage({
     type: "clip",
@@ -70,13 +77,14 @@ async function clip(text, url, btn) {
   });
   if (response.ok) {
     if (btn) {
-      btn.textContent = "✓ Added";
+      btn.classList.remove("besseleth-post-btn-busy");
       btn.classList.add("besseleth-post-btn-done");
+      btn.innerHTML = "&#10003;"; // checkmark
     }
     showToast(`Added as ${response.detectedAs}: "${response.title}"`, true);
   } else {
     if (btn) {
-      btn.textContent = "Add to Besseleth";
+      btn.classList.remove("besseleth-post-btn-busy");
       btn.disabled = false;
     }
     showToast(response.message, false);
@@ -85,9 +93,21 @@ async function clip(text, url, btn) {
 
 // --- 1. Per-post buttons on known sites ---------------------------------
 
+function isMainPost(postEl, config) {
+  // Skip anything nested inside another matching post — a quote-tweet's
+  // embedded original, a repost-with-comment's embed, etc. render as a
+  // second matching element inside the outer one; only the outer post
+  // (what's actually in your timeline) gets a button.
+  if (postEl.parentElement?.closest(activeSiteConfig.postSelector)) return false;
+  if (config.skipTextPattern && config.skipTextPattern.test(postEl.innerText.trim())) return false;
+  return true;
+}
+
 function injectPostButton(postEl, config) {
   if (postEl.dataset.besselethInjected) return;
   postEl.dataset.besselethInjected = "1";
+
+  if (!isMainPost(postEl, config)) return;
 
   try {
     if (getComputedStyle(postEl).position === "static") {
@@ -97,7 +117,9 @@ function injectPostButton(postEl, config) {
     const btn = document.createElement("button");
     btn.className = "besseleth-post-btn";
     btn.type = "button";
-    btn.innerHTML = '<span class="besseleth-post-btn-badge">B</span> Add to Besseleth';
+    btn.title = "Add to Besseleth";
+    btn.setAttribute("aria-label", "Add to Besseleth");
+    btn.textContent = "B";
 
     btn.addEventListener("click", (e) => {
       e.preventDefault();
@@ -130,7 +152,14 @@ function scanForPosts() {
   return posts.length;
 }
 
-if (activeSiteConfig) {
+async function initPerPostButtons() {
+  if (!activeSiteConfig) return;
+  const { perPostButtonsEnabled } = await chrome.storage.local.get("perPostButtonsEnabled");
+  if (perPostButtonsEnabled === false) {
+    console.log("[besseleth] Per-post buttons disabled in extension settings — selection-based clipping still works.");
+    return;
+  }
+
   console.log(`[besseleth] Clipper active on ${activeSiteConfig.name} — watching for posts matching "${activeSiteConfig.postSelector}".`);
   const firstScanCount = scanForPosts();
   console.log(
@@ -150,6 +179,8 @@ if (activeSiteConfig) {
   });
   observer.observe(document.body, { childList: true, subtree: true });
 }
+
+initPerPostButtons();
 
 // --- 2. Selection-based floating button (works on any site) ------------
 

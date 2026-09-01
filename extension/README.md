@@ -4,13 +4,17 @@ A tiny browser extension for adding things to besseleth without leaving
 the page you found them on. Two ways to clip, both landing in the
 dashboard's Paste tab, auto-classified the same way pasting there does:
 
-- **A labeled "Add to Besseleth" button on every post**, on X/Twitter,
-  Bluesky, and LinkedIn — appears directly on each post/tweet, no
-  selecting required. This one hooks each site's page structure, which
-  *can* break when a site redesigns (X, LinkedIn, and Bluesky all change
-  their internal markup periodically) — if buttons stop appearing on a
-  site, that's why; tell me and I'll update the selectors in
-  `content.js`'s `SITE_CONFIGS`.
+- **A small "B" button on every main post**, on X/Twitter, Bluesky, and
+  LinkedIn — appears in the top-right corner of each post, no selecting
+  required (hover it for a tooltip). Only on original/main posts in your
+  timeline — quote-tweets' embedded content and (on X) replies are
+  skipped, so you don't get a button on things that aren't really their
+  own post. Toggle this off per-browser in the popup's Settings if you'd
+  rather not see it at all and just use selection-based clipping. This
+  hooks each site's page structure, which *can* break when a site
+  redesigns (X, LinkedIn, and Bluesky all change their internal markup
+  periodically) — if buttons stop appearing on a site, that's why; tell
+  me and I'll update the selectors in `content.js`'s `SITE_CONFIGS`.
 - **Select any text on any page** → a small "+ besseleth" button appears
   near the selection. Works everywhere, including sites not in the list
   above, and never breaks from a redesign since it doesn't depend on any
@@ -89,10 +93,10 @@ specifically doesn't behave — the permission prompt, the popup, whatever
 
 ## Use
 
-- **On X, Bluesky, or LinkedIn** → each post gets a small navy "Add to
-  Besseleth" button in its top-right corner. Click it — no selecting
-  needed. It flips to a green "✓ Added" once done, and a toast confirms
-  what it was classified as.
+- **On X, Bluesky, or LinkedIn** → each main post gets a small navy "B"
+  button in its top-right corner (hover for the "Add to Besseleth"
+  tooltip). Click it — no selecting needed. It turns into a green
+  checkmark once done, and a toast confirms what it was classified as.
 - **Select text on any page** (these three sites included, or anywhere
   else) → a small "+ besseleth" button appears right below the selection
   → click it. Same toast confirmation.

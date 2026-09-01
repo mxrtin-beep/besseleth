@@ -4,10 +4,12 @@ const textEl = document.getElementById("text");
 const urlEl = document.getElementById("url");
 const statusEl = document.getElementById("status");
 const serverUrlEl = document.getElementById("serverUrl");
+const perPostToggleEl = document.getElementById("perPostToggle");
 
 async function init() {
-  const { serverUrl } = await chrome.storage.local.get("serverUrl");
+  const { serverUrl, perPostButtonsEnabled } = await chrome.storage.local.get(["serverUrl", "perPostButtonsEnabled"]);
   serverUrlEl.value = serverUrl || DEFAULT_SERVER_URL;
+  perPostToggleEl.checked = perPostButtonsEnabled !== false; // default on
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) return;
@@ -74,6 +76,10 @@ document.getElementById("saveBtn").onclick = async () => {
   await chrome.storage.local.set({ serverUrl: value });
   statusEl.className = "ok";
   statusEl.textContent = `Saved. Using ${value}.`;
+};
+
+perPostToggleEl.onchange = async () => {
+  await chrome.storage.local.set({ perPostButtonsEnabled: perPostToggleEl.checked });
 };
 
 init();

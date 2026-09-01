@@ -48,6 +48,9 @@
   details { margin-top: 14px; border-top: 1px solid #eee; padding-top: 8px; }
   summary { cursor: pointer; font-size: 12px; opacity: 0.75; }
   .hint { font-size: 11px; opacity: 0.6; margin-top: 4px; }
+  .toggle-row { display: flex; align-items: center; gap: 8px; margin: 10px 0 4px; }
+  .toggle-row label { margin: 0; font-size: 12px; opacity: 1; }
+  .toggle-row input[type=checkbox] { margin: 0; width: 15px; height: 15px; }
 </style>
 </head>
 <body>
@@ -66,6 +69,14 @@
     <button class="secondary" id="saveBtn">Save</button>
     <p class="hint">Only localhost/127.0.0.1 works without an extra permission grant. For a besseleth
       running elsewhere on your network, saving a non-local URL will prompt for one-time access.</p>
+
+    <div class="toggle-row">
+      <input type="checkbox" id="perPostToggle" checked>
+      <label for="perPostToggle">Show the "B" button on individual posts (X, Bluesky, LinkedIn)</label>
+    </div>
+    <p class="hint">Turns off just the per-post button on those three sites. Selecting text and clicking
+      "+ besseleth" still works everywhere either way. Reload any open tabs on those sites for the change
+      to take effect.</p>
   </details>
 
   <script src="popup.js"></script>
