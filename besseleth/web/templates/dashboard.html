@@ -364,8 +364,8 @@ async function loadPasted() {
     <tbody>${items.map(it => `
       <tr data-item-row="${it.id}">
         <td>${(it.fetched_at || '').slice(0, 16).replace('T', ' ')}</td>
-        <td>${SOURCE_LABELS[it.source] || it.source}</td>
-        <td>${it.url ? `<a href="${it.url}" target="_blank" rel="noopener">${it.title}</a>` : it.title}<br>
+        <td>${it.url ? `<a href="${it.url}" target="_blank" rel="noopener">${SOURCE_LABELS[it.source] || it.source}</a>` : (SOURCE_LABELS[it.source] || it.source)}</td>
+        <td>${it.title}<br>
             <span class="hint">${(it.summary || '').slice(0, 140)}${(it.summary || '').length > 140 ? '…' : ''}</span></td>
         <td>${it.included_in_report ? it.included_in_report : '<span class="hint">not yet</span>'}</td>
         <td><button class="delBtn" data-del-item="${it.id}" title="Delete">🗑</button></td>
@@ -470,8 +470,8 @@ function renderPapers() {
     <tbody>${rows.map(p => `
       <tr>
         <td>${(p.published_at || '').slice(0, 10)}</td>
-        <td>${p.url ? `<a href="${p.url}" target="_blank" rel="noopener">${p.title}</a>` : p.title}</td>
-        <td>${p.source}</td>
+        <td>${p.title}</td>
+        <td>${p.url ? `<a href="${p.url}" target="_blank" rel="noopener">${p.source}</a>` : p.source}</td>
         <td>${p.org || (p.enriched ? '—' : '<span class="hint">pending</span>')}</td>
         <td>${p.org_type || ''}</td>
         <td>${p.modality || ''}</td>
