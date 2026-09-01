@@ -1,16 +1,75 @@
 # besseleth Clipper
 
-A tiny Chrome/Edge/Brave extension: select text on any page — a LinkedIn
-post, a tweet, a Bluesky post, a Luma event, anything — and a "+
-besseleth" button appears. Click it and the text (plus the page's URL)
-goes straight to your besseleth dashboard's Paste tab, auto-classified
-the same way the dashboard does it. No copy-paste round trip.
+A tiny browser extension: select text on any page — a LinkedIn post, a
+tweet, a Bluesky post, a Luma event, anything — and a "+ besseleth"
+button appears. Click it and the text (plus the page's URL) goes
+straight to your besseleth dashboard's Paste tab, auto-classified the
+same way the dashboard does it. No copy-paste round trip.
 
 Works on any site, not just LinkedIn/X — it doesn't hook site-specific
 page structure (which breaks every time a site redesigns), just "you
-selected some text, here's a button."
+selected some text, here's a button." Same extension source works on
+Chrome/Edge/Brave and Safari — Safari's install path is just different
+(a native-app wrapper, not "load unpacked"), see below.
 
-## Install (unpacked — not published to a store)
+## Install on Safari (macOS)
+
+Requires **Safari 16.4+ on macOS 13.3 (Ventura) or later** — that's when
+Safari added Manifest V3 support (background service workers,
+`host_permissions`, etc.), which this extension uses. Older Safari can't
+run it at all.
+
+Safari doesn't load a raw extension folder like Chromium browsers do —
+Apple requires web extensions to be wrapped in a native app, built
+through Xcode. This is a one-time setup per machine:
+
+1. **Install Xcode** (free, from the Mac App Store — it's large, budget
+   some time/disk). Command Line Tools alone aren't enough; you need
+   Xcode itself for the next step's `xcrun` to work fully and to build.
+2. Make sure besseleth's dashboard is running:
+   `python -m besseleth.web.app` (defaults to `http://127.0.0.1:5050`).
+3. In Terminal, from the besseleth repo root:
+   ```bash
+   xcrun safari-web-extension-converter extension --macos-only --no-open
+   ```
+   This generates a new Xcode project (in a sibling folder, named
+   something like `besseleth Clipper`) that wraps `extension/` as a
+   Safari Web Extension. Drop `--no-open` if you'd rather it open Xcode
+   for you immediately.
+4. Open the generated `.xcodeproj` in Xcode, pick **My Mac** as the run
+   destination (top toolbar), and press **▶ Run**. This builds and
+   installs a small placeholder app plus its Safari extension — the app
+   itself does nothing; it just carries the extension.
+5. In Safari: **Safari menu → Settings → Extensions tab**, and turn on
+   **besseleth Clipper**.
+6. Since this is an unsigned development build, Safari also needs
+   **Develop menu → Allow Unsigned Extensions** checked (enable the
+   Develop menu first, if it's not in your menu bar: **Safari →
+   Settings → Advanced/Developer → Show features for web developers**,
+   or on newer Safari versions there's a **Developer** tab directly in
+   Settings).
+7. Still in **Safari → Settings → Extensions → besseleth Clipper**,
+   grant it site access — Safari manages this per-site itself rather
+   than a runtime pop-up like Chrome's, so check/allow `127.0.0.1` and
+   `localhost` (or "Allow on All Websites" if that's easier for you).
+
+**After editing extension source** (if you ever tweak the JS yourself):
+re-run the `safari-web-extension-converter` command with `-f` to
+overwrite the existing project, or manually copy the changed files into
+the generated Xcode project's Resources folder — then **Run** again in
+Xcode. A plain file edit alone doesn't update the installed extension
+the way reloading works in Chrome.
+
+**What I can't verify from here**: I don't have macOS/Xcode/Safari
+available to actually run this conversion and click through it myself,
+so this is written from how Safari's extension platform is documented to
+work, not something I've watched succeed end-to-end. The extension code
+itself uses standard WebExtensions APIs (`chrome.*`, which Safari
+supports as an alias) that should carry over, but if something in Safari
+specifically doesn't behave — the permission prompt, the popup, whatever
+— tell me what you're seeing and I'll fix it.
+
+## Install on Chrome/Edge/Brave (unpacked — not published to a store)
 
 1. Make sure besseleth's dashboard is running: `python -m besseleth.web.app`
    (defaults to `http://127.0.0.1:5050` — the extension talks to this).

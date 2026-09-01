@@ -225,7 +225,10 @@ it. Same from the CLI: `besseleth.cli item-delete --item-id <id>`.
 on any page (LinkedIn, X, Bluesky, wherever) and a "+ besseleth" button
 appears; click it and the selection + page URL go straight to `/api/paste`,
 no copy-paste round trip through the dashboard. See `extension/README.md`
-for installing it (unpacked, a couple of clicks in `chrome://extensions`).
+for installing it — a couple of clicks in `chrome://extensions` on
+Chrome/Edge/Brave; on Safari it's an Xcode-wrapped build (Safari 16.4+ /
+macOS 13.3+), same source, different packaging step — instructions for
+both are there.
 
 **Avoiding duplicate coverage**: a pasted item goes into the same pool as
 everything scraped, so if you paste a LinkedIn post about a funding round
