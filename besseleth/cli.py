@@ -133,14 +133,14 @@ def main(argv=None):
         return
 
     if args.command == "enrich":
-        from .enrich import enrich_items
+        from .enrich import enrich_items_detailed
 
         db = DB(config.db_path)
         try:
             if args.all:
                 config.raw.setdefault("enrichment", {})["max_items_per_run"] = 1_000_000
-            n = enrich_items(config, db)
-            print(f"[cli] Enriched {n} item(s).")
+            result = enrich_items_detailed(config, db)
+            print(f"[cli] {result['message']}")
         finally:
             db.close()
         return

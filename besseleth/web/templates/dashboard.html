@@ -102,6 +102,7 @@
       how surprising an item is compared to other recent items on the same topic.
       <button class="btn" id="enrichNowBtn" style="margin-left:.5rem">Enrich now</button>
     </p>
+    <p class="hint" id="enrichResult"></p>
     <div class="controls">
       <div><label for="pfFrom">From</label><input type="date" id="pfFrom"></div>
       <div><label for="pfTo">To</label><input type="date" id="pfTo"></div>
@@ -497,16 +498,20 @@ async function loadPapers() {
 
 document.getElementById('enrichNowBtn').onclick = async (ev) => {
   const btn = ev.target;
+  const resultEl = document.getElementById('enrichResult');
   btn.disabled = true;
   btn.textContent = 'Enriching…';
+  resultEl.textContent = '';
   try {
     const res = await fetch('/api/enrich', { method: 'POST' });
     const data = await res.json();
     papersLoaded = false;
     await loadPapers();
     btn.textContent = `Enrich now (+${data.enriched})`;
+    resultEl.textContent = data.message || '';
   } catch (e) {
     btn.textContent = 'Enrich now (failed)';
+    resultEl.textContent = 'Request failed — see server log.';
   } finally {
     setTimeout(() => { btn.disabled = false; btn.textContent = 'Enrich now'; }, 2500);
   }

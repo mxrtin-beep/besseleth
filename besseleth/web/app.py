@@ -206,14 +206,14 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
 
     @app.post("/api/enrich")
     def api_enrich():
-        from ..enrich import enrich_items
+        from ..enrich import enrich_items_detailed
 
         db = DB(config.db_path)
         try:
-            n = enrich_items(config, db)
+            result = enrich_items_detailed(config, db)
         finally:
             db.close()
-        return jsonify({"ok": True, "enriched": n})
+        return jsonify({"ok": True, "enriched": result["processed"], "message": result["message"], "backend": result["backend"]})
 
     @app.post("/api/backfill")
     def api_backfill():

@@ -16,6 +16,11 @@ unbounded number of LLM calls), best-effort:
     (no `enriched_at`) so the next fetch retries it instead of silently
     giving up.
 
+`enrich_items()` returns just a count (0 is ambiguous — disabled? nothing
+pending? Ollama down?) for backward compatibility; `enrich_items_detailed()`
+returns *why*, and is what the CLI and dashboard "Enrich now" button use
+so a 0 always comes with an explanation instead of silently doing nothing.
+
 Auto-extraction into devices.yaml/companies.yaml stays auditable rather
 than "trust the AI": every auto-added entry is tagged `auto_extracted:
 true`, keeps its `source_url` (the actual item, not a homepage) so a
@@ -33,7 +38,9 @@ from __future__ import annotations
 import json
 import re
 
-from .config import Config
+import requests
+
+from .config import Config, env
 from .db import DB
 from .geocode import geocode
 from .trends.company_store import auto_upsert_company
@@ -53,6 +60,27 @@ def _extract_json(text: str) -> dict | None:
         return json.loads(match.group(0))
     except json.JSONDecodeError:
         return None
+
+
+def ollama_status(summarizer_cfg: dict) -> tuple[bool, str]:
+    """Quick reachability + model check. Returns (ok, message)."""
+    ollama_url = summarizer_cfg.get("ollama_url", "http://localhost:11434")
+    model = summarizer_cfg.get("model", "llama3.1")
+    try:
+        resp = requests.get(f"{ollama_url.rstrip('/')}/api/tags", timeout=5)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        return False, (
+            f"Can't reach Ollama at {ollama_url} ({e}). Install it from https://ollama.ai, "
+            f"then run `ollama serve` (or it's already running as a background service on Mac/Windows)."
+        )
+    tags = resp.json().get("models", [])
+    have = {t.get("name", "").split(":")[0] for t in tags}
+    if model.split(":")[0] not in have:
+        return False, (
+            f"Ollama is running, but model {model!r} isn't pulled. Run: ollama pull {model}"
+        )
+    return True, f"Ollama reachable at {ollama_url}, model {model!r} available."
 
 
 def _build_prompt(row, config: Config, context: str) -> str:
@@ -158,31 +186,49 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
     return True
 
 
-def enrich_items(config: Config, db: DB) -> int:
+def enrich_items_detailed(config: Config, db: DB) -> dict:
     """Enriches up to `enrichment.max_items_per_run` unenriched items.
-    Returns the count actually processed (saved, success or fallback)."""
+    Returns {"processed": int, "message": str, "backend": str} — the
+    message always explains a 0, so 'nothing happened' is never silent:
+    enrichment disabled in config, nothing left to enrich (already
+    caught up), no LLM configured (marked unknown instead), or Ollama
+    unreachable (left pending — will retry once it's back)."""
     cfg = config.raw.get("enrichment", {}) or {}
+    summarizer_cfg = config.summarizer
+    backend = summarizer_cfg.get("backend", "none")
+
     if not cfg.get("enabled", True):
-        return 0
+        return {"processed": 0, "message": "enrichment.enabled is false in config.yaml — nothing to do.", "backend": backend}
 
     sources = cfg.get("sources", DEFAULT_SOURCES)
     max_items = cfg.get("max_items_per_run", 20)
-    summarizer_cfg = config.summarizer
 
     rows = db.unenriched_items(sources, max_items)
     if not rows:
-        return 0
+        return {
+            "processed": 0,
+            "message": "Nothing to enrich — every item in enrichment.sources is already tagged (or unknown).",
+            "backend": backend,
+        }
 
-    if summarizer_cfg.get("backend") != "ollama":
-        # No LLM available — mark everything "unknown" so these items
-        # aren't retried forever; there's nothing more to learn without one.
+    if backend != "ollama":
         for row in rows:
             db.save_enrichment(
                 row["id"], org=None, org_type="unknown", modality="unknown",
                 therapeutic_target="unknown", novelty_score=None, novelty_rationale=None,
             )
-        print(f"[enrich] No LLM configured; marked {len(rows)} item(s) unknown rather than leaving them unprocessed.")
-        return len(rows)
+        msg = (
+            f"summarizer.backend is {backend!r}, not 'ollama' — marked {len(rows)} item(s) 'unknown' rather than "
+            f"leaving them pending. Set summarizer.backend: \"ollama\" in config.yaml and have Ollama running to "
+            f"actually extract org/modality/location/etc."
+        )
+        print(f"[enrich] {msg}")
+        return {"processed": len(rows), "message": msg, "backend": backend}
+
+    ok, status_msg = ollama_status(summarizer_cfg)
+    if not ok:
+        print(f"[enrich] {status_msg}")
+        return {"processed": 0, "message": status_msg, "backend": backend}
 
     processed = 0
     for row in rows:
@@ -192,5 +238,15 @@ def enrich_items(config: Config, db: DB) -> int:
         except Exception as e:
             print(f"[enrich] Failed on item {row['id']}: {e}")
 
-    print(f"[enrich] Enriched {processed}/{len(rows)} item(s).")
-    return processed
+    if processed < len(rows):
+        message = f"Enriched {processed}/{len(rows)} — the rest failed mid-call and will retry next run (see server log)."
+    else:
+        message = f"Enriched {processed} item(s)."
+    print(f"[enrich] {message}")
+    return {"processed": processed, "message": message, "backend": backend}
+
+
+def enrich_items(config: Config, db: DB) -> int:
+    """Same as enrich_items_detailed(), returning just the count — kept
+    for existing callers (the post-fetch pipeline step)."""
+    return enrich_items_detailed(config, db)["processed"]
