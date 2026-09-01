@@ -5,9 +5,13 @@ A weekly industry-briefing bot. Point it at an industry (e.g.
 
 - Pulls recent **arXiv** papers matching your keywords/categories (free, official API)
 - Pulls **news** from RSS feeds — including a free Google News search feed by default (optionally NewsAPI.org too)
-- Tracks a curated **conferences/events** watchlist you maintain in config
+- Pulls **blogs** (company/lab blogs, researcher Substacks) from RSS — Substack needs no code, just its `/feed` URL
+- Tracks a curated **conferences** watchlist, plus optional **conference news** (CFPs, accepted talks) via each conference's own RSS feed
+- Finds **IRL events near you** — Luma calendars (iCal), Eventbrite organizers you follow, a curated local-meetup watchlist, and paste-in for anything else (see below — real geo-search APIs for events mostly don't exist for free, so paste-in is the reliable path)
+- Pulls **Bluesky** posts (free public search API) and **X/Twitter** (paid API if you have a token, otherwise paste-in)
 - Flags **LinkedIn** as a source with a compliant path (see below — no ToS-violating scraping)
 - **Personalizes**: if an item mentions a company one of your contacts works at (e.g. a job posting at your friend's company), it's pulled into its own "For you specifically" section
+- **Tracks industry trends**: a hand-maintained (optionally LLM-drafted) dataset of devices/systems and their metrics — e.g. for neurotech, information transfer rate, implant longevity, and FDA status — charted automatically into the report
 - **Summarizes** each section with a free local LLM via [Ollama](https://ollama.ai) — falls back to a plain extractive summary if Ollama isn't running, so it never blocks
 - Writes a Markdown report to `reports/`, and can email it via SMTP
 - Dedupes across runs in a local SQLite DB, so re-running never repeats old items
@@ -17,7 +21,8 @@ A weekly industry-briefing bot. Point it at an industry (e.g.
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp config.example.yaml config.yaml
-# edit config.yaml: industry keywords, contacts, feeds, watchlist
+cp devices.example.yaml devices.yaml   # for the trends feature — optional
+# edit config.yaml: industry keywords, contacts, feeds, watchlists
 ```
 
 Optional — for local LLM summaries:
@@ -99,22 +104,144 @@ approval: https://learn.microsoft.com/en-us/linkedin/
 happening at company X". Add these to `sources.news.feeds` in
 `config.yaml` and they flow through the normal news pipeline.
 
+## What can I paste in? (LinkedIn, events, social)
+
+Three sources have no good free scraping/search API, so they all share the
+same paste/upload mechanism (`besseleth/scrapers/manual_drop.py`):
+**LinkedIn** (`linkedin_drops/`), **IRL events** (`event_drops/`), and
+**social posts** (`social_drops/`).
+
+For each, drop a `.txt` or `.md` file into the folder — one snippet per
+file, or several separated by a line containing only `---`. There's no
+required format (free text is fine), but a snippet parses best like this:
+
+```
+<title — first line, e.g. company/event/post name>
+<optional second line — date, location, author, whatever>
+<a URL, anywhere in the snippet>
+<the rest — description/body text>
+```
+
+The **title** is just the file's first non-empty line, the **URL** is the
+first `http(s)://` found anywhere in the snippet, and the **body** is the
+whole snippet — that's it. Any plain-text copy-paste works: from the
+browser, a forwarded email, OCR output, whatever's convenient. Concretely:
+
+```bash
+# a LinkedIn job posting
+cat > linkedin_drops/note.txt << 'EOF'
+Neuralink - Research Scientist, Neural Interfaces
+San Francisco, CA · Posted 2 days ago
+https://www.linkedin.com/jobs/view/1234567890
+We're hiring a research scientist to join our neural interfaces team...
+EOF
+
+# a Luma event page
+cat > event_drops/meetup.txt << 'EOF'
+Neurotech SF Meetup — October Demo Night
+Thu, Oct 9 · 6:00 PM PDT · San Francisco, CA
+https://lu.ma/neurotech-sf-oct
+Monthly meetup for neurotech founders and engineers. This month: live
+BCI demos from three local startups.
+EOF
+
+# a tweet/Bluesky post
+cat > social_drops/post.txt << 'EOF'
+@some_researcher: "Just posted our new results on closed-loop DBS..."
+https://x.com/some_researcher/status/1234567890
+EOF
+```
+
+Everything you drop is picked up on the next `fetch`/`run`, matched
+against `industry.keywords`, checked against your contacts' companies for
+personalization, and folded into the weekly report. Processed files move
+to `<dropbox>/processed/` so re-running never re-ingests them. Prefer not
+to touch the filesystem? Use the CLI instead — same result, no file:
+
+```bash
+.venv/bin/python -m besseleth.cli linkedin-add   # then paste, Ctrl-D
+.venv/bin/python -m besseleth.cli event-add
+.venv/bin/python -m besseleth.cli social-add
+```
+
+## IRL events near you
+
+Real "find events near me" search APIs mostly don't exist for free
+anymore:
+
+- **Eventbrite** removed its public general-search endpoint in 2019. A
+  free personal token can still list events for **organizers you follow**
+  (`sources.events.eventbrite.organizer_ids` + `EVENTBRITE_TOKEN` env var)
+  — not a geo search, but useful if you already know who to watch.
+- **Luma** has no search API, but does publish a free `.ics` calendar feed
+  per calendar you follow — grab the link from a calendar's "Subscribe"
+  button and add it to `sources.events.luma.luma_calendar_ical_urls`.
+
+For actual geo-discovery, browse Luma/Eventbrite/Meetup yourself (they're
+good at this on their own sites) and paste anything worth tracking into
+`event_drops/` — see above. Also maintain a `sources.events.watchlist` in
+config for recurring meetups/series you already know about, same idea as
+the conferences watchlist.
+
+## Industry trends (e.g. neurotech: ITR, longevity, FDA status)
+
+`devices.yaml` (copy from `devices.example.yaml`) is a small, hand-maintained
+dataset of devices/systems in your industry and their metrics:
+
+```yaml
+- name: "Neuralink N1"
+  org: "Neuralink"
+  org_type: "industry"          # "industry" or "academic"
+  fda_status: "Breakthrough Device Designation"
+  metrics:
+    information_transfer_rate: 40   # bits/min
+    longevity_days: 730
+  source_url: "https://neuralink.com/"
+  date_reported: "2025-06-01"
+```
+
+The metric keys are whatever `industry.trend_metrics` in `config.yaml`
+defines — the neurotech example ships with information transfer rate,
+implant longevity, and FDA status, but swap in whatever your industry
+measures (e.g. `battery_life_hours`, `accuracy_pct`). Every `run` renders
+a scatter chart per pair of numeric metrics (colored by FDA status, shaped
+by industry vs. academic) plus an FDA-status bar chart, embeds them in the
+report, and lists every tracked device in a table.
+
+This is intentionally **not** fully automated — extracting a real number
+like "62 bits/min" reliably out of a paper's prose is exactly the kind of
+thing that goes quietly wrong unsupervised, and a trend chart is something
+you want to trust. Instead, `device-suggest` gives you a head start: point
+it at a scraped item and the local LLM drafts a `devices.yaml` entry for
+you to review and paste in — nothing is written automatically.
+
+```bash
+.venv/bin/python -m besseleth.cli device-suggest --item-id <id-from-report-or-db>
+```
+
 ## Project layout
 
 ```
 besseleth/
-  config.py        # loads config.yaml
-  db.py             # sqlite store + dedup
-  personalize.py    # contact/company matching
-  summarizer.py     # Ollama-backed (or extractive) summaries
-  report.py         # markdown rendering + email
+  config.py          # loads config.yaml
+  db.py              # sqlite store + dedup
+  personalize.py     # contact/company matching
+  summarizer.py      # Ollama-backed (or extractive) summaries
+  report.py          # markdown rendering + email
   pipeline.py        # orchestrates scrape -> personalize -> summarize -> report
-  cli.py            # `fetch` / `report` / `run` commands
+  cli.py             # fetch / report / run / *-add / device-suggest commands
   scrapers/
     arxiv_scraper.py
     news_scraper.py
-    conference_scraper.py
-    linkedin_scraper.py   # stub — see above
+    blog_scraper.py
+    conference_scraper.py    # watchlist + per-conference news feeds
+    events_scraper.py        # Luma ical, Eventbrite organizers, watchlist, paste-in
+    social_scraper.py        # Bluesky (free API), X (paid API or paste-in)
+    linkedin_scraper.py      # paste-in — see above
+    manual_drop.py           # shared paste/upload mechanism
+  trends/
+    store.py           # devices.yaml load/save + LLM-drafted suggestions
+    plot.py             # matplotlib charts for the report
 ```
 
 ## Notes

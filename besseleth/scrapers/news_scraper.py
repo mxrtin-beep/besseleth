@@ -17,12 +17,12 @@ from ..db import Item
 from .util import stable_id, strip_html, text_matches_keywords
 
 
-def _parse_feed_entries(feed_url: str, config, cutoff: datetime) -> list[Item]:
+def _parse_feed_entries(feed_url: str, config, cutoff: datetime, source: str = "news") -> list[Item]:
     items = []
     try:
         parsed = feedparser.parse(feed_url)
     except Exception as e:
-        print(f"[news] failed to parse feed {feed_url}: {e}")
+        print(f"[{source}] failed to parse feed {feed_url}: {e}")
         return items
 
     for entry in parsed.entries:
@@ -41,8 +41,8 @@ def _parse_feed_entries(feed_url: str, config, cutoff: datetime) -> list[Item]:
 
         items.append(
             Item(
-                id=stable_id("news", url or title),
-                source="news",
+                id=stable_id(source, url or title),
+                source=source,
                 title=title,
                 url=url,
                 summary=summary,
@@ -97,26 +97,36 @@ def _fetch_newsapi(config, cutoff: datetime) -> list[Item]:
     return items
 
 
-def fetch(config, source_cfg: dict, days_back: int) -> list[Item]:
+def fetch_feeds(config, feeds: list[str], days_back: int, source: str = "news") -> list[Item]:
+    """Generic RSS/Atom fetch usable for news, blogs, or any other
+    feed-based source — just pass a different `source` label."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
     items: list[Item] = []
     seen_ids: set[str] = set()
 
-    for feed_template in source_cfg.get("feeds", []):
+    for feed_template in feeds:
         if "{query}" in feed_template:
             for keyword in config.keywords:
                 url = feed_template.format(query=quote(keyword))
-                for it in _parse_feed_entries(url, config, cutoff):
+                for it in _parse_feed_entries(url, config, cutoff, source=source):
                     if it.id not in seen_ids:
                         items.append(it)
                         seen_ids.add(it.id)
         else:
-            for it in _parse_feed_entries(feed_template, config, cutoff):
+            for it in _parse_feed_entries(feed_template, config, cutoff, source=source):
                 if it.id not in seen_ids:
                     items.append(it)
                     seen_ids.add(it.id)
 
+    return items
+
+
+def fetch(config, source_cfg: dict, days_back: int) -> list[Item]:
+    items = fetch_feeds(config, source_cfg.get("feeds", []), days_back, source="news")
+    seen_ids = {i.id for i in items}
+
     if source_cfg.get("use_newsapi"):
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
         for it in _fetch_newsapi(config, cutoff):
             if it.id not in seen_ids:
                 items.append(it)

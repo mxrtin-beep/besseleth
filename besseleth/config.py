@@ -29,6 +29,14 @@ class Config:
         return list(self.raw["industry"].get("arxiv_categories", []))
 
     @property
+    def trend_metrics(self) -> list[dict]:
+        return list(self.raw["industry"].get("trend_metrics", []))
+
+    @property
+    def devices_path(self) -> Path:
+        return Path(self.raw.get("trends", {}).get("devices_path", "devices.yaml"))
+
+    @property
     def contacts(self) -> list[dict]:
         return list(self.raw.get("contacts", []))
 

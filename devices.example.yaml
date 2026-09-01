@@ -1,0 +1,41 @@
+# Copy to devices.yaml and edit. One entry per device/system you're
+# tracking. Numbers here should be ones you've actually verified against a
+# paper/press release — this file feeds the trend charts in the report, so
+# treat it like a bibliography, not scratch notes.
+#
+# `python -m besseleth.cli device-suggest` can draft an entry from a
+# recently-scraped item using the local LLM — it prints a block like this
+# for you to review and paste in, it never writes to this file directly.
+
+- name: "Neuralink N1"
+  org: "Neuralink"
+  org_type: "industry"          # "industry" or "academic"
+  fda_status: "Breakthrough Device Designation"
+  metrics:
+    information_transfer_rate: 40   # bits/min
+    longevity_days: 730
+  source_url: "https://neuralink.com/"
+  date_reported: "2025-06-01"
+  notes: "Public figures as of mid-2025; update as new results are published."
+
+- name: "Synchron Stentrode"
+  org: "Synchron"
+  org_type: "industry"
+  fda_status: "Breakthrough Device Designation"
+  metrics:
+    information_transfer_rate: 15
+    longevity_days: 1095
+  source_url: "https://synchron.com/"
+  date_reported: "2025-03-01"
+  notes: ""
+
+- name: "UCSF/UCB speech decoder (academic)"
+  org: "UC San Francisco / UC Berkeley"
+  org_type: "academic"
+  fda_status: "unknown"
+  metrics:
+    information_transfer_rate: 78
+    longevity_days: 365
+  source_url: "https://arxiv.org/"
+  date_reported: "2024-08-01"
+  notes: "Research prototype, not a commercial device — no FDA pathway yet."

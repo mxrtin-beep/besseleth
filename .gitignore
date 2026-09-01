@@ -8,3 +8,6 @@ reports/
 *.db-wal
 *.db-shm
 linkedin_drops/
+devices.yaml
+event_drops/
+social_drops/

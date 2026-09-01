@@ -16,6 +16,23 @@ industry:
     - "eess.SP"
     - "cs.HC"
 
+  # Numeric/categorical metrics to track over time across devices/systems
+  # in the industry — see the `trends` section below and devices.yaml.
+  # This schema is generic on purpose; swap keys for whatever your
+  # industry measures (e.g. "battery_life_hours", "accuracy_pct").
+  trend_metrics:
+    - key: "information_transfer_rate"
+      label: "Information transfer rate"
+      unit: "bits/min"
+      type: "numeric"
+    - key: "longevity_days"
+      label: "Implant longevity"
+      unit: "days in vivo"
+      type: "numeric"
+    - key: "fda_status"
+      label: "FDA regulatory status"
+      type: "categorical"
+
 sources:
   arxiv:
     enabled: true
@@ -34,11 +51,23 @@ sources:
     # Optional: set NEWSAPI_KEY env var to also pull from newsapi.org.
     use_newsapi: false
 
+  blogs:
+    enabled: true
+    days_back: 8
+    # Company engineering blogs, lab blogs, researcher Substacks. Any
+    # Substack works at https://<name>.substack.com/feed — no API needed.
+    feeds:
+      - "https://neuralink.com/blog/feed/"
+      - "https://example-neurotech-researcher.substack.com/feed"
+
   conferences:
     enabled: true
     # No good free structured API for conferences exists, so this is a
     # curated, hand-maintained list. Add/edit freely — each entry is
-    # matched against `industry.keywords` by name/description.
+    # matched against `industry.keywords` by name/description. Optionally
+    # add `news_feed` (an RSS/Atom feed the conference itself publishes —
+    # accepted-talk announcements, CFP deadlines, its own blog) and those
+    # get pulled in as a separate "conference news" section.
     watchlist:
       - name: "Society for Neuroscience (SfN) Annual Meeting"
         url: "https://www.sfn.org/meetings"
@@ -49,6 +78,43 @@ sources:
       - name: "Neurotech Leaders Forum"
         url: "https://neurotechleadersforum.com/"
         month: "November"
+
+  # IRL events near you — meetups, demo nights, local talks. See
+  # besseleth/scrapers/events_scraper.py for the real capabilities/limits
+  # of Luma and Eventbrite's free APIs (both are narrower than a plain
+  # "find events near me" search); the paste/upload fallback is the
+  # reliable free path for true geo-discovery.
+  events:
+    enabled: true
+    dropbox_dir: "event_drops"
+    # Recurring meetups/series you already know about.
+    watchlist:
+      - name: "Neurotech SF Meetup"
+        url: "https://lu.ma/neurotech-sf"
+        location: "San Francisco, CA"
+        cadence: "Monthly"
+    luma:
+      # .ics feed URL per Luma calendar you follow — see the "Subscribe"
+      # button on the calendar's page for the link.
+      luma_calendar_ical_urls: []
+    eventbrite:
+      # Not a geo search — lists events for organizers you specify.
+      # Requires EVENTBRITE_TOKEN env var (free personal OAuth token).
+      organizer_ids: []
+
+  social:
+    enabled: true
+    days_back: 8
+    dropbox_dir: "social_drops"
+    bluesky:
+      enabled: true               # free public search API, no key needed
+      max_results_per_keyword: 25
+    twitter:
+      # X's free API tier has no search endpoint (removed 2023) — a paid
+      # Basic/Pro plan + X_BEARER_TOKEN env var is required for live
+      # search. Without a token this falls back to social_drops/ paste-in.
+      enabled: true
+      max_results_per_keyword: 25
 
   linkedin:
     enabled: true
@@ -103,3 +169,10 @@ report:
 
 database:
   path: "data/besseleth.db"
+
+trends:
+  # Manually (or LLM-drafted, then human-confirmed) maintained device
+  # dataset — see besseleth/trends/store.py. Copy devices.example.yaml to
+  # devices.yaml and edit as you read papers/news.
+  devices_path: "devices.yaml"
+  charts_dir: "reports/trends"
