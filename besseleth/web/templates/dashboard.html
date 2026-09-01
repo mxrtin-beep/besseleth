@@ -88,6 +88,7 @@
   <div class="tabs">
     <button id="tabReport" class="active">Report</button>
     <button id="tabPapers">Sources</button>
+    <button id="tabOrgs">Orgs</button>
     <button id="tabMap">Map</button>
     <button id="tabTrends">Trends explorer</button>
     <button id="tabPaste">Paste</button>
@@ -122,6 +123,18 @@
     </div>
     <p class="hint" id="papersCount"></p>
     <table class="datatable" id="papersTable"></table>
+  </div>
+
+  <div id="orgsPane" style="display:none">
+    <p class="hint">Every lab, academic/government institution, and company besseleth has extracted an org name
+      for — the full set the Map tab's markers are drawn from, plus orgs that never resolved to a location.
+      Funding/stock columns come from <code>companies.yaml</code> where the name matches.</p>
+    <div class="controls">
+      <div><label for="ofOrgType">Org type</label><select id="ofOrgType"><option value="">All</option></select></div>
+      <div><label for="ofSource">Source</label><select id="ofSource"><option value="">All</option></select></div>
+    </div>
+    <p class="hint" id="orgsCount"></p>
+    <table class="datatable" id="orgsTable"></table>
   </div>
 
   <div id="mapPane" style="display:none">
@@ -191,11 +204,13 @@
 <script>
 const reportPane = document.getElementById('reportPane');
 const papersPane = document.getElementById('papersPane');
+const orgsPane = document.getElementById('orgsPane');
 const mapPane = document.getElementById('mapPane');
 const trendsPane = document.getElementById('trendsPane');
 const pastePane = document.getElementById('pastePane');
 const tabReport = document.getElementById('tabReport');
 const tabPapers = document.getElementById('tabPapers');
+const tabOrgs = document.getElementById('tabOrgs');
 const tabMap = document.getElementById('tabMap');
 const tabTrends = document.getElementById('tabTrends');
 const tabPaste = document.getElementById('tabPaste');
@@ -203,20 +218,24 @@ const tabPaste = document.getElementById('tabPaste');
 function showTab(which) {
   reportPane.style.display = which === 'report' ? 'block' : 'none';
   papersPane.style.display = which === 'papers' ? 'block' : 'none';
+  orgsPane.style.display = which === 'orgs' ? 'block' : 'none';
   mapPane.style.display = which === 'map' ? 'block' : 'none';
   trendsPane.style.display = which === 'trends' ? 'block' : 'none';
   pastePane.style.display = which === 'paste' ? 'block' : 'none';
   tabReport.classList.toggle('active', which === 'report');
   tabPapers.classList.toggle('active', which === 'papers');
+  tabOrgs.classList.toggle('active', which === 'orgs');
   tabMap.classList.toggle('active', which === 'map');
   tabTrends.classList.toggle('active', which === 'trends');
   tabPaste.classList.toggle('active', which === 'paste');
   if (which === 'papers' && !papersLoaded) loadPapers();
+  if (which === 'orgs' && !orgsLoaded) loadOrgs();
   if (which === 'map' && !mapLoaded) loadMap();
   if (which === 'paste') loadPasted();
 }
 tabReport.onclick = () => showTab('report');
 tabPapers.onclick = () => showTab('papers');
+tabOrgs.onclick = () => showTab('orgs');
 tabMap.onclick = () => showTab('map');
 tabTrends.onclick = () => showTab('trends');
 tabPaste.onclick = () => showTab('paste');
@@ -495,6 +514,55 @@ async function loadPapers() {
   ['pfFrom', 'pfTo', 'pfSource', 'pfOrgType', 'pfOrg', 'pfModality', 'pfTarget', 'pfNovelty', 'pfSort']
     .forEach(id => document.getElementById(id).onchange = renderPapers);
   renderPapers();
+}
+
+// --- Orgs table --------------------------------------------------------
+let orgsLoaded = false;
+let orgs = [];
+
+function fmtUsd(n) {
+  if (n === null || n === undefined) return '';
+  if (n >= 1e9) return `$${(n / 1e9).toFixed(1)}B`;
+  if (n >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `$${(n / 1e3).toFixed(0)}K`;
+  return `$${n}`;
+}
+
+async function loadOrgs() {
+  orgsLoaded = true;
+  const res = await fetch('/api/orgs');
+  orgs = await res.json();
+  populateSelect('ofOrgType', uniqueSorted(orgs.map(o => o.org_type)));
+  populateSelect('ofSource', uniqueSorted(orgs.flatMap(o => o.sources)));
+  ['ofOrgType', 'ofSource'].forEach(id => document.getElementById(id).onchange = renderOrgs);
+  renderOrgs();
+}
+
+function renderOrgs() {
+  const orgType = document.getElementById('ofOrgType').value;
+  const source = document.getElementById('ofSource').value;
+
+  const rows = orgs.filter(o => {
+    if (orgType && o.org_type !== orgType) return false;
+    if (source && !o.sources.includes(source)) return false;
+    return true;
+  });
+
+  document.getElementById('orgsCount').textContent = `${rows.length} of ${orgs.length} org(s).`;
+
+  const table = document.getElementById('orgsTable');
+  table.innerHTML = `
+    <thead><tr><th>Org</th><th>Type</th><th>Location</th><th>Items</th><th>Sources</th><th>Ticker</th><th>Funding</th></tr></thead>
+    <tbody>${rows.map(o => `
+      <tr>
+        <td>${o.org}</td>
+        <td>${o.org_type || ''}</td>
+        <td>${o.location_text || (o.lat ? '' : '<span class="hint">not located</span>')}</td>
+        <td>${o.item_count}</td>
+        <td>${o.sources.join(', ')}</td>
+        <td>${o.stock_ticker || ''}</td>
+        <td>${fmtUsd(o.funding_total_usd)}${o.last_funding_round ? ` (${o.last_funding_round})` : ''}</td>
+      </tr>`).join('')}</tbody>`;
 }
 
 document.getElementById('enrichNowBtn').onclick = async (ev) => {

@@ -214,6 +214,28 @@ class DB:
         """
         return list(self.conn.execute(q).fetchall())
 
+    def orgs(self) -> list[sqlite3.Row]:
+        """Every org (company/lab/institution) besseleth has extracted from
+        an item, whether or not it was ever geocoded — the superset of
+        locations(), which only covers the subset that resolved to a
+        lat/lon. This is the source for the standalone Orgs table; the
+        map itself still needs a location, so it stays scoped to that
+        narrower set."""
+        self.conn.row_factory = sqlite3.Row
+        q = """
+            SELECT org,
+                   MAX(org_type) as org_type,
+                   MAX(location_text) as location_text,
+                   MAX(lat) as lat, MAX(lon) as lon,
+                   COUNT(*) as n,
+                   GROUP_CONCAT(DISTINCT source) as sources
+            FROM items
+            WHERE org IS NOT NULL AND org != ''
+            GROUP BY org
+            ORDER BY n DESC
+        """
+        return list(self.conn.execute(q).fetchall())
+
     def papers(self, sources: list[str]) -> list[sqlite3.Row]:
         """All items in the given sources, enriched or not — the papers
         table's data source. Not filtered by report status: this is a

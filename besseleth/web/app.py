@@ -150,6 +150,38 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             ]
         )
 
+    @app.get("/api/orgs")
+    def api_orgs():
+        # Every org besseleth has ever extracted, not just the ones that
+        # geocoded (that subset is /api/locations, for the map). Enriched
+        # with funding/stock data from companies.yaml where the names
+        # match, so this one table covers labs, academic/gov orgs, and
+        # funded companies alike.
+        db = DB(config.db_path)
+        try:
+            rows = db.orgs()
+        finally:
+            db.close()
+        companies_by_name = {c.name.lower(): c for c in load_companies(config.companies_path)}
+        result = []
+        for r in rows:
+            company = companies_by_name.get((r["org"] or "").lower())
+            result.append(
+                {
+                    "org": r["org"],
+                    "org_type": r["org_type"],
+                    "location_text": r["location_text"],
+                    "lat": r["lat"],
+                    "lon": r["lon"],
+                    "item_count": r["n"],
+                    "sources": (r["sources"] or "").split(","),
+                    "stock_ticker": company.stock_ticker if company else None,
+                    "funding_total_usd": company.funding_total_usd if company else None,
+                    "last_funding_round": company.last_funding_round if company else None,
+                }
+            )
+        return jsonify(result)
+
     @app.get("/api/locations")
     def api_locations():
         db = DB(config.db_path)
