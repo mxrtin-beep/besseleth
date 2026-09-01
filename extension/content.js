@@ -31,6 +31,11 @@ const SITE_CONFIGS = [
     // documented API, so it may not catch every case; tell me if it's
     // missing some or catching too many and I'll refine it.
     skipTextPattern: /^Replying to/i,
+    // The "..." more-options button on each tweet — used to line our
+    // button up at the same height instead of an arbitrary corner
+    // offset. Also a best-effort selector; falls back to the corner
+    // position below if X doesn't have this on a given tweet.
+    anchorSelector: '[data-testid="caret"]',
   },
   {
     name: "Bluesky",
@@ -120,6 +125,18 @@ function injectPostButton(postEl, config) {
     btn.title = "Add to Besseleth";
     btn.setAttribute("aria-label", "Add to Besseleth");
     btn.textContent = "B";
+
+    // Line up with the post's own "..." button when we can find it,
+    // rather than guessing a fixed corner offset — reads its actual
+    // rendered position instead of assuming where it sits in the DOM,
+    // so this doesn't depend on knowing the site's exact markup nesting.
+    const anchorEl = config.anchorSelector ? postEl.querySelector(config.anchorSelector) : null;
+    if (anchorEl) {
+      const postRect = postEl.getBoundingClientRect();
+      const anchorRect = anchorEl.getBoundingClientRect();
+      btn.style.top = `${anchorRect.top - postRect.top + anchorRect.height / 2 - 10}px`;
+      btn.style.right = `${postRect.right - anchorRect.left + 6}px`;
+    }
 
     btn.addEventListener("click", (e) => {
       e.preventDefault();
