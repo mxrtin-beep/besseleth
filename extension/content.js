@@ -18,7 +18,10 @@ const SITE_CONFIGS = [
   {
     name: "X",
     hostnames: ["twitter.com", "x.com"],
-    postSelector: 'article[data-testid="tweet"]',
+    // X occasionally A/B tests or drops data-testid attributes for some
+    // users/rollouts — role="article" is a broader fallback for the
+    // same element.
+    postSelector: 'article[data-testid="tweet"], article[role="article"]',
     textSelector: '[data-testid="tweetText"]',
     linkSelector: 'a[href*="/status/"]',
   },
@@ -113,17 +116,29 @@ function injectPostButton(postEl, config) {
     postEl.appendChild(btn);
   } catch (e) {
     // A selector mismatch or unexpected DOM shape on this post — skip
-    // it silently rather than breaking the page.
+    // it rather than breaking the page, but log it: a silent catch here
+    // was exactly why "no button anywhere" was hard to diagnose from
+    // the outside. Open DevTools console on the page to see this.
+    console.warn("[besseleth] failed to inject button on a post:", e);
   }
 }
 
 function scanForPosts() {
   if (!activeSiteConfig) return;
-  document.querySelectorAll(activeSiteConfig.postSelector).forEach((postEl) => injectPostButton(postEl, activeSiteConfig));
+  const posts = document.querySelectorAll(activeSiteConfig.postSelector);
+  posts.forEach((postEl) => injectPostButton(postEl, activeSiteConfig));
+  return posts.length;
 }
 
 if (activeSiteConfig) {
-  scanForPosts();
+  console.log(`[besseleth] Clipper active on ${activeSiteConfig.name} — watching for posts matching "${activeSiteConfig.postSelector}".`);
+  const firstScanCount = scanForPosts();
+  console.log(
+    `[besseleth] Initial scan found ${firstScanCount} post(s), injected ${document.querySelectorAll(".besseleth-post-btn").length} button(s). ` +
+      (firstScanCount === 0
+        ? "0 posts found usually means the page hadn't finished loading yet — it'll keep watching and catch them as they load. If it's still 0 after scrolling the feed, the site's selectors have likely changed."
+        : "")
+  );
   let scanScheduled = false;
   const observer = new MutationObserver(() => {
     if (scanScheduled) return;
