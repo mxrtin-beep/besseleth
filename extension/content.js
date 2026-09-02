@@ -134,12 +134,12 @@ function injectPostButton(postEl, config) {
     if (anchorEl) {
       const postRect = postEl.getBoundingClientRect();
       const anchorRect = anchorEl.getBoundingClientRect();
-      // Shifted left by the button's own width (20px, see .besseleth-post-btn
-      // in content.css) plus the usual 6px gap — on X the "..." button now
-      // sits right next to the Grok icon, and without this offset our
-      // button lands on top of it instead of beside it.
-      btn.style.top = `${anchorRect.top - postRect.top + anchorRect.height / 2 - 10}px`;
-      btn.style.right = `${postRect.right - anchorRect.left + 6 + 20}px`;
+      // Shifted left by the button's own width (16px, see .besseleth-post-btn
+      // in content.css) plus a wider gap (16px, up from the standard 6px) —
+      // on X the "..." button sits right next to the Grok icon, and this
+      // extra margin keeps ours from crowding it.
+      btn.style.top = `${anchorRect.top - postRect.top + anchorRect.height / 2 - 8}px`;
+      btn.style.right = `${postRect.right - anchorRect.left + 16 + 16}px`;
     }
 
     btn.addEventListener("click", (e) => {
