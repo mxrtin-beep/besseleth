@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS job_board_cache (
 # (each guarded individually so an existing DB upgrades in place).
 ENRICHMENT_COLUMNS = {
     "org": "TEXT",                     # company/lab/institution the item is about, LLM-extracted
+    "org_description": "TEXT",         # what the org does/is, LLM-extracted, kept to <=5 words (e.g. "BCI implant company")
     "org_type": "TEXT",                # industry | academic | government | nonprofit | unknown
     "modality": "TEXT",                # EEG | ECoG | CNS implant | PNS implant | EMG | fMRI | fNIRS | other | unknown
     "therapeutic_target": "TEXT",      # e.g. motor, speech, vision, memory, mood/psychiatric, epilepsy, pain, other
@@ -228,11 +229,12 @@ class DB:
         location_text: Optional[str] = None,
         lat: Optional[float] = None,
         lon: Optional[float] = None,
+        org_description: Optional[str] = None,
     ):
         self.conn.execute(
             """UPDATE items SET org = ?, org_type = ?, modality = ?, therapeutic_target = ?,
                novelty_score = ?, novelty_rationale = ?, location_text = ?, lat = ?, lon = ?,
-               enriched_at = ? WHERE id = ?""",
+               org_description = ?, enriched_at = ? WHERE id = ?""",
             (
                 org,
                 org_type,
@@ -243,11 +245,30 @@ class DB:
                 location_text,
                 lat,
                 lon,
+                org_description,
                 datetime.now(timezone.utc).isoformat(),
                 item_id,
             ),
         )
         self.conn.commit()
+
+    def clear_org_matches(self, names: list[str]) -> int:
+        """Nulls out `org`/`org_description` on any item whose org
+        exact-matches (case-insensitive) one of `names` — cleanup for
+        items enriched before enrich.py started guarding against the
+        LLM naming the industry itself as an "org" (e.g. the industry's
+        own name showing up in the Orgs table as if it were a company).
+        Cheap and safe to run on every enrich pass: already-clean rows
+        just don't match. Returns how many rows were cleared."""
+        if not names:
+            return 0
+        placeholders = ",".join("?" for _ in names)
+        cur = self.conn.execute(
+            f"UPDATE items SET org = NULL, org_description = NULL WHERE org IS NOT NULL AND lower(org) IN ({placeholders})",
+            [n.lower() for n in names],
+        )
+        self.conn.commit()
+        return cur.rowcount
 
     def locations(self) -> list[sqlite3.Row]:
         """Orgs with a geocoded location, aggregated for the map — count
@@ -268,7 +289,10 @@ class DB:
         locations(), which only covers the subset that resolved to a
         lat/lon. This is the source for the standalone Orgs table; the
         map itself still needs a location, so it stays scoped to that
-        narrower set."""
+        narrower set. Each org also carries a representative source URL
+        and a short (<=5 word) description — both taken from that org's
+        most recent enriched item, so there's always something to click
+        through to and a quick sense of what the org actually is."""
         self.conn.row_factory = sqlite3.Row
         q = """
             SELECT org,
@@ -276,7 +300,12 @@ class DB:
                    MAX(location_text) as location_text,
                    MAX(lat) as lat, MAX(lon) as lon,
                    COUNT(*) as n,
-                   GROUP_CONCAT(DISTINCT source) as sources
+                   GROUP_CONCAT(DISTINCT source) as sources,
+                   (SELECT i2.url FROM items i2 WHERE i2.org = items.org AND i2.url IS NOT NULL AND i2.url != ''
+                    ORDER BY i2.published_at DESC LIMIT 1) as source_url,
+                   (SELECT i2.org_description FROM items i2 WHERE i2.org = items.org
+                    AND i2.org_description IS NOT NULL AND i2.org_description != ''
+                    ORDER BY i2.published_at DESC LIMIT 1) as org_description
             FROM items
             WHERE org IS NOT NULL AND org != ''
             GROUP BY org

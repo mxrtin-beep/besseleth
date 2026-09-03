@@ -194,6 +194,8 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             result.append(
                 {
                     "org": r["org"],
+                    "org_description": r["org_description"],
+                    "source_url": r["source_url"],
                     "org_type": r["org_type"],
                     "location_text": r["location_text"],
                     "lat": r["lat"],

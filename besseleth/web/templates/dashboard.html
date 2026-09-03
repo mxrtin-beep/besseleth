@@ -135,7 +135,9 @@
   <div id="orgsPane" style="display:none">
     <p class="hint">Every lab, academic/government institution, and company besseleth has extracted an org name
       for — the full set the Map tab's markers are drawn from, plus orgs that never resolved to a location.
-      Funding/stock columns come from <code>companies.yaml</code> where the name matches.</p>
+      Category is a short LLM-written description (what the org actually is/does), and Source links to the
+      item it was most recently mentioned in — both there so you can sanity-check an extraction rather than
+      take it on faith. Funding/stock columns come from <code>companies.yaml</code> where the name matches.</p>
     <div class="controls">
       <div><label for="ofOrgType">Org type</label><select id="ofOrgType"><option value="">All</option></select></div>
       <div><label for="ofSource">Source</label><select id="ofSource"><option value="">All</option></select></div>
@@ -677,16 +679,18 @@ function renderOrgs() {
 
   const table = document.getElementById('orgsTable');
   table.innerHTML = `
-    <thead><tr><th>Org</th><th>Type</th><th>Location</th><th>Items</th><th>Sources</th><th>Ticker</th><th>Funding</th></tr></thead>
+    <thead><tr><th>Org</th><th>Category</th><th>Type</th><th>Location</th><th>Items</th><th>Sources</th><th>Ticker</th><th>Funding</th><th>Source</th></tr></thead>
     <tbody>${rows.map(o => `
       <tr>
         <td>${o.org}</td>
+        <td>${o.org_description || '<span class="hint">—</span>'}</td>
         <td>${o.org_type || ''}</td>
         <td>${o.location_text || (o.lat ? '' : '<span class="hint">not located</span>')}</td>
         <td>${o.item_count}</td>
         <td>${o.sources.join(', ')}</td>
         <td>${o.stock_ticker || ''}</td>
         <td>${fmtUsd(o.funding_total_usd)}${o.last_funding_round ? ` (${o.last_funding_round})` : ''}</td>
+        <td>${o.source_url ? `<a href="${o.source_url}" target="_blank" rel="noopener">link</a>` : '<span class="hint">—</span>'}</td>
       </tr>`).join('')}</tbody>`;
 }
 

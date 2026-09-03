@@ -91,7 +91,11 @@ def _build_prompt(row, config: Config, context: str) -> str:
     return (
         f"Read this {row['source']} item about {config.industry_name}. Extract structured metadata as JSON with "
         "exactly these keys (use null for anything not present or unclear — never invent a number):\n"
-        '  "org": the primary company, lab, or institution the item is about, or null\n'
+        f'  "org": the primary company, lab, or institution the item is about, or null — a specific named '
+        f'organization, e.g. "Neuralink" or "Stanford University", NEVER the general field/industry itself '
+        f'(so never "{config.industry_name}" or a synonym for it)\n'
+        '  "org_description": at most 5 words on what that org is/does, e.g. "BCI implant company" or '
+        '"Academic neuroscience lab" — null if "org" is null\n'
         '  "org_type": one of "industry", "academic", "government", "nonprofit", or "unknown"\n'
         '  "modality": the technical approach/category, e.g. "EEG", "ECoG", "CNS implant", "PNS implant", "EMG", '
         '"fMRI", "fNIRS", or another short label if none fit; "unknown" if unclear\n'
@@ -142,6 +146,23 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
         novelty = None
 
     org = data.get("org") or None
+    # Defensive, on top of the prompt's own instruction not to: a model
+    # that ignores it and hands back the industry name itself (or one of
+    # its keywords, verbatim) isn't naming a real org — drop it rather
+    # than polluting the Orgs table with e.g. "Neurotechnology" as a
+    # company. Exact-match only (not a substring check) so a real
+    # company whose name happens to contain a keyword isn't dropped.
+    if org:
+        _non_orgs = {config.industry_name.strip().lower()} | {k.strip().lower() for k in config.keywords}
+        if org.strip().lower() in _non_orgs:
+            org = None
+    org_description = (data.get("org_description") or "").strip() or None
+    if org_description and org:
+        words = org_description.split()
+        if len(words) > 5:
+            org_description = " ".join(words[:5])
+    elif not org:
+        org_description = None
     location_text = data.get("location") or None
     lat = lon = None
     if location_text:
@@ -160,6 +181,7 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
         location_text=location_text,
         lat=lat,
         lon=lon,
+        org_description=org_description,
     )
 
     # Fold concrete numbers into devices.yaml/companies.yaml — additive
@@ -204,6 +226,12 @@ def enrich_items_detailed(config: Config, db: DB) -> dict:
 
     if not cfg.get("enabled", True):
         return {"processed": 0, "message": "enrichment.enabled is false in config.yaml — nothing to do.", "backend": backend}
+
+    # Self-healing cleanup for items enriched before this guard existed —
+    # see clear_org_matches()'s docstring. Cheap, runs every call.
+    cleared = db.clear_org_matches([config.industry_name, *config.keywords])
+    if cleared:
+        print(f"[enrich] Cleared {cleared} item(s) whose 'org' was actually the industry name/a keyword.")
 
     sources = cfg.get("sources", DEFAULT_SOURCES)
     max_items = cfg.get("max_items_per_run", 20)
