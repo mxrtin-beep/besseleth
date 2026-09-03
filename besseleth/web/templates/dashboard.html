@@ -93,6 +93,7 @@
     <button id="tabMap">Map</button>
     <button id="tabTrends">Trends explorer</button>
     <button id="tabPaste">Paste</button>
+    <button id="tabFeeds">Feeds</button>
   </div>
 
   <div id="reportPane"><p class="hint">Pick a report from the sidebar.</p></div>
@@ -215,6 +216,32 @@
       is the way to take one back (wrong link, changed your mind, duplicate).</p>
     <table class="datatable" id="pastedTable"></table>
   </div>
+
+  <div id="feedsPane" style="display:none">
+    <p class="hint">Add an RSS/Atom feed URL for besseleth to check on every fetch, alongside the ones already in
+      config.yaml — for a news/trade-press site or a blog it's missing. No code editing required; takes effect on
+      the next fetch, no restart needed.</p>
+    <div class="controls" style="align-items:stretch">
+      <div><label for="feedCategory">Type</label><select id="feedCategory">
+        <option value="news">News</option><option value="blog">Blog</option>
+      </select></div>
+      <div style="flex:1; min-width:280px">
+        <label for="feedUrl">Feed URL</label>
+        <input type="text" id="feedUrl" style="width:100%; box-sizing:border-box" placeholder="https://example.com/feed">
+      </div>
+      <div style="flex:1; min-width:180px">
+        <label for="feedLabel">Label (optional)</label>
+        <input type="text" id="feedLabel" style="width:100%; box-sizing:border-box" placeholder="e.g. site name">
+      </div>
+      <div><button class="btn" id="addFeedBtn">Add</button></div>
+    </div>
+    <div id="feedResult"></div>
+
+    <h3 style="margin-top:2rem; font-size:1rem;">News feeds</h3>
+    <table class="datatable" id="newsFeedsTable"></table>
+    <h3 style="margin-top:1.5rem; font-size:1rem;">Blog feeds</h3>
+    <table class="datatable" id="blogFeedsTable"></table>
+  </div>
 </main>
 
 <script>
@@ -225,6 +252,7 @@ const jobsPane = document.getElementById('jobsPane');
 const mapPane = document.getElementById('mapPane');
 const trendsPane = document.getElementById('trendsPane');
 const pastePane = document.getElementById('pastePane');
+const feedsPane = document.getElementById('feedsPane');
 const tabReport = document.getElementById('tabReport');
 const tabPapers = document.getElementById('tabPapers');
 const tabOrgs = document.getElementById('tabOrgs');
@@ -232,6 +260,7 @@ const tabJobs = document.getElementById('tabJobs');
 const tabMap = document.getElementById('tabMap');
 const tabTrends = document.getElementById('tabTrends');
 const tabPaste = document.getElementById('tabPaste');
+const tabFeeds = document.getElementById('tabFeeds');
 
 function showTab(which) {
   reportPane.style.display = which === 'report' ? 'block' : 'none';
@@ -241,6 +270,7 @@ function showTab(which) {
   mapPane.style.display = which === 'map' ? 'block' : 'none';
   trendsPane.style.display = which === 'trends' ? 'block' : 'none';
   pastePane.style.display = which === 'paste' ? 'block' : 'none';
+  feedsPane.style.display = which === 'feeds' ? 'block' : 'none';
   tabReport.classList.toggle('active', which === 'report');
   tabPapers.classList.toggle('active', which === 'papers');
   tabOrgs.classList.toggle('active', which === 'orgs');
@@ -248,11 +278,13 @@ function showTab(which) {
   tabMap.classList.toggle('active', which === 'map');
   tabTrends.classList.toggle('active', which === 'trends');
   tabPaste.classList.toggle('active', which === 'paste');
+  tabFeeds.classList.toggle('active', which === 'feeds');
   if (which === 'papers' && !papersLoaded) loadPapers();
   if (which === 'orgs' && !orgsLoaded) loadOrgs();
   if (which === 'jobs' && !jobsLoaded) loadJobs();
   if (which === 'map' && !mapLoaded) loadMap();
   if (which === 'paste') loadPasted();
+  if (which === 'feeds') loadFeeds();
 }
 tabReport.onclick = () => showTab('report');
 tabPapers.onclick = () => showTab('papers');
@@ -261,6 +293,7 @@ tabJobs.onclick = () => showTab('jobs');
 tabMap.onclick = () => showTab('map');
 tabTrends.onclick = () => showTab('trends');
 tabPaste.onclick = () => showTab('paste');
+tabFeeds.onclick = () => showTab('feeds');
 
 function wireReportNav() {
   document.querySelectorAll('.reportBtn').forEach(btn => {
@@ -437,6 +470,71 @@ async function loadPasted() {
       document.querySelector(`[data-item-row="${btn.dataset.delItem}"]`)?.remove();
     };
   });
+}
+
+// --- Feeds ---------------------------------------------------------------
+
+document.getElementById('addFeedBtn').onclick = async () => {
+  const category = document.getElementById('feedCategory').value;
+  const url = document.getElementById('feedUrl').value.trim();
+  const label = document.getElementById('feedLabel').value.trim();
+  const result = document.getElementById('feedResult');
+  if (!url) { result.className = 'err'; result.textContent = 'Enter a feed URL first.'; return; }
+  result.className = ''; result.textContent = 'Adding…';
+  try {
+    const res = await fetch('/api/feeds', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ category, url, label }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      result.className = data.warning ? 'err' : 'ok';
+      result.textContent = data.warning || 'Added — it\'ll be checked on the next fetch.';
+      document.getElementById('feedUrl').value = '';
+      document.getElementById('feedLabel').value = '';
+      loadFeeds();
+    } else {
+      result.className = 'err';
+      result.textContent = data.message || 'Failed to add.';
+    }
+  } catch (e) {
+    result.className = 'err';
+    result.textContent = 'Failed to add — see server log.';
+  }
+};
+
+function renderFeedsTable(tableId, category, feedList) {
+  const table = document.getElementById(tableId);
+  if (!feedList.length) {
+    table.innerHTML = '<tbody><tr><td class="hint">None submitted yet.</td></tr></tbody>';
+    return;
+  }
+  table.innerHTML = `
+    <thead><tr><th>Feed</th><th>Label</th><th>Added</th><th></th></tr></thead>
+    <tbody>${feedList.map(f => `
+      <tr data-feed-row="${category}:${f.url}">
+        <td><a href="${f.url}" target="_blank" rel="noopener">${f.url}</a></td>
+        <td>${f.label || ''}</td>
+        <td>${(f.added_at || '').slice(0, 10)}</td>
+        <td><button class="delBtn" data-del-feed="${f.url}" data-del-category="${category}" title="Remove">🗑</button></td>
+      </tr>`).join('')}</tbody>`;
+  table.querySelectorAll('[data-del-feed]').forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm('Remove this feed?')) return;
+      await fetch('/api/feeds', {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category: btn.dataset.delCategory, url: btn.dataset.delFeed }),
+      });
+      document.querySelector(`[data-feed-row="${btn.dataset.delCategory}:${btn.dataset.delFeed}"]`)?.remove();
+    };
+  });
+}
+
+async function loadFeeds() {
+  const res = await fetch('/api/feeds');
+  const feeds = await res.json();
+  renderFeedsTable('newsFeedsTable', 'news', feeds.news || []);
+  renderFeedsTable('blogFeedsTable', 'blog', feeds.blog || []);
 }
 
 // --- Map ---------------------------------------------------------------

@@ -25,6 +25,7 @@ from flask import Flask, abort, jsonify, render_template, request, send_from_dir
 
 from ..config import Config, load_config
 from ..db import DB
+from ..feeds_store import add_feed, load_feeds, remove_feed
 from ..pipeline import fetch_all
 from ..scheduler import SchedulerStatus, run_now, start_scheduler
 from ..scrapers.manual_drop import add_smart_item
@@ -347,6 +348,54 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
                 for r in rows
             ]
         )
+
+    @app.get("/api/feeds")
+    def api_feeds():
+        return jsonify(load_feeds(config.feeds_path))
+
+    @app.post("/api/feeds")
+    def api_add_feed():
+        payload = request.get_json(silent=True) or {}
+        category = payload.get("category", "")
+        url = (payload.get("url") or "").strip()
+        label = (payload.get("label") or "").strip()
+        if category not in ("news", "blog"):
+            return jsonify({"ok": False, "message": "category must be 'news' or 'blog'."}), 400
+        if not url.startswith(("http://", "https://")):
+            return jsonify({"ok": False, "message": "URL must start with http:// or https://."}), 400
+
+        added = add_feed(config.feeds_path, category, url, label)
+        if not added:
+            return jsonify({"ok": False, "message": "That feed URL is already in the list."}), 409
+
+        # Best-effort validation, after adding: a feed that fails to parse
+        # right now might just be a transient fetch error, not a bad URL
+        # (some sites block server-side/non-browser requests intermittently),
+        # so this warns rather than rejecting the submission outright — it
+        # stays in the list either way and gets retried on the next fetch.
+        warning = None
+        try:
+            import feedparser
+
+            parsed = feedparser.parse(url)
+            if not parsed.entries:
+                warning = "Added, but couldn't find any entries in it just now — double-check the URL, or it may just be temporarily empty/unreachable."
+        except Exception:
+            warning = "Added, but couldn't validate it just now — it'll still be tried on the next fetch."
+
+        return jsonify({"ok": True, "warning": warning})
+
+    @app.delete("/api/feeds")
+    def api_remove_feed():
+        payload = request.get_json(silent=True) or {}
+        category = payload.get("category", "")
+        url = (payload.get("url") or "").strip()
+        if category not in ("news", "blog"):
+            return jsonify({"ok": False, "message": "category must be 'news' or 'blog'."}), 400
+        removed = remove_feed(config.feeds_path, category, url)
+        if not removed:
+            abort(404)
+        return jsonify({"ok": True})
 
     @app.delete("/api/item/<item_id>")
     def api_delete_item(item_id):

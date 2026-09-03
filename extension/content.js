@@ -49,8 +49,12 @@ const SITE_CONFIGS = [
     hostnames: ["linkedin.com"],
     // LinkedIn's feed classes are the least stable of the three — if
     // the per-post button stops appearing here, selection still works.
-    postSelector: "div.feed-shared-update-v2, div.occludable-update",
-    textSelector: ".feed-shared-update-v2__description, .update-components-text",
+    // [data-urn*="urn:li:activity"] is a broader fallback: LinkedIn
+    // stamps that attribute on the feed's post containers for its own
+    // internal tracking/linking, which tends to survive a class-name
+    // redesign that would break the others.
+    postSelector: 'div.feed-shared-update-v2, div.occludable-update, [data-urn*="urn:li:activity"]',
+    textSelector: ".feed-shared-update-v2__description, .update-components-text, .feed-shared-text",
     linkSelector: 'a[href*="/feed/update/"], a.app-aware-link[href*="/posts/"]',
   },
 ];
@@ -173,11 +177,20 @@ function scanForPosts() {
   return posts.length;
 }
 
+// Single on/off switch for BOTH in-page mechanisms (the per-post button
+// AND the selection-based floating button) — read once at startup and
+// shared by both, rather than each having its own notion of "on". The
+// popup's manual paste box is unaffected either way, since it isn't
+// injected into the page.
+const inPageUiEnabledPromise = chrome.storage.local.get("perPostButtonsEnabled").then(
+  ({ perPostButtonsEnabled }) => perPostButtonsEnabled !== false
+);
+
 async function initPerPostButtons() {
   if (!activeSiteConfig) return;
-  const { perPostButtonsEnabled } = await chrome.storage.local.get("perPostButtonsEnabled");
-  if (perPostButtonsEnabled === false) {
-    console.log("[besseleth] Per-post buttons disabled in extension settings — selection-based clipping still works.");
+  const enabled = await inPageUiEnabledPromise;
+  if (!enabled) {
+    console.log("[besseleth] In-page clipping disabled in extension settings.");
     return;
   }
 
@@ -235,8 +248,9 @@ function showButton(rect) {
   document.body.appendChild(clipButton);
 }
 
-document.addEventListener("mouseup", (e) => {
+document.addEventListener("mouseup", async (e) => {
   if (e.target?.closest?.(".besseleth-post-btn")) return;
+  if (!(await inPageUiEnabledPromise)) return;
   // Let the browser finish updating the selection first.
   setTimeout(() => {
     const selection = window.getSelection();

@@ -4,8 +4,8 @@ A weekly industry-briefing bot. Point it at an industry (e.g.
 *neurotechnology*), and it:
 
 - Pulls recent **arXiv** papers matching your keywords/categories (free, official API)
-- Pulls **news** from RSS feeds — including a free Google News search feed by default (optionally NewsAPI.org too)
-- Pulls **blogs** (company/lab blogs, researcher Substacks) from RSS — Substack needs no code, just its `/feed` URL
+- Pulls **news** from RSS feeds — including a free Google News search feed by default (optionally NewsAPI.org too); add more from the dashboard's **Feeds** tab, no config-file editing needed
+- Pulls **blogs** (company/lab blogs, researcher Substacks) from RSS — Substack needs no code, just its `/feed` URL; also addable from the Feeds tab
 - Tracks a curated **conferences** watchlist, plus optional **conference news** (CFPs, accepted talks) via each conference's own RSS feed
 - Finds **IRL events near you** — Luma calendars (iCal), Eventbrite organizers you follow, a curated local-meetup watchlist, and paste-in for anything else (see below — real geo-search APIs for events mostly don't exist for free, so paste-in is the reliable path)
 - Pulls **Bluesky** posts (free public search API) and **X/Twitter** (paid API if you have a token, otherwise paste-in)

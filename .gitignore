@@ -10,6 +10,8 @@ reports/
 linkedin_drops/
 devices.yaml
 companies.yaml
+job_boards.yaml
+feeds.yaml
 event_drops/
 social_drops/
 .geocode_cache.json

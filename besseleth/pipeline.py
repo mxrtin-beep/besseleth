@@ -19,6 +19,7 @@ from .scrapers import (
 from . import report as report_mod
 from .dedupe import merge_near_duplicates
 from .enrich import enrich_items
+from .feeds_store import load_feeds
 from .trends import company_store
 from .trends import store as trend_store
 from .trends import plot as trend_plot
@@ -52,15 +53,22 @@ def fetch_all(config: Config, db: DB, since: date | None = None) -> dict[str, li
         )
         results["arxiv"] = _dedupe_and_store(items, db)
 
+    # User-submitted feeds (the dashboard's Feeds tab) are additional
+    # sources_.news/blogs feed URLs, merged in here rather than written
+    # into config.yaml itself — see feeds_store.py's docstring for why.
+    submitted = load_feeds(config.feeds_path)
+
     news_cfg = config.source("news")
     if news_cfg.get("enabled"):
         print("[pipeline] Fetching news...")
+        news_cfg = {**news_cfg, "feeds": [*news_cfg.get("feeds", []), *(f["url"] for f in submitted["news"])]}
         items = news_scraper.fetch(config, news_cfg, days_back=_days_back(news_cfg.get("days_back", 8), since))
         results["news"] = _dedupe_and_store(items, db)
 
     blog_cfg = config.source("blogs")
     if blog_cfg.get("enabled"):
         print("[pipeline] Fetching blogs...")
+        blog_cfg = {**blog_cfg, "feeds": [*blog_cfg.get("feeds", []), *(f["url"] for f in submitted["blog"])]}
         items = blog_scraper.fetch(config, blog_cfg, days_back=_days_back(blog_cfg.get("days_back", 8), since))
         results["blog"] = _dedupe_and_store(items, db)
 

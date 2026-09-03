@@ -49,6 +49,10 @@ class Config:
         return Path(self.raw.get("jobs", {}).get("manual_boards_path", "job_boards.yaml"))
 
     @property
+    def feeds_path(self) -> Path:
+        return Path(self.raw.get("feeds_path", "feeds.yaml"))
+
+    @property
     def contacts(self) -> list[dict]:
         return list(self.raw.get("contacts", []))
 
