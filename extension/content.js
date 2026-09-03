@@ -114,6 +114,7 @@ function isMainPost(postEl, config) {
 
 function injectPostButton(postEl, config) {
   if (postEl.dataset.besselethInjected) return;
+  if (!inPageUiEnabled) return; // don't mark injected — retry once re-enabled, see the storage.onChanged listener below
   postEl.dataset.besselethInjected = "1";
 
   if (!isMainPost(postEl, config)) return;
@@ -178,21 +179,34 @@ function scanForPosts() {
 }
 
 // Single on/off switch for BOTH in-page mechanisms (the per-post button
-// AND the selection-based floating button) — read once at startup and
-// shared by both, rather than each having its own notion of "on". The
-// popup's manual paste box is unaffected either way, since it isn't
-// injected into the page.
-const inPageUiEnabledPromise = chrome.storage.local.get("perPostButtonsEnabled").then(
-  ({ perPostButtonsEnabled }) => perPostButtonsEnabled !== false
-);
+// AND the selection-based floating button), live — flipping it in the
+// popup takes effect in any already-open tab immediately via the
+// storage.onChanged listener below, no reload needed. The popup's manual
+// paste box is unaffected either way, since it isn't injected into the
+// page.
+let inPageUiEnabled = true; // optimistic default until the read below resolves
+const inPageUiEnabledReady = chrome.storage.local.get("perPostButtonsEnabled").then(({ perPostButtonsEnabled }) => {
+  inPageUiEnabled = perPostButtonsEnabled !== false;
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" || !("perPostButtonsEnabled" in changes)) return;
+  inPageUiEnabled = changes.perPostButtonsEnabled.newValue !== false;
+  console.log(`[besseleth] In-page clipping ${inPageUiEnabled ? "enabled" : "disabled"} (live, no reload).`);
+  if (inPageUiEnabled) {
+    scanForPosts(); // re-injects into posts that were skipped while disabled
+  } else {
+    document.querySelectorAll(".besseleth-post-btn").forEach((el) => el.remove());
+    // Un-mark every post so scanForPosts() re-injects them once re-enabled
+    // instead of treating them as already handled.
+    document.querySelectorAll("[data-besseleth-injected]").forEach((el) => delete el.dataset.besselethInjected);
+    removeButton(); // clears the selection-based button if one's showing
+  }
+});
 
 async function initPerPostButtons() {
   if (!activeSiteConfig) return;
-  const enabled = await inPageUiEnabledPromise;
-  if (!enabled) {
-    console.log("[besseleth] In-page clipping disabled in extension settings.");
-    return;
-  }
+  await inPageUiEnabledReady;
 
   console.log(`[besseleth] Clipper active on ${activeSiteConfig.name} — watching for posts matching "${activeSiteConfig.postSelector}".`);
   const firstScanCount = scanForPosts();
@@ -250,7 +264,8 @@ function showButton(rect) {
 
 document.addEventListener("mouseup", async (e) => {
   if (e.target?.closest?.(".besseleth-post-btn")) return;
-  if (!(await inPageUiEnabledPromise)) return;
+  await inPageUiEnabledReady;
+  if (!inPageUiEnabled) return;
   // Let the browser finish updating the selection first.
   setTimeout(() => {
     const selection = window.getSelection();

@@ -49,8 +49,25 @@
   summary { cursor: pointer; font-size: 12px; opacity: 0.75; }
   .hint { font-size: 11px; opacity: 0.6; margin-top: 4px; }
   .toggle-row { display: flex; align-items: center; gap: 8px; margin: 10px 0 4px; }
-  .toggle-row label { margin: 0; font-size: 12px; opacity: 1; }
-  .toggle-row input[type=checkbox] { margin: 0; width: 15px; height: 15px; }
+  .toggle-row .toggle-label { margin: 0; font-size: 12px; opacity: 1; flex: 1; }
+  .toggle-row .toggle-state { font-size: 11px; font-weight: 600; width: 26px; text-align: right; }
+  .toggle-row .toggle-state.on { color: #1e7d6f; }
+  .toggle-row .toggle-state.off { color: #888; }
+
+  /* Switch, not a checkbox */
+  .switch { position: relative; display: inline-block; width: 34px; height: 20px; flex-shrink: 0; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch-track {
+    position: absolute; inset: 0; background: #ccc; border-radius: 999px;
+    cursor: pointer; transition: background 0.15s;
+  }
+  .switch-track::before {
+    content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px;
+    background: #fff; border-radius: 50%; transition: transform 0.15s;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+  }
+  .switch input:checked + .switch-track { background: #4a90d9; }
+  .switch input:checked + .switch-track::before { transform: translateX(14px); }
 </style>
 </head>
 <body>
@@ -71,13 +88,13 @@
       running elsewhere on your network, saving a non-local URL will prompt for one-time access.</p>
 
     <div class="toggle-row">
-      <input type="checkbox" id="perPostToggle" checked>
-      <label for="perPostToggle">Show in-page clipping UI (the "B" button on posts, and "+ besseleth" on
-        text selection)</label>
+      <label class="toggle-label" for="perPostToggle">In-page clipping</label>
+      <span class="toggle-state" id="perPostToggleState">On</span>
+      <label class="switch">
+        <input type="checkbox" id="perPostToggle" checked>
+        <span class="switch-track"></span>
+      </label>
     </div>
-    <p class="hint">Turns off everything injected into the page — the per-post button on X/Bluesky/LinkedIn,
-      and the floating button that appears when you select text on any site. This popup's own Add button
-      (above) still works regardless. Reload any open tabs for the change to take effect.</p>
   </details>
 
   <script src="popup.js"></script>
