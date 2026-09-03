@@ -61,7 +61,8 @@ For a headless box (no browser), the same schedule runs without the web UI:
 
 **Keeping it running on a Mac** — `nohup` is fine for a quick session, but
 survives a terminal close, not a reboot or logout. For something that
-comes back on its own, use `launchd`:
+comes back on its own and stays out of the way while it does, use
+`launchd`:
 
 ```xml
 <!-- ~/Library/LaunchAgents/com.besseleth.serve.plist -->
@@ -77,6 +78,15 @@ comes back on its own, use `launchd`:
   <key>WorkingDirectory</key><string>/path/to/besseleth</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <!-- Keeps it out of the way: macOS schedules Background-class + niced
+       processes behind whatever you're actively using instead of
+       competing with it for CPU, and LowPriorityIO does the same for
+       disk. Combine with enrichment.pause_seconds and
+       summarizer.num_thread in config.yaml (see config.example.yaml) so
+       an enrich run is a trickle instead of a burst. -->
+  <key>ProcessType</key><string>Background</string>
+  <key>Nice</key><integer>10</integer>
+  <key>LowPriorityIO</key><true/>
   <key>StandardOutPath</key><string>/tmp/besseleth.log</string>
   <key>StandardErrorPath</key><string>/tmp/besseleth.log</string>
 </dict></plist>
@@ -86,6 +96,13 @@ comes back on its own, use `launchd`:
 launchctl load ~/Library/LaunchAgents/com.besseleth.serve.plist
 # stop it later with: launchctl unload ~/Library/LaunchAgents/com.besseleth.serve.plist
 ```
+
+With this loaded, you never run `python -m besseleth.web.app` by hand —
+launchd starts it at login and restarts it if it ever dies, so it's
+always just running quietly at `http://localhost:5050` (or whatever port
+you set) whenever you want to check the dashboard. Manually starting it
+again yourself in a terminal on top of that would run two instances
+against the same DB at once — don't do both.
 
 Prefer a one-shot, cron-triggered run instead of a standing process? That
 still works — set `schedule.enabled: false` in `config.yaml` and:

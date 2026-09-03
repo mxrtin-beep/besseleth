@@ -25,6 +25,14 @@ CREATE TABLE IF NOT EXISTS items (
 );
 CREATE INDEX IF NOT EXISTS idx_items_source ON items(source);
 CREATE INDEX IF NOT EXISTS idx_items_published ON items(published_at);
+
+-- Tiny key-value store for state that needs to survive a restart, e.g.
+-- the scheduler's last-fetch time (so re-launching the app doesn't kick
+-- off an immediate re-fetch if one already ran recently).
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 # Columns added after the initial release — migrated in with ALTER TABLE
@@ -82,6 +90,17 @@ class DB:
 
     def close(self):
         self.conn.close()
+
+    def get_meta(self, key: str) -> str | None:
+        row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        self.conn.commit()
 
     def upsert_item(self, item: Item) -> bool:
         """Insert if new. Returns True if it was newly inserted."""
