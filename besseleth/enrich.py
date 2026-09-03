@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 import requests
 
@@ -122,7 +123,11 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
 
     prompt = _build_prompt(row, config, context)
     result = summarizer_mod._ollama_generate(
-        prompt, summarizer_cfg.get("ollama_url", "http://localhost:11434"), summarizer_cfg.get("model", "llama3.1"), timeout=60
+        prompt,
+        summarizer_cfg.get("ollama_url", "http://localhost:11434"),
+        summarizer_cfg.get("model", "llama3.1"),
+        timeout=60,
+        num_thread=summarizer_cfg.get("num_thread"),
     )
     if result is None:
         return False  # Ollama unreachable — retry next time
@@ -230,13 +235,21 @@ def enrich_items_detailed(config: Config, db: DB) -> dict:
         print(f"[enrich] {status_msg}")
         return {"processed": 0, "message": status_msg, "backend": backend}
 
+    pause_seconds = cfg.get("pause_seconds", 0)
+
     processed = 0
-    for row in rows:
+    for i, row in enumerate(rows):
         try:
             if _enrich_one(row, db, config, summarizer_cfg):
                 processed += 1
         except Exception as e:
             print(f"[enrich] Failed on item {row['id']}: {e}")
+        # Gives the CPU a breather between LLM calls instead of hammering
+        # it back-to-back for the whole batch — set enrichment.pause_seconds
+        # in config.yaml if enrich runs are making the machine unusable.
+        # Skipped after the last item so it doesn't delay returning.
+        if pause_seconds and i < len(rows) - 1:
+            time.sleep(pause_seconds)
 
     if processed < len(rows):
         message = f"Enriched {processed}/{len(rows)} — the rest failed mid-call and will retry next run (see server log)."

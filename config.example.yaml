@@ -199,8 +199,25 @@ enrichment:
   # Locations are geocoded for free via OpenStreetMap/Nominatim (rate-
   # limited to ~1 req/sec per its usage policy, cached in
   # .geocode_cache.json so a place is only ever looked up once).
+  #
+  # If enrichment runs are making your machine unusable: this is Ollama
+  # doing local LLM inference, which is CPU-heavy per item. Levers, in
+  # order of impact:
+  #   - Lower max_items_per_run so each run (each fetch, or each "Enrich
+  #     now" click) does less work before returning.
+  #   - Set pause_seconds so it sleeps between items instead of running
+  #     flat-out for the whole batch — turns a CPU spike into a trickle.
+  #   - Set summarizer.num_thread below to cap how many cores Ollama uses
+  #     per call.
+  #   - Run `besseleth.cli enrich --all` yourself via `nice -n 19` (macOS/
+  #     Linux) at a time you don't need the machine, instead of relying
+  #     on the bounded per-fetch runs or the dashboard's "Enrich now"
+  #     button — a backlog otherwise "catches up" a little at a time and
+  #     items stay showing "pending" in the dashboard until their turn
+  #     comes, which is expected, not stuck.
   enabled: true
   max_items_per_run: 20
+  pause_seconds: 0     # e.g. 2 — sleep this long between items during a run
   sources: ["arxiv", "news", "blog"]
 
 summarizer:
@@ -210,6 +227,7 @@ summarizer:
   ollama_url: "http://localhost:11434"
   model: "llama3.1"
   max_items_per_summary_call: 8
+  # num_thread: 4            # cap CPU threads Ollama uses per call (unset = its default, usually all cores)
 
 report:
   output_dir: "reports"

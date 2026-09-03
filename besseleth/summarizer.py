@@ -19,11 +19,18 @@ def _extractive_fallback(items: list[Item], max_sentences: int = 3) -> str:
     return text or "No notable developments this week."
 
 
-def _ollama_generate(prompt: str, ollama_url: str, model: str, timeout: int = 120) -> str | None:
+def _ollama_generate(prompt: str, ollama_url: str, model: str, timeout: int = 120, num_thread: int | None = None) -> str | None:
+    payload = {"model": model, "prompt": prompt, "stream": False}
+    if num_thread:
+        # Caps how many CPU threads Ollama uses for this call — set
+        # summarizer.num_thread in config.yaml (e.g. to half your core
+        # count) if enrichment runs are making the machine unusable.
+        # Unset by default so behavior is unchanged unless you opt in.
+        payload["options"] = {"num_thread": num_thread}
     try:
         resp = requests.post(
             f"{ollama_url.rstrip('/')}/api/generate",
-            json={"model": model, "prompt": prompt, "stream": False},
+            json=payload,
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -57,7 +64,7 @@ def summarize_section(items: list[Item], section_name: str, industry_name: str, 
         f"by name. Be factual, no fluff, no preamble like 'Here is a summary'.\n\n"
         f"Items:\n{bullet_list}\n\nSummary:"
     )
-    result = _ollama_generate(prompt, ollama_url, model)
+    result = _ollama_generate(prompt, ollama_url, model, num_thread=cfg.get("num_thread"))
     return result or _extractive_fallback(items)
 
 
@@ -74,5 +81,5 @@ def summarize_item(item: Item, cfg: dict) -> str:
         f"In one concise sentence, explain why this item might matter to someone "
         f"tracking their industry:\nTitle: {item.title}\nDetails: {item.summary[:500]}\n\nSentence:"
     )
-    result = _ollama_generate(prompt, ollama_url, model, timeout=60)
+    result = _ollama_generate(prompt, ollama_url, model, timeout=60, num_thread=cfg.get("num_thread"))
     return result or item.summary[:280]
