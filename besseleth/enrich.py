@@ -91,9 +91,11 @@ def _build_prompt(row, config: Config, context: str) -> str:
     return (
         f"Read this {row['source']} item about {config.industry_name}. Extract structured metadata as JSON with "
         "exactly these keys (use null for anything not present or unclear — never invent a number):\n"
-        f'  "org": the primary company, lab, or institution the item is about, or null — a specific named '
-        f'organization, e.g. "Neuralink" or "Stanford University", NEVER the general field/industry itself '
-        f'(so never "{config.industry_name}" or a synonym for it)\n'
+        f'  "org": the primary company, lab, or institution the item is about — a specific NAMED organization only, '
+        f'e.g. "Neuralink" or "Stanford University". Use null for anything else, INCLUDING: the general field/'
+        f'industry itself (never "{config.industry_name}" or a synonym for it); a vague group description like '
+        f'"Chinese scientists", "researchers", "a team at the university", or "the company" — if the text doesn\'t '
+        f'name the specific organization, that\'s null, not your best guess at a description of one\n'
         '  "org_description": at most 5 words on what that org is/does, e.g. "BCI implant company" or '
         '"Academic neuroscience lab" — null if "org" is null\n'
         '  "org_type": one of "industry", "academic", "government", "nonprofit", or "unknown"\n'
@@ -115,6 +117,43 @@ def _build_prompt(row, config: Config, context: str) -> str:
         f"Other recent items on the same topic (for novelty comparison):\n{context}\n\n"
         "Respond with ONLY the JSON object, no other text."
     )
+
+
+_NON_ORG_EXACT = {
+    "unknown", "n/a", "na", "none", "various", "unspecified", "not specified", "not mentioned",
+    "not applicable", "researchers", "scientists", "the researchers", "the scientists", "authors",
+    "the authors", "the team", "the company", "the companies", "the university", "the lab", "the labs",
+    "investigators", "academics",
+}
+# "<Demonym/adjective> <generic role noun>" — e.g. "Chinese scientists",
+# "European researchers". Deliberately doesn't include "lab(s)"/"labs" or
+# "institute" etc. in the role-noun list: those are common LEGITIMATE org
+# name endings (e.g. "Merge Labs"), unlike "scientists"/"researchers"/
+# "team", which are never part of an actual org's name.
+_GENERIC_GROUP_RE = re.compile(
+    r"^(the\s+)?[A-Za-z]+\s+(scientists|researchers|engineers|team|teams|group|groups|authors|academics|"
+    r"investigators|physicians|doctors|clinicians|developers|students|professors)$",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_a_named_org(org: str, config: Config) -> bool:
+    """False for anything that isn't naming a specific organization: the
+    industry name/a keyword verbatim, an explicit non-answer ('unknown',
+    'n/a', ...), or a vague group description ('Chinese scientists',
+    'the researchers') that the LLM handed back instead of admitting it
+    doesn't know a specific name. Prompted against directly too (see
+    _build_prompt) — this is the defensive backstop for when it ignores
+    that instruction anyway."""
+    normalized = org.strip().lower()
+    if not normalized:
+        return False
+    non_orgs = _NON_ORG_EXACT | {config.industry_name.strip().lower()} | {k.strip().lower() for k in config.keywords}
+    if normalized in non_orgs:
+        return False
+    if _GENERIC_GROUP_RE.match(org.strip()):
+        return False
+    return True
 
 
 def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
@@ -146,16 +185,8 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
         novelty = None
 
     org = data.get("org") or None
-    # Defensive, on top of the prompt's own instruction not to: a model
-    # that ignores it and hands back the industry name itself (or one of
-    # its keywords, verbatim) isn't naming a real org — drop it rather
-    # than polluting the Orgs table with e.g. "Neurotechnology" as a
-    # company. Exact-match only (not a substring check) so a real
-    # company whose name happens to contain a keyword isn't dropped.
-    if org:
-        _non_orgs = {config.industry_name.strip().lower()} | {k.strip().lower() for k in config.keywords}
-        if org.strip().lower() in _non_orgs:
-            org = None
+    if org and not _looks_like_a_named_org(org, config):
+        org = None
     org_description = (data.get("org_description") or "").strip() or None
     if org_description and org:
         words = org_description.split()
@@ -227,9 +258,13 @@ def enrich_items_detailed(config: Config, db: DB) -> dict:
     if not cfg.get("enabled", True):
         return {"processed": 0, "message": "enrichment.enabled is false in config.yaml — nothing to do.", "backend": backend}
 
-    # Self-healing cleanup for items enriched before this guard existed —
-    # see clear_org_matches()'s docstring. Cheap, runs every call.
-    cleared = db.clear_org_matches([config.industry_name, *config.keywords])
+    # Self-healing cleanup for items enriched before this guard existed
+    # (or before it covered vague-group phrasing like "Chinese scientists")
+    # — sweeps every org value currently stored against the same check a
+    # fresh enrichment applies. Cheap (one query for the distinct list,
+    # then an indexed exact-match update), safe to run every call.
+    invalid_orgs = [o for o in db.distinct_orgs() if not _looks_like_a_named_org(o, config)]
+    cleared = db.clear_org_matches(invalid_orgs)
     if cleared:
         print(f"[enrich] Cleared {cleared} item(s) whose 'org' was actually the industry name/a keyword.")
 

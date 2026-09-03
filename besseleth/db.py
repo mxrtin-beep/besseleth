@@ -252,6 +252,13 @@ class DB:
         )
         self.conn.commit()
 
+    def distinct_orgs(self) -> list[str]:
+        """Every distinct org value currently stored — used to sweep
+        already-enriched rows against enrich.py's validity check, since
+        that check only runs on newly-enriched items otherwise."""
+        rows = self.conn.execute("SELECT DISTINCT org FROM items WHERE org IS NOT NULL AND org != ''").fetchall()
+        return [r[0] for r in rows]
+
     def clear_org_matches(self, names: list[str]) -> int:
         """Nulls out `org`/`org_description` on any item whose org
         exact-matches (case-insensitive) one of `names` — cleanup for

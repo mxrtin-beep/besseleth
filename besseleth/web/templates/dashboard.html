@@ -50,9 +50,6 @@
   a { color: #4a90d9; }
   #statusBar { display: flex; align-items: center; gap: .75rem; padding: .6rem 1rem; margin-bottom: 1rem;
                border: 1px solid #8883; border-radius: 8px; font-size: .82rem; flex-wrap: wrap; }
-  #statusBar .dot { width: 8px; height: 8px; border-radius: 50%; background: #adb5bd; flex-shrink: 0; }
-  #statusBar .dot.busy { background: #e9c46a; animation: pulse 1s infinite; }
-  @keyframes pulse { 50% { opacity: .3; } }
   #statusBar .spacer { margin-left: auto; }
   #pasteResult { margin-top: .75rem; font-size: .88rem; }
   #pasteResult.ok { color: #2a9d8f; }
@@ -81,7 +78,6 @@
 </aside>
 <main>
   <div id="statusBar">
-    <span class="dot" id="statusDot"></span>
     <span id="statusText">Loading status…</span>
     <span class="spacer"></span>
     <label class="hint" for="backfillDate" style="margin:0">Backfill from</label>
@@ -329,7 +325,6 @@ document.querySelector('.reportBtn').click();
 {% endif %}
 
 // --- Status bar / scheduler control / backfill --------------------------
-const statusDot = document.getElementById('statusDot');
 const statusText = document.getElementById('statusText');
 const runNowBtn = document.getElementById('runNowBtn');
 const backfillBtn = document.getElementById('backfillBtn');
@@ -361,7 +356,6 @@ async function pollStatus() {
   try {
     const res = await fetch('/api/status');
     const s = await res.json();
-    statusDot.className = 'dot ' + (s.running_now ? 'busy' : '');
     runNowBtn.disabled = s.running_now;
     backfillBtn.disabled = s.running_now;
     runNowBtn.textContent = s.running_now ? 'Running…' : 'Run now';
@@ -384,7 +378,6 @@ async function pollStatus() {
 runNowBtn.onclick = async () => {
   runNowBtn.disabled = true;
   runNowBtn.textContent = 'Running…';
-  statusDot.className = 'dot busy';
   statusText.textContent = 'Fetching/summarizing now…';
   try {
     await fetch('/api/run-now', { method: 'POST' });
