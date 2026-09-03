@@ -89,6 +89,7 @@
     <button id="tabReport" class="active">Report</button>
     <button id="tabPapers">Sources</button>
     <button id="tabOrgs">Orgs</button>
+    <button id="tabJobs">Jobs</button>
     <button id="tabMap">Map</button>
     <button id="tabTrends">Trends explorer</button>
     <button id="tabPaste">Paste</button>
@@ -135,6 +136,21 @@
     </div>
     <p class="hint" id="orgsCount"></p>
     <table class="datatable" id="orgsTable"></table>
+  </div>
+
+  <div id="jobsPane" style="display:none">
+    <p class="hint">Job postings pulled from each org's own job-board API (Greenhouse/Lever/Ashby) — not scraped
+      HTML, so it only covers orgs on one of those platforms. Kept in sync each fetch: a posting no longer listed
+      is marked Removed rather than deleted, so this reflects what's actually open right now. An org auto-detect
+      can't find can be mapped by hand in <code>job_boards.yaml</code> (see job_boards.example.yaml).</p>
+    <div class="controls">
+      <div><label for="jfOrg">Org</label><select id="jfOrg"><option value="">All</option></select></div>
+      <div><label for="jfStatus">Status</label><select id="jfStatus">
+        <option value="active">Active only</option><option value="">All (incl. removed)</option>
+      </select></div>
+    </div>
+    <p class="hint" id="jobsCount"></p>
+    <table class="datatable" id="jobsTable"></table>
   </div>
 
   <div id="mapPane" style="display:none">
@@ -205,12 +221,14 @@
 const reportPane = document.getElementById('reportPane');
 const papersPane = document.getElementById('papersPane');
 const orgsPane = document.getElementById('orgsPane');
+const jobsPane = document.getElementById('jobsPane');
 const mapPane = document.getElementById('mapPane');
 const trendsPane = document.getElementById('trendsPane');
 const pastePane = document.getElementById('pastePane');
 const tabReport = document.getElementById('tabReport');
 const tabPapers = document.getElementById('tabPapers');
 const tabOrgs = document.getElementById('tabOrgs');
+const tabJobs = document.getElementById('tabJobs');
 const tabMap = document.getElementById('tabMap');
 const tabTrends = document.getElementById('tabTrends');
 const tabPaste = document.getElementById('tabPaste');
@@ -219,23 +237,27 @@ function showTab(which) {
   reportPane.style.display = which === 'report' ? 'block' : 'none';
   papersPane.style.display = which === 'papers' ? 'block' : 'none';
   orgsPane.style.display = which === 'orgs' ? 'block' : 'none';
+  jobsPane.style.display = which === 'jobs' ? 'block' : 'none';
   mapPane.style.display = which === 'map' ? 'block' : 'none';
   trendsPane.style.display = which === 'trends' ? 'block' : 'none';
   pastePane.style.display = which === 'paste' ? 'block' : 'none';
   tabReport.classList.toggle('active', which === 'report');
   tabPapers.classList.toggle('active', which === 'papers');
   tabOrgs.classList.toggle('active', which === 'orgs');
+  tabJobs.classList.toggle('active', which === 'jobs');
   tabMap.classList.toggle('active', which === 'map');
   tabTrends.classList.toggle('active', which === 'trends');
   tabPaste.classList.toggle('active', which === 'paste');
   if (which === 'papers' && !papersLoaded) loadPapers();
   if (which === 'orgs' && !orgsLoaded) loadOrgs();
+  if (which === 'jobs' && !jobsLoaded) loadJobs();
   if (which === 'map' && !mapLoaded) loadMap();
   if (which === 'paste') loadPasted();
 }
 tabReport.onclick = () => showTab('report');
 tabPapers.onclick = () => showTab('papers');
 tabOrgs.onclick = () => showTab('orgs');
+tabJobs.onclick = () => showTab('jobs');
 tabMap.onclick = () => showTab('map');
 tabTrends.onclick = () => showTab('trends');
 tabPaste.onclick = () => showTab('paste');
@@ -562,6 +584,45 @@ function renderOrgs() {
         <td>${o.sources.join(', ')}</td>
         <td>${o.stock_ticker || ''}</td>
         <td>${fmtUsd(o.funding_total_usd)}${o.last_funding_round ? ` (${o.last_funding_round})` : ''}</td>
+      </tr>`).join('')}</tbody>`;
+}
+
+// --- Jobs table ----------------------------------------------------------
+let jobsLoaded = false;
+let jobs = [];
+
+async function loadJobs() {
+  jobsLoaded = true;
+  const res = await fetch('/api/jobs');
+  jobs = await res.json();
+  populateSelect('jfOrg', uniqueSorted(jobs.map(j => j.org)));
+  ['jfOrg', 'jfStatus'].forEach(id => document.getElementById(id).onchange = renderJobs);
+  renderJobs();
+}
+
+function renderJobs() {
+  const org = document.getElementById('jfOrg').value;
+  const status = document.getElementById('jfStatus').value; // 'active' or ''
+
+  const rows = jobs.filter(j => {
+    if (org && j.org !== org) return false;
+    if (status === 'active' && j.removed_at) return false;
+    return true;
+  });
+
+  document.getElementById('jobsCount').textContent = `${rows.length} of ${jobs.length} posting(s).`;
+
+  const table = document.getElementById('jobsTable');
+  table.innerHTML = `
+    <thead><tr><th>Org</th><th>Title</th><th>Location</th><th>Platform</th><th>First seen</th><th>Status</th></tr></thead>
+    <tbody>${rows.map(j => `
+      <tr>
+        <td>${j.org}</td>
+        <td>${j.url ? `<a href="${j.url}" target="_blank" rel="noopener">${j.title}</a>` : j.title}</td>
+        <td>${j.location || ''}</td>
+        <td>${j.platform}</td>
+        <td>${(j.first_seen_at || '').slice(0, 10)}</td>
+        <td>${j.removed_at ? `<span class="hint">Removed ${j.removed_at.slice(0, 10)}</span>` : 'Active'}</td>
       </tr>`).join('')}</tbody>`;
 }
 

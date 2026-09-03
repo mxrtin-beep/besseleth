@@ -1,0 +1,21 @@
+# Manual overrides for besseleth's job-postings feature (see
+# besseleth/scrapers/jobs_scraper.py). Optional — auto-detect (trying
+# each org against Greenhouse/Lever/Ashby's public APIs under a few
+# slug guesses) already covers most funded startups. Add an entry here
+# for an org whose slug auto-detect can't guess (name doesn't match its
+# board's slug) or whose careers page isn't on one of those platforms
+# at all (in which case there's nothing besseleth can pull structured
+# data from — this feature only covers the ATS platforms it knows).
+#
+# platform is one of: greenhouse | lever | ashby
+# slug is the identifier in that platform's own board URL, e.g.
+#   https://boards.greenhouse.io/mergelabs        -> greenhouse, mergelabs
+#   https://jobs.lever.co/somecompany              -> lever, somecompany
+#   https://jobs.ashbyhq.com/some-company          -> ashby, some-company
+#
+# Org name must match exactly how it appears in the Orgs tab (besseleth
+# extracted it from an item's text — check there if unsure).
+
+# - org: "Merge Labs"
+#   platform: greenhouse
+#   slug: mergelabs

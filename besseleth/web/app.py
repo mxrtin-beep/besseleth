@@ -115,6 +115,30 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             ]
         )
 
+    @app.get("/api/jobs")
+    def api_jobs():
+        db = DB(config.db_path)
+        try:
+            rows = db.job_postings()
+        finally:
+            db.close()
+        return jsonify(
+            [
+                {
+                    "id": r["id"],
+                    "org": r["org"],
+                    "platform": r["platform"],
+                    "title": r["title"],
+                    "url": r["url"],
+                    "location": r["location"],
+                    "first_seen_at": r["first_seen_at"],
+                    "last_seen_at": r["last_seen_at"],
+                    "removed_at": r["removed_at"],
+                }
+                for r in rows
+            ]
+        )
+
     @app.get("/api/papers")
     def api_papers():
         # Renamed "Sources" in the UI — this used to default to just

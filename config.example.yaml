@@ -229,6 +229,26 @@ summarizer:
   max_items_per_summary_call: 8
   # num_thread: 4            # cap CPU threads Ollama uses per call (unset = its default, usually all cores)
 
+jobs:
+  # Job postings for the orgs besseleth has extracted from items (see the
+  # Orgs tab) — pulled from each org's own Greenhouse/Lever/Ashby job-
+  # board API, not scraped HTML, so it only covers orgs on one of those
+  # platforms. Runs after enrichment each fetch (it needs the orgs
+  # enrichment just found). Kept in sync: a posting no longer listed by
+  # an org gets marked removed rather than deleted, so the Jobs tab
+  # reflects what's actually open right now, not everything ever seen.
+  #
+  # Board lookup is two-layered: auto-detect first tries a few slug
+  # guesses per org against each platform (and caches the result, found
+  # or not, so it isn't re-probed every run — a miss retries after
+  # recheck_days in case the org sets one up later); for an org it can't
+  # find, or guesses wrong, add a manual entry to job_boards.yaml (see
+  # job_boards.example.yaml) — manual always wins over auto-detect.
+  enabled: true
+  recheck_days: 14
+  max_new_probes_per_run: 15   # caps how many never-seen orgs get auto-probed per run (each costs up to ~12 requests)
+  manual_boards_path: "job_boards.yaml"
+
 report:
   output_dir: "reports"
   format: "markdown"         # "markdown" or "html"

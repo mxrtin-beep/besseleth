@@ -33,6 +33,35 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Job postings pulled from each org's ATS job-board API (see
+-- besseleth/scrapers/jobs_scraper.py). Unlike `items`, this is kept in
+-- sync with what's actually live: a posting missing from an org's most
+-- recent listing gets `removed_at` set rather than being deleted, so the
+-- table tracks "currently open" without losing history.
+CREATE TABLE IF NOT EXISTS job_postings (
+    id TEXT PRIMARY KEY,            -- stable hash: org + platform + external_id
+    org TEXT NOT NULL,
+    platform TEXT NOT NULL,         -- greenhouse | lever | ashby
+    external_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    url TEXT,
+    location TEXT,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,     -- bumped every run the posting is still listed
+    removed_at TEXT                 -- set once it drops off the org's listing
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_org ON job_postings(org);
+
+-- Which ATS platform+slug each org's job board was found at (or that
+-- none was found), so auto-detect doesn't re-probe every org on every
+-- run — see jobs_scraper.py's _resolve_board().
+CREATE TABLE IF NOT EXISTS job_board_cache (
+    org TEXT PRIMARY KEY,
+    platform TEXT,                  -- NULL if nothing was found
+    slug TEXT,
+    checked_at TEXT NOT NULL
+);
 """
 
 # Columns added after the initial release — migrated in with ALTER TABLE
@@ -253,6 +282,55 @@ class DB:
             GROUP BY org
             ORDER BY n DESC
         """
+        return list(self.conn.execute(q).fetchall())
+
+    # --- Job postings -----------------------------------------------------
+
+    def get_job_board_cache(self, org: str) -> sqlite3.Row | None:
+        self.conn.row_factory = sqlite3.Row
+        return self.conn.execute("SELECT * FROM job_board_cache WHERE org = ?", (org,)).fetchone()
+
+    def set_job_board_cache(self, org: str, platform: str | None, slug: str | None) -> None:
+        self.conn.execute(
+            """INSERT INTO job_board_cache (org, platform, slug, checked_at) VALUES (?, ?, ?, ?)
+               ON CONFLICT(org) DO UPDATE SET platform = excluded.platform, slug = excluded.slug,
+               checked_at = excluded.checked_at""",
+            (org, platform, slug, datetime.now(timezone.utc).isoformat()),
+        )
+        self.conn.commit()
+
+    def upsert_job_posting(self, id: str, org: str, platform: str, external_id: str, title: str, url: str, location: str) -> None:
+        """Insert a posting first-seen now, or bump last_seen_at (and
+        un-remove it, in case it was re-listed) if already known."""
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            """INSERT INTO job_postings (id, org, platform, external_id, title, url, location, first_seen_at, last_seen_at, removed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+               ON CONFLICT(id) DO UPDATE SET title = excluded.title, url = excluded.url,
+               location = excluded.location, last_seen_at = excluded.last_seen_at, removed_at = NULL""",
+            (id, org, platform, external_id, title, url, location, now, now),
+        )
+
+    def mark_stale_job_postings_removed(self, org: str, seen_ids: list[str]) -> int:
+        """Marks any of `org`'s postings not in `seen_ids` (i.e. not
+        touched by the run that just finished) as removed — called once
+        per org after its listing has been fully re-synced. Returns how
+        many were newly marked."""
+        placeholders = ",".join("?" for _ in seen_ids) or "''"
+        cur = self.conn.execute(
+            f"""UPDATE job_postings SET removed_at = ?
+                WHERE org = ? AND removed_at IS NULL AND id NOT IN ({placeholders})""",
+            (datetime.now(timezone.utc).isoformat(), org, *seen_ids),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def job_postings(self, active_only: bool = False) -> list[sqlite3.Row]:
+        self.conn.row_factory = sqlite3.Row
+        q = "SELECT * FROM job_postings"
+        if active_only:
+            q += " WHERE removed_at IS NULL"
+        q += " ORDER BY first_seen_at DESC"
         return list(self.conn.execute(q).fetchall())
 
     def papers(self, sources: list[str]) -> list[sqlite3.Row]:

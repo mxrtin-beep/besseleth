@@ -11,6 +11,7 @@ from .scrapers import (
     blog_scraper,
     conference_scraper,
     events_scraper,
+    jobs_scraper,
     linkedin_scraper,
     news_scraper,
     social_scraper,
@@ -94,6 +95,15 @@ def fetch_all(config: Config, db: DB, since: date | None = None) -> dict[str, li
 
     print("[pipeline] Enriching papers/news/blog items (org, modality, therapeutic target, novelty)...")
     enrich_items(config, db)
+
+    # Runs after enrichment, not before: it needs the orgs enrichment
+    # just extracted (db.orgs()) to know who to look up job boards for.
+    print("[pipeline] Syncing job postings for known orgs...")
+    jobs_result = jobs_scraper.fetch(config, db)
+    print(
+        f"[pipeline] Jobs: {jobs_result['orgs_with_board']}/{jobs_result['orgs_checked']} orgs have a known "
+        f"board, {jobs_result['active_postings']} posting(s) currently active."
+    )
 
     return results
 
