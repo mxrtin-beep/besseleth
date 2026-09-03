@@ -15,6 +15,40 @@
 //    in SITE_CONFIGS, or if a site's markup has drifted from the
 //    selectors below.
 
+// LinkedIn's feed markup (as of writing) is fully atomic/hashed CSS
+// classes (e.g. "_6c1f1fa0") that churn on every deploy — there is no
+// class name worth selecting on at all anymore, unlike X/Bluesky. The
+// one thing that stayed stable across a real DOM dump a user sent in:
+// every post has an <h2> with an accessibility label reading exactly
+// "Feed post", and, elsewhere inside that same post's DOM, a button
+// labeled "Open control menu for post by <name>" (aria-label, not a
+// class — LinkedIn has to keep that reasonably stable for screen
+// readers). This walks up from the "Feed post" heading to the nearest
+// ancestor that also contains that control-menu button — that ancestor
+// is the actual post card. If this stops working, it means even the
+// aria-labels changed — check DevTools console for what the current
+// scan found (see initPerPostButtons()'s log line) and send me a fresh
+// DOM dump of one post.
+function linkedInFindPosts() {
+  const seen = new Set();
+  const posts = [];
+  document.querySelectorAll("h2").forEach((h2) => {
+    if (h2.textContent.trim() !== "Feed post") return;
+    let el = h2.parentElement;
+    for (let hops = 0; hops < 8 && el; hops++) {
+      if (el.querySelector('button[aria-label^="Open control menu for post"]')) {
+        if (!seen.has(el)) {
+          seen.add(el);
+          posts.push(el);
+        }
+        return;
+      }
+      el = el.parentElement;
+    }
+  });
+  return posts;
+}
+
 const SITE_CONFIGS = [
   {
     name: "X",
@@ -47,15 +81,14 @@ const SITE_CONFIGS = [
   {
     name: "LinkedIn",
     hostnames: ["linkedin.com"],
-    // LinkedIn's feed classes are the least stable of the three — if
-    // the per-post button stops appearing here, selection still works.
-    // [data-urn*="urn:li:activity"] is a broader fallback: LinkedIn
-    // stamps that attribute on the feed's post containers for its own
-    // internal tracking/linking, which tends to survive a class-name
-    // redesign that would break the others.
-    postSelector: 'div.feed-shared-update-v2, div.occludable-update, [data-urn*="urn:li:activity"]',
-    textSelector: ".feed-shared-update-v2__description, .update-components-text, .feed-shared-text",
+    // No usable postSelector exists anymore (see linkedInFindPosts's
+    // comment above) — postFinder replaces it entirely for this site.
+    postFinder: linkedInFindPosts,
+    textSelector: '[data-testid="expandable-text-box"], .feed-shared-update-v2__description, .update-components-text',
     linkSelector: 'a[href*="/feed/update/"], a.app-aware-link[href*="/posts/"]',
+    // The "control menu" (⋯) button — also used to line the "B" button
+    // up at the same height, same as X's caret.
+    anchorSelector: 'button[aria-label^="Open control menu for post"]',
   },
 ];
 
@@ -106,8 +139,10 @@ function isMainPost(postEl, config) {
   // Skip anything nested inside another matching post — a quote-tweet's
   // embedded original, a repost-with-comment's embed, etc. render as a
   // second matching element inside the outer one; only the outer post
-  // (what's actually in your timeline) gets a button.
-  if (postEl.parentElement?.closest(activeSiteConfig.postSelector)) return false;
+  // (what's actually in your timeline) gets a button. Only applies to
+  // sites matched via a plain postSelector — a postFinder (LinkedIn) is
+  // expected to already return one entry per real post.
+  if (config.postSelector && postEl.parentElement?.closest(config.postSelector)) return false;
   if (config.skipTextPattern && config.skipTextPattern.test(postEl.innerText.trim())) return false;
   return true;
 }
@@ -173,7 +208,9 @@ function injectPostButton(postEl, config) {
 
 function scanForPosts() {
   if (!activeSiteConfig) return;
-  const posts = document.querySelectorAll(activeSiteConfig.postSelector);
+  const posts = activeSiteConfig.postFinder
+    ? activeSiteConfig.postFinder()
+    : document.querySelectorAll(activeSiteConfig.postSelector);
   posts.forEach((postEl) => injectPostButton(postEl, activeSiteConfig));
   return posts.length;
 }
@@ -208,7 +245,11 @@ async function initPerPostButtons() {
   if (!activeSiteConfig) return;
   await inPageUiEnabledReady;
 
-  console.log(`[besseleth] Clipper active on ${activeSiteConfig.name} — watching for posts matching "${activeSiteConfig.postSelector}".`);
+  console.log(
+    `[besseleth] Clipper active on ${activeSiteConfig.name} — watching for posts ` +
+      (activeSiteConfig.postFinder ? "via a custom finder (see linkedInFindPosts in content.js)" : `matching "${activeSiteConfig.postSelector}"`) +
+      "."
+  );
   const firstScanCount = scanForPosts();
   console.log(
     `[besseleth] Initial scan found ${firstScanCount} post(s), injected ${document.querySelectorAll(".besseleth-post-btn").length} button(s). ` +
