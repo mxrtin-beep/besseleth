@@ -412,17 +412,21 @@ def _backfill_org_locations(config: Config, db: DB) -> int:
     return filled
 
 
-def _dedupe_recent_items(config: Config, db: DB) -> int:
-    """Sweeps recently-fetched items for near-duplicates (the same
-    article picked up by two feeds, most commonly) and collapses them —
-    deletes the duplicate row(s), folding any distinct detail into the
-    kept item's summary, same merge dedupe.py already does at report
-    time. Doing it here too (right after every fetch, on stored data,
-    not just transiently at report time) means a duplicate is never
-    independently enriched as a second row — which is what let the same
-    story end up with two different novelty scores, one per row.
-    Returns how many duplicate rows were removed."""
-    from .dedupe import merge_near_duplicates
+def _sync_duplicate_novelty(config: Config, db: DB) -> int:
+    """Multiple rows for the same story are expected — the same news
+    inevitably reaches besseleth via more than one feed — and this
+    deliberately does NOT merge or drop any of them (that's a separate,
+    report-time-only concern — see dedupe.merge_near_duplicates(), used
+    when rendering the weekly report, not here). What's wrong is each
+    row getting independently novelty-scored: 'how surprising compared
+    to other recent items' depends on exactly which other items happened
+    to be in context at that moment, so two rows for one story can end
+    up with two different scores. This groups recent items by the same
+    near-duplicate title match, and — within a group — copies whichever
+    novelty_score/novelty_rationale is already set onto every other
+    member so they read the same, regardless of source. Returns how
+    many rows got a score synced onto them."""
+    from .dedupe import group_near_duplicates
 
     cfg = config.raw.get("enrichment", {}) or {}
     sources = cfg.get("sources", DEFAULT_SOURCES)
@@ -430,20 +434,20 @@ def _dedupe_recent_items(config: Config, db: DB) -> int:
     if len(items) < 2:
         return 0
 
-    kept, dropped_by_kept = merge_near_duplicates(items)
-    if not dropped_by_kept:
-        return 0
-
-    kept_by_id = {i.id: i for i in kept}
-    removed = 0
-    for winner_id, dropped_ids in dropped_by_kept.items():
-        winner = kept_by_id.get(winner_id)
-        if winner:
-            db.update_summary(winner_id, winner.summary)
-        for dropped_id in dropped_ids:
-            if db.delete_item(dropped_id):
-                removed += 1
-    return removed
+    synced = 0
+    for group in group_near_duplicates(items):
+        if len(group) < 2:
+            continue
+        canonical = next((i for i in group if i.novelty_score is not None), None)
+        if canonical is None:
+            continue  # nobody in this group has been scored yet — nothing to sync
+        for item in group:
+            if item.id == canonical.id:
+                continue
+            if item.novelty_score != canonical.novelty_score or item.novelty_rationale != canonical.novelty_rationale:
+                db.sync_novelty(item.id, canonical.novelty_score, canonical.novelty_rationale)
+                synced += 1
+    return synced
 
 
 def enrich_items_detailed(config: Config, db: DB) -> dict:
@@ -460,14 +464,12 @@ def enrich_items_detailed(config: Config, db: DB) -> dict:
     if not cfg.get("enabled", True):
         return {"processed": 0, "message": "enrichment.enabled is false in config.yaml — nothing to do.", "backend": backend}
 
-    # Collapses near-duplicate rows (the same article via two feeds)
-    # before anything else runs, so a duplicate never gets independently
-    # enriched/scored as its own row — see _dedupe_recent_items()'s
-    # docstring for why that mattered (two different novelty scores for
-    # one story).
-    deduped = _dedupe_recent_items(config, db)
-    if deduped:
-        print(f"[enrich] Removed {deduped} duplicate item(s) (same article via multiple feeds).")
+    # Rows for the same story across multiple feeds are expected and
+    # stay separate — this only makes sure they agree on novelty. See
+    # _sync_duplicate_novelty()'s docstring.
+    synced = _sync_duplicate_novelty(config, db)
+    if synced:
+        print(f"[enrich] Synced novelty score across {synced} duplicate item(s) of the same story.")
 
     # Self-healing cleanup for items enriched before this guard existed
     # (or before it covered vague-group phrasing like "Chinese scientists")
