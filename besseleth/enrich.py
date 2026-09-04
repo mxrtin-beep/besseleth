@@ -48,6 +48,7 @@ from .config import Config, env
 from .db import DB
 from .feeds_store import load_feeds
 from .geocode import geocode
+from .trends import company_store
 from .trends.company_store import auto_mark_ipo, auto_upsert_company
 from .trends.store import auto_append_device
 from . import summarizer as summarizer_mod
@@ -118,8 +119,12 @@ def _build_prompt(row, config: Config, context: str) -> str:
         '  "novelty_rationale": one concise sentence justifying the novelty_score\n'
         '  "location": the city and country of the org\'s relevant site/HQ mentioned or clearly implied by the '
         'text, as "City, Country" (e.g. "San Francisco, USA") — null if not mentioned or you would be guessing\n'
+        '  "device_name": the specific product/device name this item is actually about, e.g. "Stentrode", "N1", '
+        '"UCSF speech decoder" — null if the item is about the org/company in general rather than one named '
+        "device or system (do NOT put the org's own name here as a stand-in — that's what \"org\" is for)\n"
         '  "device_metrics": an object with any of these keys the text reports concrete numbers/values for — '
-        f"{metric_keys}, {categorical_keys} — omit keys with no data, use {{}} if none reported\n"
+        f"{metric_keys}, {categorical_keys} — omit keys with no data, use {{}} if none reported. Only meaningful "
+        'if "device_name" is set\n'
         '  "company_funding": an object {"funding_total_usd": number or null, "last_funding_round": string or '
         'null, "last_funding_date": "YYYY-MM-DD" or null, "ipo_date": "YYYY-MM-DD" or null, "stock_exchange": '
         'string or null} — funding_total_usd/last_funding_round/last_funding_date if this item reports a specific '
@@ -146,6 +151,34 @@ _NON_ORG_EXACT = {
 _GENERIC_GROUP_RE = re.compile(
     r"^(the\s+)?[A-Za-z]+\s+(scientists|researchers|engineers|team|teams|group|groups|authors|academics|"
     r"investigators|physicians|doctors|clinicians|developers|students|professors)$",
+    re.IGNORECASE,
+)
+
+# A country is never itself the "specific named organization" an item is
+# about — but an LLM extraction sometimes latches onto a country/national
+# framing instead of the actual company buried in the text (e.g. a story
+# about "Adi Neuroscience" headlined around "India's $1B neurotech fund"
+# gets "org" extracted as "India" or "India's Neurotechnology Fund"
+# instead). Caught here as a defensive backstop, same idea as
+# _is_bare_university: a bare country name, or "<Country>'s ..." (almost
+# never how a real org's name starts), is rejected outright.
+_COUNTRIES = {
+    "afghanistan", "albania", "algeria", "argentina", "armenia", "australia", "austria", "azerbaijan",
+    "bahrain", "bangladesh", "belarus", "belgium", "bolivia", "bosnia", "brazil", "bulgaria", "cambodia",
+    "cameroon", "canada", "chile", "china", "colombia", "costa rica", "croatia", "cuba", "cyprus",
+    "czechia", "czech republic", "denmark", "ecuador", "egypt", "estonia", "ethiopia", "finland", "france",
+    "georgia", "germany", "ghana", "greece", "hungary", "iceland", "india", "indonesia", "iran", "iraq",
+    "ireland", "israel", "italy", "japan", "jordan", "kazakhstan", "kenya", "kuwait", "latvia", "lebanon",
+    "lithuania", "luxembourg", "malaysia", "mexico", "morocco", "myanmar", "nepal", "netherlands",
+    "new zealand", "nigeria", "north korea", "norway", "oman", "pakistan", "panama", "peru",
+    "philippines", "poland", "portugal", "qatar", "romania", "russia", "saudi arabia", "serbia",
+    "singapore", "slovakia", "slovenia", "south africa", "south korea", "spain", "sri lanka", "sweden",
+    "switzerland", "syria", "taiwan", "thailand", "tunisia", "turkey", "uae", "ukraine",
+    "united arab emirates", "united kingdom", "united states", "uk", "usa", "u.s.", "u.s.a.", "u.k.",
+    "uruguay", "venezuela", "vietnam",
+}
+_COUNTRY_POSSESSIVE_RE = re.compile(
+    r"^(" + "|".join(re.escape(c) for c in sorted(_COUNTRIES, key=len, reverse=True)) + r")'s\b",
     re.IGNORECASE,
 )
 
@@ -271,6 +304,8 @@ def _looks_like_a_named_org(org: str, config: Config) -> bool:
         return False
     if _GENERIC_GROUP_RE.match(org.strip()):
         return False
+    if normalized in _COUNTRIES or _COUNTRY_POSSESSIVE_RE.match(org.strip()):
+        return False
     if _is_bare_university(org):
         return False
     publisher_names = _known_publisher_names(config)
@@ -385,13 +420,19 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
         org_description=org_description,
     )
 
-    # Fold concrete numbers into devices.yaml/companies.yaml — additive
-    # only, never overwrites an existing entry (see module docstring).
+    # Fold concrete numbers into the devices/companies tables — additive
+    # only, never overwrites an existing entry (see trends/store.py's
+    # docstring). Requires an actual named device — "org" alone (e.g. the
+    # LLM defaulting to just the company name when it can't name a
+    # specific product) isn't a device, and used to silently create a
+    # device row with the org's own name, cluttering the FDA timeline
+    # with entries that were never really about a device.
+    device_name = (data.get("device_name") or "").strip()
     device_metrics = data.get("device_metrics") or {}
-    if org and device_metrics:
+    if org and device_name and device_name.lower() != org.lower():
         auto_append_device(
             config.devices_path,
-            name=device_metrics.get("device_type") and f"{org} {device_metrics['device_type']}" or org,
+            name=device_name,
             org=org,
             org_type=data.get("org_type") or "unknown",
             fda_status=device_metrics.get("fda_status", "unknown"),
@@ -407,7 +448,13 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
             name=org,
             funding_total_usd=funding.get("funding_total_usd"),
             last_funding_round=funding.get("last_funding_round") or "",
-            last_funding_date=funding.get("last_funding_date") or "",
+            # Fall back to the item's own published date when the LLM
+            # didn't pin an exact funding date — "reported around this
+            # date" beats leaving it blank, which used to mean a company
+            # with real funding data just never appeared on the Trends
+            # tab's date-axis chart (it had table entries but no point to
+            # plot).
+            last_funding_date=funding.get("last_funding_date") or (row["published_at"] or "")[:10],
             source_url=row["url"] or "",
         )
     if org and funding.get("ipo_date"):
@@ -552,6 +599,29 @@ def _backfill_contact_locations(config: Config, db: DB) -> int:
     return filled
 
 
+def _apply_location_consensus(db: DB) -> int:
+    """Each item gets its location guessed independently (from its own
+    text, by whichever LLM call enriched it) — so one org's items can
+    end up disagreeing, e.g. 10 items correctly say San Francisco and 1
+    misreads something as Brazil. db.locations() (the Map tab's data
+    source) groups by (org, lat, lon), so disagreement literally means
+    that org gets plotted as two markers instead of one. This applies
+    the majority location to every item for an org whenever there IS a
+    clear majority — a tie is left alone rather than guessing which
+    side is right. Returns how many orgs were reconciled."""
+    reconciled = 0
+    for org in db.distinct_orgs():
+        votes = db.org_location_votes(org)
+        if len(votes) < 2:
+            continue  # already unanimous, or unlocated — nothing to reconcile
+        top, runner_up = votes[0], votes[1]
+        if top["n"] <= runner_up["n"]:
+            continue  # no strict majority — don't guess which is right
+        db.set_org_location_all(org, top["location_text"], top["lat"], top["lon"])
+        reconciled += 1
+    return reconciled
+
+
 def _sync_duplicate_novelty(config: Config, db: DB) -> int:
     """Multiple rows for the same story are expected — the same news
     inevitably reaches besseleth via more than one feed — and this
@@ -625,10 +695,31 @@ def enrich_items_detailed(config: Config, db: DB) -> dict:
     if renamed:
         print(f"[enrich] Merged {renamed} item(s) into an existing org's canonical spelling (casing/spacing variants).")
 
+    # Same idea, for the devices/companies tables: a device row that's
+    # just the org's own name (an older bug — see _enrich_one's
+    # device_name gate) never belonged on the FDA timeline, and two
+    # companies that are really the same one typed/extracted two ways
+    # (e.g. "Axfot" for "Axoft") shouldn't be two rows on the funding chart.
+    bogus_devices = db.delete_bogus_devices()
+    if bogus_devices:
+        print(f"[enrich] Removed {bogus_devices} device row(s) whose 'name' was just the org's own name.")
+
+    merged_companies = company_store.merge_fuzzy_duplicate_companies(config.companies_path)
+    if merged_companies:
+        print(f"[enrich] Merged {merged_companies} near-duplicate company row(s) (likely a typo'd extraction).")
+
+    dated_companies = company_store.backfill_missing_funding_dates(config.companies_path)
+    if dated_companies:
+        print(f"[enrich] Backfilled a funding date for {dated_companies} compan(ies) that had funding data but no date.")
+
     invalid_locations = [loc for loc in db.distinct_locations() if not _looks_like_a_real_location(loc)]
     locations_cleared = db.clear_location_matches(invalid_locations)
     if locations_cleared:
         print(f"[enrich] Cleared {locations_cleared} item(s) with a vague location guess (e.g. 'Remote'/'Global').")
+
+    reconciled_locations = _apply_location_consensus(db)
+    if reconciled_locations:
+        print(f"[enrich] Reconciled {reconciled_locations} org(s) whose items disagreed on location to the majority guess.")
 
     # Independent of the LLM pass below — a free web lookup (Wikidata)
     # for orgs whose location was never mentioned in any item's own

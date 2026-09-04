@@ -145,8 +145,12 @@ def auto_append_device(
     no-op (a re-run of enrichment on the same item shouldn't duplicate
     it). A *new* dated report about a device already tracked still adds
     a row, which is what lets a metric or FDA status be compared over
-    time. Returns True if it added a row."""
-    if not name or not org or not metrics:
+    time. Returns True if it added a row. Requires a name/org and at
+    least *something* worth recording — either a numeric metric or a
+    known (not "unknown") FDA status, so a report that names a device
+    but says nothing concrete about it doesn't add an empty row."""
+    has_fda_status = bool(fda_status) and fda_status.strip().lower() not in ("", "unknown", "n/a", "none")
+    if not name or not org or not (metrics or has_fda_status):
         return False
     from ..db import DB
 

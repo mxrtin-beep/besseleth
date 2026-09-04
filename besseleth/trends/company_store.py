@@ -17,8 +17,37 @@ nothing you've corrected gets clobbered on the next fetch.
 """
 from __future__ import annotations
 
+import difflib
 from dataclasses import dataclass
 from pathlib import Path
+
+# How close two names need to be to treat them as the same company typed/
+# extracted two different ways — catches an LLM typo (e.g. "Axfot" for
+# "Axoft") that exact/squash matching misses since the letters aren't just
+# differently cased or punctuated, they're actually rearranged. The length
+# guard keeps two short-but-unrelated names ("3M" vs "AI") from colliding
+# just because a 2-character SequenceMatcher ratio is noisy.
+_FUZZY_MATCH_RATIO = 0.78
+_FUZZY_MATCH_MAX_LEN_DIFF = 3
+
+
+def _is_fuzzy_match(a: str, b: str) -> bool:
+    if abs(len(a) - len(b)) > _FUZZY_MATCH_MAX_LEN_DIFF:
+        return False
+    return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio() >= _FUZZY_MATCH_RATIO
+
+
+def _resolve_existing_name(name: str, db) -> str:
+    """Reuses an existing company's exact spelling if `name` is a close
+    fuzzy match to one already stored — otherwise returns `name`
+    unchanged. db.get_company() already handles exact/case-insensitive
+    matches; this only kicks in for a near-miss like a misspelling."""
+    if db.get_company(name):
+        return name
+    for row in db.companies():
+        if _is_fuzzy_match(name, row["name"]):
+            return row["name"]
+    return name
 
 
 @dataclass
@@ -113,6 +142,7 @@ def auto_upsert_company(
 
     db = DB(Path(path))
     try:
+        name = _resolve_existing_name(name, db)
         return db.add_company(
             name=name,
             stock_ticker="",
@@ -143,7 +173,64 @@ def auto_mark_ipo(path: str | Path, name: str, ipo_date: str, stock_exchange: st
 
     db = DB(Path(path))
     try:
+        name = _resolve_existing_name(name, db)
         db.set_company_ipo(name, ipo_date, stock_exchange or "")
+    finally:
+        db.close()
+
+
+def merge_fuzzy_duplicate_companies(path: str | Path) -> int:
+    """Retroactive sweep: clusters every currently-stored company by the
+    same fuzzy-match rule new entries are resolved against (see
+    _resolve_existing_name), and folds each duplicate into whichever
+    name in the cluster is used as `org` more often elsewhere — the same
+    "most-used spelling wins" tiebreak enrich.py uses for orgs. Fixes a
+    typo'd duplicate (e.g. "Axfot"/"Axoft") that slipped in before this
+    fuzzy check existed. Returns how many rows were merged away."""
+    from ..db import DB
+
+    db = DB(Path(path))
+    try:
+        names = [r["name"] for r in db.companies()]
+        item_counts = db.org_item_counts()
+        merged = 0
+        dropped: set[str] = set()
+        for i, name in enumerate(names):
+            if name in dropped:
+                continue
+            for other in names[i + 1 :]:
+                if other in dropped or not _is_fuzzy_match(name, other):
+                    continue
+                keep, drop = sorted((name, other), key=lambda n: item_counts.get(n, 0), reverse=True)
+                db.merge_company(keep_name=keep, drop_name=drop)
+                dropped.add(drop)
+                merged += 1
+        return merged
+    finally:
+        db.close()
+
+
+def backfill_missing_funding_dates(path: str | Path) -> int:
+    """Retroactive one-time fix for a company row that has funding data
+    but no last_funding_date/ipo_date (an older enrich.py bug — see
+    auto_upsert_company's caller in enrich.py) — without a date on
+    *some* field, such a row has table data but nothing to plot on the
+    Trends tab's date axis. Backfills from the earliest scraped item
+    naming that org, as a best-effort "reported around this date".
+    Returns how many rows were filled in."""
+    from ..db import DB
+
+    db = DB(Path(path))
+    filled = 0
+    try:
+        for row in db.companies():
+            if row["last_funding_date"] or row["ipo_date"] or not row["funding_total_usd"]:
+                continue
+            earliest = db.earliest_item_date_for_org(row["name"])
+            if earliest:
+                db.update_company(row["name"], last_funding_date=earliest)
+                filled += 1
+        return filled
     finally:
         db.close()
 

@@ -12,7 +12,7 @@
      keeps them paired regardless of system theme. */
   :root { color-scheme: light; }
   body { font-family: Helvetica, Arial, sans-serif; margin: 0; display: flex; height: 100vh;
-         background: #f2ede2; color: #0d1b3e; }
+         background: #f6f2e8; color: #0d1b3e; }
   aside { width: 240px; border-right: 1px solid #8883; padding: 1rem; overflow-y: auto; flex-shrink: 0; }
   main { flex: 1; overflow-y: auto; padding: 1.5rem 2rem; }
   h1 { font-size: 1.3rem; margin: 0 0 1rem; }
@@ -100,13 +100,7 @@
   <div id="reportPane"><p class="hint">Pick a report from the sidebar.</p></div>
 
   <div id="papersPane" style="display:none">
-    <p class="hint">Every item besseleth has ever fetched or you've pasted in — arXiv, news, blog, LinkedIn, social,
-      events, everything — in one browsable, filterable table, not just this week's. Use the Source filter below to
-      narrow to just arXiv, say. Org, modality, and therapeutic target are extracted by the local LLM after each fetch
-      (bounded per run — <code>besseleth.cli enrich --all</code> catches up a backlog); the novelty score rates
-      how surprising an item is compared to other recent items on the same topic.
-      <button class="btn" id="enrichNowBtn" style="margin-left:.5rem">Enrich now</button>
-    </p>
+    <p><button class="btn" id="enrichNowBtn">Enrich now</button></p>
     <p class="hint" id="enrichResult"></p>
     <div class="controls">
       <div><label for="pfFrom">From</label><input type="date" id="pfFrom"></div>
@@ -129,11 +123,6 @@
   </div>
 
   <div id="orgsPane" style="display:none">
-    <p class="hint">Every lab, academic/government institution, and company besseleth has extracted an org name
-      for — the full set the Map tab's markers are drawn from, plus orgs that never resolved to a location.
-      Category is a short LLM-written description (what the org actually is/does), and Source links to the
-      item it was most recently mentioned in — both there so you can sanity-check an extraction rather than
-      take it on faith. Funding/stock columns come from the Trends tab's companies where the name matches.</p>
     <div class="controls">
       <div><label for="ofOrgType">Org type</label><select id="ofOrgType"><option value="">All</option></select></div>
       <div><label for="ofSource">Source</label><select id="ofSource"><option value="">All</option></select></div>
@@ -143,10 +132,6 @@
   </div>
 
   <div id="jobsPane" style="display:none">
-    <p class="hint">Job postings pulled from each org's own job-board API (Greenhouse/Lever/Ashby) — not scraped
-      HTML, so it only covers orgs on one of those platforms. Kept in sync each fetch: a posting no longer listed
-      is marked Removed rather than deleted, so this reflects what's actually open right now. An org auto-detect
-      can't find can be mapped by hand in <code>job_boards.yaml</code> (see job_boards.example.yaml).</p>
     <div class="controls">
       <div><label for="jfOrg">Org</label><select id="jfOrg"><option value="">All</option></select></div>
       <div><label for="jfStatus">Status</label><select id="jfStatus">
@@ -158,10 +143,6 @@
   </div>
 
   <div id="mapPane" style="display:none">
-    <p class="hint">Where the companies/labs behind your sources are located — one marker per org, sized by
-      how much has been fetched about it. Locations are the local LLM's best guess from item text (only saved when
-      it's confident, not a guess), geocoded via <a href="https://www.openstreetmap.org/copyright" target="_blank"
-      rel="noopener">OpenStreetMap</a>. Click a marker to filter the Sources tab by that org.</p>
     <label style="display:flex; align-items:center; gap:.4rem; font-size:.9rem; margin-bottom:.5rem;">
       <input type="checkbox" id="mapShowFriends"> Show friends (from Contacts, at their current employer)
     </label>
@@ -201,9 +182,6 @@
   </div>
 
   <div id="pastePane" style="display:none">
-    <p class="hint">One box for anything — a LinkedIn post, a Bluesky/X post, a Luma/Eventbrite page, a Substack
-      post, whatever. Paste the text (and its URL, if it's not already in the text) and besseleth figures out
-      which source it belongs to from the link.</p>
     <div class="controls" style="align-items:stretch">
       <div style="flex:1; min-width: 300px">
         <label for="pasteText">Paste content</label>
@@ -251,11 +229,6 @@
   </div>
 
   <div id="contactsPane" style="display:none">
-    <p class="hint">Friends, ex-coworkers, LinkedIn contacts — anyone whose employer(s) or school(s) you'd want
-      flagged when they show up in a report. An item mentioning a contact's <b>workplace</b> (current or past) is
-      surfaced first ("your friend's employer is in the news"); their <b>school</b> is checked too if no workplace
-      matches (more serendipitous — "the place your friend studied just published something"). See the report's
-      "For you" section.</p>
     <div class="controls" style="align-items:stretch; flex-wrap:wrap">
       <div><label for="contactName">Name *</label><input type="text" id="contactName" placeholder="Jane Doe"></div>
       <div><label for="contactEmails">Email(s)</label><input type="text" id="contactEmails" placeholder="jane@example.com, jane@work.com"></div>
@@ -1121,7 +1094,7 @@ function renderChart() {
   rows.forEach(row => {
     const source = currentDataset === 'devices' ? row.metrics : row;
     const xVal = xKey === 'date_reported'
-      ? (currentDataset === 'devices' ? row.date_reported : row.stock_price_updated_at || row.last_funding_date)
+      ? (currentDataset === 'devices' ? row.date_reported : row.last_funding_date || row.ipo_date || row.stock_price_updated_at)
       : source[xKey];
     const yVal = source[yKey];
     if (xVal === undefined || xVal === null || xVal === '' || yVal === undefined || yVal === null) return;
@@ -1165,11 +1138,12 @@ function renderChart() {
 }
 
 function renderFdaTimeline() {
-  const dated = devices.filter(d => d.date_reported);
+  const dated = devices.filter(d => d.date_reported && d.fda_stage_rank > 0);
   if (!dated.length) {
     Plotly.purge('chart');
     document.getElementById('chart').innerHTML =
-      '<p class="hint">No dated device reports yet — devices need a date_reported and an FDA-status mention to show up here.</p>';
+      '<p class="hint">No devices with a recognized FDA stage yet — devices need a date_reported and a specific ' +
+      'FDA-status mention (Breakthrough Designation, IDE, 510(k)/De Novo/PMA/HDE, or commercially available) to show up here.</p>';
     return;
   }
   const byOrg = {};
@@ -1249,7 +1223,7 @@ function renderIpoTimeline() {
 function renderTable() {
   const table = document.getElementById('dataTable');
   if (currentDataset === 'fda_timeline') {
-    const dated = devices.filter(d => d.date_reported).slice().sort((a, b) => b.date_reported.localeCompare(a.date_reported));
+    const dated = devices.filter(d => d.date_reported && d.fda_stage_rank > 0).slice().sort((a, b) => b.date_reported.localeCompare(a.date_reported));
     table.innerHTML = `
       <thead><tr><th>Org</th><th>Device</th><th>Stage</th><th>FDA status (raw)</th><th>Reported</th><th>Source</th></tr></thead>
       <tbody>${dated.map(d => `
@@ -1282,7 +1256,7 @@ function renderTable() {
       <thead><tr><th>Device</th><th>Org</th><th>Type</th><th>FDA status</th><th>Metrics</th><th>Reported</th><th>Source</th></tr></thead>
       <tbody>${devices.map(d => `
         <tr>
-          <td>${d.name}${d.auto_extracted ? ' <span class="metric-tag" title="Auto-extracted by besseleth — verify before trusting">auto</span>' : ''}</td>
+          <td>${d.name}</td>
           <td>${d.org}</td>
           <td>${d.org_type}</td>
           <td>${d.fda_status || 'unknown'}</td>
@@ -1295,7 +1269,7 @@ function renderTable() {
       <thead><tr><th>Company</th><th>Funding</th><th>Last round</th><th>Stock</th><th>Source</th><th>Notes</th></tr></thead>
       <tbody>${companies.map(c => `
         <tr>
-          <td>${c.name}${c.auto_extracted ? ' <span class="metric-tag" title="Auto-extracted by besseleth — verify before trusting">auto</span>' : ''}</td>
+          <td>${c.name}</td>
           <td>${c.funding_total_usd ? '$' + c.funding_total_usd.toLocaleString() : '—'}</td>
           <td>${c.last_funding_round ? `${c.last_funding_round} (${c.last_funding_date})` : '—'}</td>
           <td>${c.stock_price ? `${c.stock_ticker}: $${c.stock_price.toLocaleString()}` : (c.stock_ticker || '—')}</td>

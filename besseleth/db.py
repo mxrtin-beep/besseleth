@@ -468,6 +468,33 @@ class DB:
         self.conn.commit()
         return cur.rowcount
 
+    def org_location_votes(self, org: str) -> list[sqlite3.Row]:
+        """Every distinct (location_text, lat, lon) items for `org` carry,
+        most-agreed-on first — lets a consensus location be picked when
+        items disagree (see enrich.py's _apply_location_consensus)."""
+        self.conn.row_factory = sqlite3.Row
+        return list(
+            self.conn.execute(
+                """SELECT location_text, lat, lon, COUNT(*) as n FROM items
+                   WHERE lower(org) = lower(?) AND lat IS NOT NULL
+                   GROUP BY location_text, lat, lon ORDER BY n DESC""",
+                (org,),
+            ).fetchall()
+        )
+
+    def set_org_location_all(self, org: str, location_text: str, lat: float, lon: float) -> int:
+        """Overwrites location on EVERY item for `org`, not just those
+        missing one — unlike set_org_location (additive-only), this is
+        for reconciling disagreement: one org should be one point on the
+        map, not split across markers because a minority of items got a
+        different LLM location guess. Returns how many items changed."""
+        cur = self.conn.execute(
+            "UPDATE items SET location_text = ?, lat = ?, lon = ? WHERE lower(org) = lower(?)",
+            (location_text, lat, lon, org),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
     def locations(self) -> list[sqlite3.Row]:
         """Orgs with a geocoded location, aggregated for the map — count
         of items and the most common org_type at each point."""
@@ -575,6 +602,20 @@ class DB:
         self.conn.row_factory = sqlite3.Row
         return list(self.conn.execute("SELECT * FROM devices ORDER BY date_reported, id").fetchall())
 
+    def delete_bogus_devices(self) -> int:
+        """Removes device rows whose name is just the org's own name
+        (case-insensitive) — a bug in an earlier version of enrich.py
+        created these when it couldn't identify a specific device, which
+        cluttered the FDA timeline with "devices" that were never
+        actually about one. Auto-extracted only; a row you've hand-edited
+        or hand-added with that name is left alone. Returns how many
+        were removed."""
+        cur = self.conn.execute(
+            "DELETE FROM devices WHERE lower(name) = lower(org) AND auto_extracted = 1"
+        )
+        self.conn.commit()
+        return cur.rowcount
+
     def device_exists(self, name: str, org: str, date_reported: str) -> bool:
         row = self.conn.execute(
             "SELECT 1 FROM devices WHERE lower(name) = lower(?) AND lower(org) = lower(?) AND date_reported = ?",
@@ -605,6 +646,13 @@ class DB:
         )
         self.conn.commit()
         return cur.lastrowid
+
+    def earliest_item_date_for_org(self, org: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT MIN(published_at) FROM items WHERE lower(org) = lower(?) AND published_at IS NOT NULL",
+            (org,),
+        ).fetchone()
+        return (row[0] or "")[:10] or None if row else None
 
     def companies(self) -> list[sqlite3.Row]:
         self.conn.row_factory = sqlite3.Row
@@ -652,6 +700,31 @@ class DB:
                 (ipo_date, stock_exchange, name),
             )
             self.conn.commit()
+
+    def delete_company(self, name: str) -> None:
+        self.conn.execute("DELETE FROM companies WHERE lower(name) = lower(?)", (name,))
+        self.conn.commit()
+
+    def merge_company(self, keep_name: str, drop_name: str) -> None:
+        """Folds `drop_name` into `keep_name` — fills any field that's
+        set on the dropped row but null/empty on the kept one, then
+        deletes the dropped row. Used to fix a near-duplicate company
+        (e.g. an LLM typo like "Axfot" for "Axoft") without losing
+        whichever of the two rows happened to have the funding/IPO data."""
+        keep = self.get_company(keep_name)
+        drop = self.get_company(drop_name)
+        if not keep or not drop:
+            return
+        fields = [
+            "stock_ticker", "stock_price", "stock_price_updated_at", "funding_total_usd",
+            "last_funding_round", "last_funding_date", "ipo_date", "stock_exchange", "source_url", "notes",
+        ]
+        updates = {f: drop[f] for f in fields if not keep[f] and drop[f]}
+        if keep["is_public"] == 0 and drop["is_public"]:
+            updates["is_public"] = 1
+        if updates:
+            self.update_company(keep_name, **updates)
+        self.delete_company(drop_name)
 
     def update_company(self, name: str, **fields: Any) -> None:
         if not fields:
