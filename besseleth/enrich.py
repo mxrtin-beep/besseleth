@@ -39,12 +39,14 @@ import json
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import requests
 
 from . import web_lookup
 from .config import Config, env
 from .db import DB
+from .feeds_store import load_feeds
 from .geocode import geocode
 from .trends.company_store import auto_upsert_company
 from .trends.store import auto_append_device
@@ -96,8 +98,11 @@ def _build_prompt(row, config: Config, context: str) -> str:
         f'  "org": the primary company, lab, or institution the item is about — a specific NAMED organization only, '
         f'e.g. "Neuralink" or "Stanford University". Use null for anything else, INCLUDING: the general field/'
         f'industry itself (never "{config.industry_name}" or a synonym for it); a vague group description like '
-        f'"Chinese scientists", "researchers", "a team at the university", or "the company" — if the text doesn\'t '
-        f'name the specific organization, that\'s null, not your best guess at a description of one\n'
+        f'"Chinese scientists", "researchers", "a team at the university", or "the company"; and — this is a common '
+        f'mistake — the PUBLICATION or news outlet reporting the story (e.g. if the text says "according to '
+        f'TechCrunch..." or "36Kr reports that...", that outlet is NOT the org; keep looking for who the story is '
+        f"actually about). If the text doesn't name the specific organization, that's null, not your best guess "
+        f"at a description of one\n"
         '  "org_description": at most 5 words on what that org is/does, e.g. "BCI implant company" or '
         '"Academic neuroscience lab" — null if "org" is null\n'
         '  "org_type": one of "industry", "academic", "government", "nonprofit", or "unknown"\n'
@@ -162,14 +167,60 @@ def _looks_like_a_real_location(location_text: str) -> bool:
     return True
 
 
+def _hostname(url: str) -> str:
+    try:
+        host = urlparse(url).netloc.lower()
+    except ValueError:
+        return ""
+    return re.sub(r"^www\.", "", host).split(":")[0]
+
+
+def _squash(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def _known_publisher_names(config: Config) -> set[str]:
+    """Every configured NEWS feed's hostname (e.g. "bioengineer.org") and
+    squashed base name (e.g. "techtimes", from "techtimes.com" — so it
+    matches the human-written form "Tech Times" too), from both
+    config.yaml and anything submitted via the dashboard's Feeds tab.
+    News feeds are third-party outlets reporting ON companies, so this
+    is a safe list of "definitely not the org" — an LLM extraction
+    naming one means it picked up on "according to Tech Times..." and
+    named who's reporting the story instead of who it's about.
+
+    Deliberately excludes blog feeds: unlike news, a configured blog is
+    routinely a company's OWN blog (e.g. neuralink.com/blog/feed), where
+    the feed owner and the story's subject are legitimately the same
+    org — applying this exclusion there would wrongly null out a
+    correct extraction."""
+    names: set[str] = set()
+    for feed_url in config.source("news").get("feeds", []):
+        host = _hostname(feed_url)
+        if host:
+            names.add(host)
+            names.add(_squash(host.split(".")[0]))
+    try:
+        submitted = load_feeds(config.feeds_path)
+        for entry in submitted.get("news", []):
+            host = _hostname(entry.get("url", ""))
+            if host:
+                names.add(host)
+                names.add(_squash(host.split(".")[0]))
+    except Exception:
+        pass  # feeds.yaml missing/unreadable — just skip this signal, not fatal
+    return names
+
+
 def _looks_like_a_named_org(org: str, config: Config) -> bool:
     """False for anything that isn't naming a specific organization: the
     industry name/a keyword verbatim, an explicit non-answer ('unknown',
-    'n/a', ...), or a vague group description ('Chinese scientists',
-    'the researchers') that the LLM handed back instead of admitting it
-    doesn't know a specific name. Prompted against directly too (see
-    _build_prompt) — this is the defensive backstop for when it ignores
-    that instruction anyway."""
+    'n/a', ...), a vague group description ('Chinese scientists', 'the
+    researchers'), or one of besseleth's own configured news/blog feed
+    sources (e.g. "Tech Times", "36Kr", "bioengineer.org") — those are
+    who reported the story, not who it's about. All prompted against
+    directly too (see _build_prompt) — this is the defensive backstop
+    for when the LLM ignores that instruction anyway."""
     normalized = org.strip().lower()
     if not normalized:
         return False
@@ -177,6 +228,9 @@ def _looks_like_a_named_org(org: str, config: Config) -> bool:
     if normalized in non_orgs:
         return False
     if _GENERIC_GROUP_RE.match(org.strip()):
+        return False
+    publisher_names = _known_publisher_names(config)
+    if normalized in publisher_names or _squash(org) in publisher_names:
         return False
     return True
 
