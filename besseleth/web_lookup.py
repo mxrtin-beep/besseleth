@@ -1,25 +1,36 @@
 """Free, keyless web lookups used to backfill data enrichment couldn't
 get from the item's own text — currently just org headquarters location.
 
-Uses Wikidata's public API (https://www.wikidata.org/w/api.php) rather
-than a general web search: no key, generous rate limits with a plain
-User-Agent, and — critically — it returns structured facts (a
-headquarters-location claim, P159, with real coordinates, P625) instead
-of prose that would need another LLM call to interpret. That trade-off
-means it only finds orgs notable enough to have a Wikidata entry (most
-funded startups and any real institution do; a two-person stealth
-startup won't) — a clean miss there is reported as "not found", not an
-error.
+Two tiers (enrich.py tries them in this order):
+
+  1. Wikidata's public API (https://www.wikidata.org/w/api.php) — no
+     key, generous rate limits with a plain User-Agent, and returns
+     structured facts (a headquarters-location claim, P159, with real
+     coordinates, P625) instead of prose that would need an LLM call to
+     interpret. The catch: it only covers orgs notable enough to have a
+     Wikidata entry — most funded startups and any real institution do,
+     but plenty of early-stage/small companies don't.
+  2. A general web search (DuckDuckGo's no-JS HTML results page — no
+     key either, but not an official API, and the one part of this
+     module that could break if DuckDuckGo changes its markup, same
+     trade-off the extension's LinkedIn selectors carry) feeding a
+     handful of result snippets to the local LLM (already used
+     elsewhere in enrich.py) to read them and extract a location. This
+     is what actually covers the orgs tier 1 misses — it costs an LLM
+     call, so it's the second tier, not the first.
 """
 from __future__ import annotations
 
+import html
+import re
 import time
 
 import requests
 
 WIKIDATA_API = "https://www.wikidata.org/w/api.php"
+DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
 USER_AGENT = "besseleth/1.0 (local personal industry-briefing tool; https://github.com/)"
-MIN_REQUEST_INTERVAL = 0.5  # seconds — polite spacing between calls, Wikidata has no strict published limit like Nominatim's
+MIN_REQUEST_INTERVAL = 0.5  # seconds — polite spacing between calls (Wikidata/DDG have no strict published limit like Nominatim's)
 
 _last_request_at = 0.0
 
@@ -54,6 +65,36 @@ def _entity_label(qid: str) -> str | None:
         return data["entities"][qid]["labels"]["en"]["value"]
     except (TypeError, KeyError):
         return None
+
+
+def duckduckgo_search(query: str, max_results: int = 4) -> list[str]:
+    """Free, keyless general web search via DuckDuckGo's no-JS HTML
+    results page (meant for browsers without JavaScript, not an
+    official API — best-effort). Returns up to `max_results` short text
+    snippets pulled from the result blurbs, or [] on any failure
+    (network error, or DuckDuckGo's markup no longer matching what this
+    parses — it's a regex over their result__snippet links, not a real
+    HTML parser, to avoid pulling in a new dependency for one scraper)."""
+    global _last_request_at
+    elapsed = time.monotonic() - _last_request_at
+    if elapsed < MIN_REQUEST_INTERVAL:
+        time.sleep(MIN_REQUEST_INTERVAL - elapsed)
+    try:
+        resp = requests.post(DUCKDUCKGO_HTML_URL, data={"q": query}, headers={"User-Agent": USER_AGENT}, timeout=10)
+        _last_request_at = time.monotonic()
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        print(f"[web_lookup] DuckDuckGo search failed: {e}")
+        return []
+
+    snippets = []
+    for m in re.finditer(r'class="result__snippet"[^>]*>(.*?)</a>', resp.text, re.DOTALL):
+        text = html.unescape(re.sub(r"<[^>]+>", "", m.group(1))).strip()
+        if text:
+            snippets.append(text)
+        if len(snippets) >= max_results:
+            break
+    return snippets
 
 
 def lookup_org_location(org_name: str) -> tuple[str, float, float] | None:

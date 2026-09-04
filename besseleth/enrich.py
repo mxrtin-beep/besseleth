@@ -271,16 +271,57 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
     return True
 
 
+def _search_org_location(org: str, summarizer_cfg: dict) -> tuple[str, float, float] | None:
+    """Tier 2: a general web search (DuckDuckGo) plus the local LLM to
+    read the results, for an org Wikidata doesn't know about — covers
+    the small/early-stage companies tier 1 misses, at the cost of an
+    LLM call, so this only runs after that one comes back empty.
+    Requires Ollama; returns None on any failure at any step (no
+    results, Ollama unreachable, the model saying it can't tell, or a
+    location that fails the same validity check as the LLM's own item-
+    level extraction)."""
+    if summarizer_cfg.get("backend") != "ollama":
+        return None
+    snippets = web_lookup.duckduckgo_search(f"{org} headquarters location city")
+    if not snippets:
+        return None
+
+    prompt = (
+        f'Based on these web search result snippets, what city and country is "{org}"\'s headquarters or main '
+        f'office in? Respond with ONLY "City, Country" (e.g. "San Francisco, USA"), or exactly "unknown" if the '
+        f"snippets don't make it clear — never guess.\n\nSnippets:\n" + "\n".join(f"- {s}" for s in snippets)
+    )
+    result = summarizer_mod._ollama_generate(
+        prompt,
+        summarizer_cfg.get("ollama_url", "http://localhost:11434"),
+        summarizer_cfg.get("model", "llama3.1"),
+        timeout=30,
+        num_thread=summarizer_cfg.get("num_thread"),
+    )
+    if not result:
+        return None
+
+    location_text = result.strip().strip('"')
+    if not _looks_like_a_real_location(location_text):
+        return None
+    coords = geocode(location_text)
+    if not coords:
+        return None
+    return (location_text, *coords)
+
+
 def _backfill_org_locations(config: Config, db: DB) -> int:
-    """Fills in a missing location for orgs that have none, via a free
-    web lookup (Wikidata — see web_lookup.py), independent of the LLM
-    pass above: that one only ever knows what a given item's own text
-    says, so an org whose location was simply never mentioned in any
-    item stays unlocated forever without this. Bounded per run
-    (enrichment.max_org_lookups_per_run) and cached — found or not — so
-    a miss isn't re-queried every run; a cached hit is reapplied for
-    free if a newer item for the same org shows up without its own
-    location. Returns how many orgs got newly filled in."""
+    """Fills in a missing location for orgs that have none, independent
+    of the LLM pass above (that one only ever knows what a given item's
+    own text says, so an org whose location was never mentioned in any
+    item stays unlocated forever without this): tries a free Wikidata
+    lookup first, then a general web search read by the local LLM if
+    that comes back empty — see web_lookup.py's docstring for why in
+    that order. Bounded per run (enrichment.max_org_lookups_per_run,
+    shared across both tiers) and cached — found or not — so a miss
+    isn't re-queried every run; a cached hit is reapplied for free if a
+    newer item for the same org shows up without its own location.
+    Returns how many orgs got newly filled in."""
     cfg = config.raw.get("enrichment", {}) or {}
     max_lookups = cfg.get("max_org_lookups_per_run", 8)
     recheck_days = cfg.get("location_recheck_days", 30)
@@ -305,7 +346,7 @@ def _backfill_org_locations(config: Config, db: DB) -> int:
         if attempted >= max_lookups:
             continue
         attempted += 1
-        result = web_lookup.lookup_org_location(org)
+        result = web_lookup.lookup_org_location(org) or _search_org_location(org, config.summarizer)
         if result:
             label, lat, lon = result
             db.set_org_location(org, label, lat, lon)
