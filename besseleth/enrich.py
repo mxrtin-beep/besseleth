@@ -412,6 +412,40 @@ def _backfill_org_locations(config: Config, db: DB) -> int:
     return filled
 
 
+def _dedupe_recent_items(config: Config, db: DB) -> int:
+    """Sweeps recently-fetched items for near-duplicates (the same
+    article picked up by two feeds, most commonly) and collapses them —
+    deletes the duplicate row(s), folding any distinct detail into the
+    kept item's summary, same merge dedupe.py already does at report
+    time. Doing it here too (right after every fetch, on stored data,
+    not just transiently at report time) means a duplicate is never
+    independently enriched as a second row — which is what let the same
+    story end up with two different novelty scores, one per row.
+    Returns how many duplicate rows were removed."""
+    from .dedupe import merge_near_duplicates
+
+    cfg = config.raw.get("enrichment", {}) or {}
+    sources = cfg.get("sources", DEFAULT_SOURCES)
+    items = db.recent_items_for_dedupe(sources)
+    if len(items) < 2:
+        return 0
+
+    kept, dropped_by_kept = merge_near_duplicates(items)
+    if not dropped_by_kept:
+        return 0
+
+    kept_by_id = {i.id: i for i in kept}
+    removed = 0
+    for winner_id, dropped_ids in dropped_by_kept.items():
+        winner = kept_by_id.get(winner_id)
+        if winner:
+            db.update_summary(winner_id, winner.summary)
+        for dropped_id in dropped_ids:
+            if db.delete_item(dropped_id):
+                removed += 1
+    return removed
+
+
 def enrich_items_detailed(config: Config, db: DB) -> dict:
     """Enriches up to `enrichment.max_items_per_run` unenriched items.
     Returns {"processed": int, "message": str, "backend": str} — the
@@ -425,6 +459,15 @@ def enrich_items_detailed(config: Config, db: DB) -> dict:
 
     if not cfg.get("enabled", True):
         return {"processed": 0, "message": "enrichment.enabled is false in config.yaml — nothing to do.", "backend": backend}
+
+    # Collapses near-duplicate rows (the same article via two feeds)
+    # before anything else runs, so a duplicate never gets independently
+    # enriched/scored as its own row — see _dedupe_recent_items()'s
+    # docstring for why that mattered (two different novelty scores for
+    # one story).
+    deduped = _dedupe_recent_items(config, db)
+    if deduped:
+        print(f"[enrich] Removed {deduped} duplicate item(s) (same article via multiple feeds).")
 
     # Self-healing cleanup for items enriched before this guard existed
     # (or before it covered vague-group phrasing like "Chinese scientists")

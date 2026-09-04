@@ -218,6 +218,31 @@ class DB:
         )
         return list(self.conn.execute(q, [*sources, limit]).fetchall())
 
+    def recent_items_for_dedupe(self, sources: list[str], limit: int = 300) -> list[Item]:
+        """The most recent items in the given sources, as Item objects —
+        for dedupe.merge_near_duplicates() to sweep for near-duplicate
+        rows that should never have ended up as two separate items (the
+        same article picked up by two feeds, each then independently
+        enriched — including scored for novelty separately, which is
+        how the same story ends up with two different novelty scores).
+        Bounded to the most recent `limit` so this stays cheap on a
+        large history."""
+        self.conn.row_factory = sqlite3.Row
+        placeholders = ",".join("?" for _ in sources)
+        q = f"SELECT * FROM items WHERE source IN ({placeholders}) ORDER BY published_at DESC LIMIT ?"
+        rows = self.conn.execute(q, [*sources, limit]).fetchall()
+        return [
+            Item(
+                id=r["id"], source=r["source"], title=r["title"], url=r["url"] or "",
+                summary=r["summary"] or "", published_at=r["published_at"] or "",
+            )
+            for r in rows
+        ]
+
+    def update_summary(self, item_id: str, summary: str) -> None:
+        self.conn.execute("UPDATE items SET summary = ? WHERE id = ?", (summary, item_id))
+        self.conn.commit()
+
     def recent_items_for_context(self, source: str, keywords: list[str], exclude_id: str, limit: int = 5) -> list[sqlite3.Row]:
         """A handful of other recent items sharing at least one keyword —
         used as novelty-scoring context ('surprising compared to what?')."""
