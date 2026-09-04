@@ -243,6 +243,40 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             entry["by_source"][r["source"]] = entry["by_source"].get(r["source"], 0) + r["n"]
         return jsonify(list(by_org.values()))
 
+    @app.get("/api/contacts/locations")
+    def api_contacts_locations():
+        # Where your contacts work, for the Map tab's "friends" layer —
+        # reuses org_location_cache (see enrich.py's
+        # _backfill_contact_locations), so this is a cache read, not a
+        # live lookup: fast, and never blocks a page load on a network
+        # call. A contact whose employer hasn't been resolved yet (new
+        # contact, or the next enrich run hasn't reached it) is just
+        # skipped rather than shown with no location.
+        db = DB(config.db_path)
+        try:
+            points = []
+            for contact in config.contacts:
+                workplaces = contact.get("workplaces") or []
+                if not workplaces or not workplaces[0].get("company"):
+                    continue
+                company = workplaces[0]["company"]
+                cached = db.get_org_location_cache(company)
+                if not cached or not cached["found"]:
+                    continue
+                points.append(
+                    {
+                        "name": contact.get("name"),
+                        "company": company,
+                        "role": workplaces[0].get("role", ""),
+                        "location_text": cached["location_text"],
+                        "lat": cached["lat"],
+                        "lon": cached["lon"],
+                    }
+                )
+        finally:
+            db.close()
+        return jsonify(points)
+
     @app.get("/api/metrics")
     def api_metrics():
         # Axis options for the trend explorer: config-defined numeric

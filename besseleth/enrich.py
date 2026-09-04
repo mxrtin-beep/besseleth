@@ -498,6 +498,50 @@ def _backfill_org_locations(config: Config, db: DB) -> int:
     return filled
 
 
+def _backfill_contact_locations(config: Config, db: DB) -> int:
+    """Same free Wikidata/Wikipedia (then web-search+LLM) lookup as
+    _backfill_org_locations, but for your contacts' current employers —
+    powers the Map tab's "friends" layer, which needs a location for a
+    company even if that company was never mentioned in any scraped item
+    (so db.orgs_missing_location() alone wouldn't ever surface it).
+    Shares the same org_location_cache table (and lookup budget) as org
+    backfill — a company that's both a contact's employer and a source
+    org only ever gets looked up once. Returns how many got newly filled."""
+    cfg = config.raw.get("enrichment", {}) or {}
+    max_lookups = cfg.get("max_org_lookups_per_run", 8)
+    if max_lookups <= 0:
+        return 0
+
+    # "Current" employer = the first workplace listed (see contacts_store's
+    # Contact docstring — order is up to you, current-first if it matters).
+    orgs = set()
+    for contact in config.contacts:
+        workplaces = contact.get("workplaces") or []
+        if workplaces and workplaces[0].get("company"):
+            orgs.add(workplaces[0]["company"])
+
+    filled = 0
+    attempted = 0
+    for org in orgs:
+        cached = db.get_org_location_cache(org)
+        if cached:
+            if cached["found"]:
+                filled += 1
+            continue  # already resolved (or already tried and came up empty) — cache handles recheck
+        if attempted >= max_lookups:
+            continue
+        attempted += 1
+        result = web_lookup.lookup_org_location(org) or _search_org_location(org, config.summarizer)
+        if result:
+            label, lat, lon = result
+            db.set_org_location_cache(org, found=True, location_text=label, lat=lat, lon=lon)
+            filled += 1
+        else:
+            db.set_org_location_cache(org, found=False)
+
+    return filled
+
+
 def _sync_duplicate_novelty(config: Config, db: DB) -> int:
     """Multiple rows for the same story are expected — the same news
     inevitably reaches besseleth via more than one feed — and this
@@ -580,7 +624,12 @@ def enrich_items_detailed(config: Config, db: DB) -> dict:
     # for orgs whose location was never mentioned in any item's own
     # text, so those don't just stay unlocated forever.
     locations_filled = _backfill_org_locations(config, db)
-    location_note = f" Filled in a location for {locations_filled} org(s) via web lookup." if locations_filled else ""
+    contact_locations_filled = _backfill_contact_locations(config, db)
+    location_note = (
+        f" Filled in a location for {locations_filled} org(s) via web lookup." if locations_filled else ""
+    )
+    if contact_locations_filled:
+        location_note += f" Filled in a location for {contact_locations_filled} contact employer(s)."
 
     sources = cfg.get("sources", DEFAULT_SOURCES)
     max_items = cfg.get("max_items_per_run", 20)

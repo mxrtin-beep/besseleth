@@ -162,6 +162,9 @@
       how much has been fetched about it. Locations are the local LLM's best guess from item text (only saved when
       it's confident, not a guess), geocoded via <a href="https://www.openstreetmap.org/copyright" target="_blank"
       rel="noopener">OpenStreetMap</a>. Click a marker to filter the Sources tab by that org.</p>
+    <label style="display:flex; align-items:center; gap:.4rem; font-size:.9rem; margin-bottom:.5rem;">
+      <input type="checkbox" id="mapShowFriends"> Show friends (from Contacts, at their current employer)
+    </label>
     <div id="mapChart"></div>
     <p class="hint" id="mapCount"></p>
     <table class="datatable" id="mapTable"></table>
@@ -730,15 +733,19 @@ document.getElementById('importLinkedinBtn').onclick = async () => {
 // --- Map ---------------------------------------------------------------
 let mapLoaded = false;
 let mapLocations = [];
+let friendLocations = [];
 
 const ORG_TYPE_COLORS = { industry: '#4a90d9', academic: '#e9c46a', government: '#2a9d8f', nonprofit: '#f4a261', unknown: '#adb5bd' };
+const FRIEND_COLOR = '#e07a5f';
 
 async function loadMap() {
   mapLoaded = true;
-  const res = await fetch('/api/locations');
-  mapLocations = await res.json();
+  const [locRes, friendRes] = await Promise.all([fetch('/api/locations'), fetch('/api/contacts/locations')]);
+  mapLocations = await locRes.json();
+  friendLocations = await friendRes.json();
   renderMap();
 }
+document.getElementById('mapShowFriends').onchange = renderMap;
 
 function renderMap() {
   document.getElementById('mapCount').textContent = `${mapLocations.length} located org(s).`;
@@ -759,14 +766,16 @@ function renderMap() {
       '<p class="hint">Chart library failed to load from the CDN (no internet access?). The table below still works.</p>';
     return;
   }
-  if (!mapLocations.length) {
+  const showFriends = document.getElementById('mapShowFriends').checked;
+  if (!mapLocations.length && !(showFriends && friendLocations.length)) {
     document.getElementById('mapChart').innerHTML =
       '<p class="hint">No located orgs yet — run <code>besseleth.cli enrich --all</code> (needs Ollama running) to backfill locations for existing items, or wait for the next fetch.</p>';
     return;
   }
 
-  const trace = {
+  const orgTrace = {
     type: 'scattergeo',
+    name: 'Sources',
     lat: mapLocations.map(m => m.lat),
     lon: mapLocations.map(m => m.lon),
     text: mapLocations.map(m => `${m.org}<br>${m.location_text || ''}<br>${m.total} item(s)`),
@@ -779,20 +788,40 @@ function renderMap() {
       opacity: 0.85,
     },
   };
+  const traces = [orgTrace];
+  if (showFriends) {
+    traces.push({
+      type: 'scattergeo',
+      name: 'Friends',
+      lat: friendLocations.map(f => f.lat),
+      lon: friendLocations.map(f => f.lon),
+      text: friendLocations.map(f => `${f.name}<br>${f.role ? f.role + ' at ' : ''}${f.company}<br>${f.location_text || ''}`),
+      hoverinfo: 'text',
+      mode: 'markers',
+      marker: { size: 12, symbol: 'diamond', color: FRIEND_COLOR, line: { width: 1, color: '#ffffffaa' }, opacity: 0.95 },
+    });
+  }
   const layout = {
     geo: { projection: { type: 'natural earth' }, showland: true, landcolor: '#8882', showcountries: true, countrycolor: '#8886' },
     margin: { t: 10, b: 0, l: 0, r: 0 },
+    showlegend: showFriends,
+    legend: { x: 0, y: 1, bgcolor: 'rgba(0,0,0,0)' },
     hoverlabel: { bgcolor: '#1e1e1eee', bordercolor: '#4a90d9', font: { color: '#f5f5f5', size: 12 } },
   };
-  Plotly.newPlot('mapChart', [trace], layout, { responsive: true }).then(gd => {
+  Plotly.newPlot('mapChart', traces, layout, { responsive: true }).then(gd => {
     gd.removeAllListeners && gd.removeAllListeners('plotly_click');
     gd.on('plotly_click', (ev) => {
-      const org = mapLocations[ev.points[0].pointNumber].org;
-      showTab('papers');
-      loadPapers().then(() => {
-        document.getElementById('pfOrg').value = org;
-        renderPapers();
-      });
+      const point = ev.points[0];
+      if (point.curveNumber === 0) {
+        const org = mapLocations[point.pointNumber].org;
+        showTab('papers');
+        loadPapers().then(() => {
+          document.getElementById('pfOrg').value = org;
+          renderPapers();
+        });
+      } else {
+        showTab('contacts');
+      }
     });
   });
 }
