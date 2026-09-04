@@ -96,13 +96,16 @@ def _build_prompt(row, config: Config, context: str) -> str:
         f"Read this {row['source']} item about {config.industry_name}. Extract structured metadata as JSON with "
         "exactly these keys (use null for anything not present or unclear — never invent a number):\n"
         f'  "org": the primary company, lab, or institution the item is about — a specific NAMED organization only, '
-        f'e.g. "Neuralink" or "Stanford University". Use null for anything else, INCLUDING: the general field/'
-        f'industry itself (never "{config.industry_name}" or a synonym for it); a vague group description like '
-        f'"Chinese scientists", "researchers", "a team at the university", or "the company"; and — this is a common '
-        f'mistake — the PUBLICATION or news outlet reporting the story (e.g. if the text says "according to '
-        f'TechCrunch..." or "36Kr reports that...", that outlet is NOT the org; keep looking for who the story is '
-        f"actually about). If the text doesn't name the specific organization, that's null, not your best guess "
-        f"at a description of one\n"
+        f'e.g. "Neuralink". For academic work, this means the specific LAB or research group — ideally named after '
+        f'its lead/PI (e.g. "Poon Lab", "the Shenoy Lab at Stanford", "Smith\'s lab") — NEVER the university alone '
+        f'("Stanford University", "MIT" by itself); if the text only names the university with no specific lab or '
+        f"lead identifiable, that's null, not the university's name. Use null for anything else too, INCLUDING: "
+        f'the general field/industry itself (never "{config.industry_name}" or a synonym for it); a vague group '
+        f'description like "Chinese scientists", "researchers", "a team at the university", or "the company"; and '
+        f'— a common mistake — the PUBLICATION or news outlet reporting the story (e.g. if the text says '
+        f'"according to TechCrunch..." or "36Kr reports that...", that outlet is NOT the org; keep looking for who '
+        f"the story is actually about). If the text doesn't name the specific organization, that's null, not your "
+        f"best guess at a description of one\n"
         '  "org_description": at most 5 words on what that org is/does, e.g. "BCI implant company" or '
         '"Academic neuroscience lab" — null if "org" is null\n'
         '  "org_type": one of "industry", "academic", "government", "nonprofit", or "unknown"\n'
@@ -212,15 +215,51 @@ def _known_publisher_names(config: Config) -> set[str]:
     return names
 
 
+# A bare institution name with no specific lab/center/group named — e.g.
+# "Stanford University", "University of Tokyo", "MIT", "Caltech". Not
+# rejected if it also names a specific unit (contains "Lab"/"Institute"/
+# "Center"/etc, or a possessive — "Poon Lab", "Wu Tsai Neurosciences
+# Institute", "Smith's lab at Stanford" all pass through fine).
+_BARE_UNIVERSITY_RE = re.compile(
+    r"^(the\s+)?[\w&,.\-' ]+?\s(university|college)$"
+    r"|^university of [\w&,.\-' ]+$"
+    r"|^(mit|caltech|ucla|ucsd|ucsf|ucb)$",
+    re.IGNORECASE,
+)
+_SPECIFIC_UNIT_RE = re.compile(
+    r"\b(lab|labs|laboratory|institute|center|centre|group|department|dept|program|initiative)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_bare_university(org: str) -> bool:
+    """True for a university/college name with nothing more specific
+    attached — the point isn't that the university is wrong, it's that
+    it's too coarse to be useful as "the org": besseleth should track
+    the specific lab or research group (ideally named after its PI/
+    lead) doing the actual work, the way it already does for a company.
+    Only fires when the string is JUST the institution — any of the
+    words above, or a possessive ('X's lab'), means a specific unit was
+    already named and this doesn't apply."""
+    stripped = org.strip()
+    if not _BARE_UNIVERSITY_RE.match(stripped):
+        return False
+    if _SPECIFIC_UNIT_RE.search(stripped) or "'s" in stripped:
+        return False
+    return True
+
+
 def _looks_like_a_named_org(org: str, config: Config) -> bool:
     """False for anything that isn't naming a specific organization: the
     industry name/a keyword verbatim, an explicit non-answer ('unknown',
     'n/a', ...), a vague group description ('Chinese scientists', 'the
-    researchers'), or one of besseleth's own configured news/blog feed
+    researchers'), one of besseleth's own configured news/blog feed
     sources (e.g. "Tech Times", "36Kr", "bioengineer.org") — those are
-    who reported the story, not who it's about. All prompted against
-    directly too (see _build_prompt) — this is the defensive backstop
-    for when the LLM ignores that instruction anyway."""
+    who reported the story, not who it's about — or a bare university/
+    college name with no specific lab named (see _is_bare_university).
+    All prompted against directly too (see _build_prompt) — this is the
+    defensive backstop for when the LLM ignores that instruction
+    anyway."""
     normalized = org.strip().lower()
     if not normalized:
         return False
@@ -229,10 +268,55 @@ def _looks_like_a_named_org(org: str, config: Config) -> bool:
         return False
     if _GENERIC_GROUP_RE.match(org.strip()):
         return False
+    if _is_bare_university(org):
+        return False
     publisher_names = _known_publisher_names(config)
     if normalized in publisher_names or _squash(org) in publisher_names:
         return False
     return True
+
+
+def _canonicalize_new_org(org: str, db: DB) -> str:
+    """If an org that's letters/digits-equivalent to `org` (ignoring
+    case, spacing, punctuation) is already stored under different
+    casing/spacing, reuse that exact existing spelling instead of
+    adding a near-duplicate ("Ability Neurotech" vs "Ability NeuroTech"
+    from two separate LLM calls, which otherwise show up as two
+    different Orgs-table rows). Whichever spelling was seen first wins
+    and stays canonical going forward."""
+    target = _squash(org)
+    if not target:
+        return org
+    for existing in db.distinct_orgs():
+        if _squash(existing) == target:
+            return existing
+    return org
+
+
+def _canonicalize_existing_orgs(db: DB) -> int:
+    """Retroactive sweep: clusters every currently-stored org by the
+    same squash-equivalence as _canonicalize_new_org() and renames every
+    variant in a cluster to whichever spelling has the most items
+    (a tiebreak that's stable and doesn't need any judgment call).
+    Returns how many rows were renamed."""
+    counts = db.org_item_counts()
+    clusters: dict[str, list[str]] = {}
+    for org in counts:
+        clusters.setdefault(_squash(org), []).append(org)
+
+    renamed = 0
+    for variants in clusters.values():
+        if len(variants) < 2:
+            continue
+        # Prefer the most-used spelling, but always collapse its own
+        # whitespace to single spaces — a tie between "Ability Neurotech"
+        # and "Ability  NeuroTech" (double space) shouldn't crown the
+        # double-space one just because it happened to sort higher.
+        canonical = re.sub(r"\s+", " ", max(variants, key=lambda o: counts[o])).strip()
+        for variant in variants:
+            if variant != canonical:
+                renamed += db.rename_org(variant, canonical)
+    return renamed
 
 
 def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
@@ -266,6 +350,8 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
     org = data.get("org") or None
     if org and not _looks_like_a_named_org(org, config):
         org = None
+    if org:
+        org = _canonicalize_new_org(org, db)
     org_description = (data.get("org_description") or "").strip() or None
     if org_description and org:
         words = org_description.split()
@@ -480,6 +566,10 @@ def enrich_items_detailed(config: Config, db: DB) -> dict:
     cleared = db.clear_org_matches(invalid_orgs)
     if cleared:
         print(f"[enrich] Cleared {cleared} item(s) whose 'org' was actually the industry name/a keyword.")
+
+    renamed = _canonicalize_existing_orgs(db)
+    if renamed:
+        print(f"[enrich] Merged {renamed} item(s) into an existing org's canonical spelling (casing/spacing variants).")
 
     invalid_locations = [loc for loc in db.distinct_locations() if not _looks_like_a_real_location(loc)]
     locations_cleared = db.clear_location_matches(invalid_locations)

@@ -16,7 +16,7 @@ MD_TEMPLATE = """# {{ industry }} — Weekly Briefing
 _{{ date_range }}_
 
 {% if personalized_lines %}
-## 🔔 For you specifically
+## 🔔 For you
 {{ personalized_lines }}
 
 {% endif %}
@@ -139,15 +139,14 @@ def build_report(
     report_id = now.strftime("%Y-%m-%d")
     date_range = f"{(now).strftime('%b %d, %Y')} (last {days_back} days)"
 
-    arxiv_summary = summarizer.summarize_section(arxiv_items, "arXiv research", industry_name, summarizer_cfg)
+    arxiv_summary = summarizer.summarize_section(arxiv_items, "arXiv research", industry_name, summarizer_cfg, cite_style="per_item")
     news_summary = summarizer.summarize_section(news_items, "News", industry_name, summarizer_cfg)
     blog_summary = summarizer.summarize_section(blog_items, "Blogs", industry_name, summarizer_cfg)
 
     personalized_lines = "\n".join(
         (
-            f"- **{item.title}** — {summarizer.summarize_item(item, summarizer_cfg)}\n"
+            f"- **{item.title}**" + (f" ([link]({item.url}))" if item.url else "") + "\n"
             f"  _Relevant because **{item.matched_contact}** works at **{item.matched_company}**._"
-            + (f" [link]({item.url})" if item.url else "")
         )
         for item in personalized_items
     )

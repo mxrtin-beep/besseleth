@@ -305,6 +305,26 @@ class DB:
         rows = self.conn.execute("SELECT DISTINCT org FROM items WHERE org IS NOT NULL AND org != ''").fetchall()
         return [r[0] for r in rows]
 
+    def org_item_counts(self) -> dict[str, int]:
+        """{org: item count} for every distinct org — used to pick which
+        spelling/casing variant of a near-duplicate org name is the most-
+        used one, when canonicalizing (see enrich.py's
+        _canonicalize_existing_orgs)."""
+        rows = self.conn.execute(
+            "SELECT org, COUNT(*) as n FROM items WHERE org IS NOT NULL AND org != '' GROUP BY org"
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def rename_org(self, old_org: str, new_org: str) -> int:
+        """Repoints every item from `old_org` to `new_org` (exact string
+        match) — used to fold spelling/casing variants of the same org
+        ("Ability Neurotech" vs "Ability NeuroTech") into one canonical
+        row instead of them accumulating as separate Orgs-table entries.
+        Returns how many rows were changed."""
+        cur = self.conn.execute("UPDATE items SET org = ? WHERE org = ?", (new_org, old_org))
+        self.conn.commit()
+        return cur.rowcount
+
     def clear_org_matches(self, names: list[str]) -> int:
         """Nulls out `org`/`org_description` on any item whose org
         exact-matches (case-insensitive) one of `names` — cleanup for

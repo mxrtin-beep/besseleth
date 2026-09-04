@@ -10,7 +10,7 @@ A weekly industry-briefing bot. Point it at an industry (e.g.
 - Finds **IRL events near you** — Luma calendars (iCal), Eventbrite organizers you follow, a curated local-meetup watchlist, and paste-in for anything else (see below — real geo-search APIs for events mostly don't exist for free, so paste-in is the reliable path)
 - Pulls **Bluesky** posts (free public search API) and **X/Twitter** (paid API if you have a token, otherwise paste-in)
 - Flags **LinkedIn** as a source with a compliant path (see below — no ToS-violating scraping)
-- **Personalizes**: if an item mentions a company one of your contacts works at (e.g. a job posting at your friend's company), it's pulled into its own "For you specifically" section
+- **Personalizes**: if an item mentions a company one of your contacts works at (e.g. a job posting at your friend's company), it's pulled into its own "For you" section
 - **Tracks industry trends**: a self-populating (auto-extracted, human-editable) dataset of devices/systems and their metrics — for neurotech: information transfer rate, implant longevity, electrode count, device type, material, and FDA status — plus a separate **companies** dataset for business metrics (funding, stock price — auto-refreshable for free for public tickers). Both accumulate forever, across every report; auto-added entries are tagged so they're distinct from ones you've verified.
 - **Maps** the companies/labs behind your papers by location — geocoded free via OpenStreetMap, extracted by the same enrichment pass, no separate step; an org whose location was never mentioned in any item's own text gets a web-lookup fallback instead of staying unlocated forever (Wikidata first, then a general web search read by the local LLM for orgs too small/new to be on Wikidata).
 - **Tracks job postings** at the companies/labs it's already found (from their Greenhouse/Lever/Ashby job-board API, not scraped HTML) — kept in sync so a closed posting is marked removed, not left stale; auto-detects each org's board with a manual override file (`job_boards.yaml`) for the ones it can't guess.
@@ -131,8 +131,9 @@ contacts:
 
 Any item — scraped or pasted, from any source — whose text mentions
 `Neuralink` gets flagged with `matched_contact: Jane Doe` and surfaced first
-in the report, with an LLM-written one-liner on why it might matter — this
-is how a job posting at a friend's company gets called out specifically.
+in the report's "For you" section, tagged with which contact/company it's
+relevant to — this is how a job posting at a friend's company gets called
+out specifically.
 
 ## On LinkedIn
 
@@ -160,7 +161,7 @@ We're hiring a research scientist for our neural interfaces team..." > linkedin_
 Either way it's picked up on the next `fetch`/`run`, matched against your
 `industry.keywords`, checked against your contacts' companies, and folded
 into the weekly report — a pasted job posting at a friend's company gets
-flagged in "For you specifically" exactly like a scraped one would.
+flagged in "For you" exactly like a scraped one would.
 Processed drop files move to `linkedin_drops/processed/` so re-running
 doesn't re-ingest them.
 
