@@ -248,18 +248,30 @@
   </div>
 
   <div id="contactsPane" style="display:none">
-    <p class="hint">Friends, ex-coworkers, LinkedIn contacts — anyone whose company or school you'd want flagged
-      when it shows up in a report. An item mentioning a contact's <b>company</b> is surfaced first ("your friend's
-      employer is in the news"); their <b>school</b> is checked too if company doesn't match (more serendipitous —
-      "the place your friend studied just published something"). See the report's "For you" section.</p>
+    <p class="hint">Friends, ex-coworkers, LinkedIn contacts — anyone whose employer(s) or school(s) you'd want
+      flagged when they show up in a report. An item mentioning a contact's <b>workplace</b> (current or past) is
+      surfaced first ("your friend's employer is in the news"); their <b>school</b> is checked too if no workplace
+      matches (more serendipitous — "the place your friend studied just published something"). See the report's
+      "For you" section.</p>
     <div class="controls" style="align-items:stretch; flex-wrap:wrap">
       <div><label for="contactName">Name *</label><input type="text" id="contactName" placeholder="Jane Doe"></div>
-      <div><label for="contactCompany">Company</label><input type="text" id="contactCompany" placeholder="Neuralink"></div>
-      <div><label for="contactRole">Role</label><input type="text" id="contactRole" placeholder="Research Scientist"></div>
-      <div><label for="contactSchool">School</label><input type="text" id="contactSchool" placeholder="Stanford"></div>
+      <div><label for="contactEmails">Email(s)</label><input type="text" id="contactEmails" placeholder="jane@example.com, jane@work.com"></div>
       <div><label for="contactLinkedin">LinkedIn URL</label><input type="text" id="contactLinkedin" placeholder="https://linkedin.com/in/..."></div>
       <div><label for="contactRelationship">Relationship</label><input type="text" id="contactRelationship" placeholder="college friend"></div>
-      <div style="flex:1; min-width:200px"><label for="contactNotes">Notes</label><input type="text" id="contactNotes" style="width:100%; box-sizing:border-box" placeholder="optional"></div>
+    </div>
+    <div class="controls" style="align-items:stretch; flex-wrap:wrap">
+      <div style="flex:1; min-width:260px">
+        <label for="contactWorkplaces">Workplaces (one per line, "Company — Role")</label>
+        <textarea id="contactWorkplaces" style="width:100%; box-sizing:border-box; min-height:64px" placeholder="Neuralink — Research Scientist&#10;Kernel — Software Engineer"></textarea>
+      </div>
+      <div style="flex:1; min-width:260px">
+        <label for="contactSchools">Schools (one per line, "School — Level")</label>
+        <textarea id="contactSchools" style="width:100%; box-sizing:border-box; min-height:64px" placeholder="Stanford — Undergrad&#10;MIT — PhD"></textarea>
+      </div>
+      <div style="flex:1; min-width:200px">
+        <label for="contactNotes">Notes</label>
+        <textarea id="contactNotes" style="width:100%; box-sizing:border-box; min-height:64px" placeholder="optional"></textarea>
+      </div>
     </div>
     <div class="controls">
       <div><button class="btn" id="addContactBtn">Add contact</button></div>
@@ -267,6 +279,19 @@
     </div>
     <div id="contactResult"></div>
     <table class="datatable" id="contactsTable" style="margin-top:1rem"></table>
+
+    <h3 style="margin-top:2rem; font-size:1rem;">Import from LinkedIn</h3>
+    <p class="hint">LinkedIn has no API for pulling your connections into a third-party app — there's no live sync
+      to offer here. What LinkedIn does let you do: export them yourself as a CSV (Settings &amp; Privacy → Data
+      privacy → "Get a copy of your data" → check <b>Connections</b> → request archive; LinkedIn emails a download
+      link, sometimes after a delay). Upload that CSV here for a one-time bulk import — name, email, LinkedIn URL,
+      and current company/title get filled in automatically (it has no education data, so schools still need
+      adding by hand). Safe to re-upload later; already-added contacts are skipped.</p>
+    <div class="controls" style="align-items:stretch">
+      <div><input type="file" id="linkedinCsvFile" accept=".csv"></div>
+      <div><button class="btn" id="importLinkedinBtn">Import</button></div>
+    </div>
+    <div id="linkedinImportResult"></div>
   </div>
 </main>
 
@@ -570,27 +595,42 @@ async function loadFeeds() {
 let contacts = [];
 let editingContactIndex = null;
 
-const contactFieldIds = {
-  name: 'contactName', company: 'contactCompany', role: 'contactRole', school: 'contactSchool',
-  linkedin_url: 'contactLinkedin', relationship: 'contactRelationship', notes: 'contactNotes',
+const contactSimpleFieldIds = {
+  name: 'contactName', linkedin_url: 'contactLinkedin', relationship: 'contactRelationship', notes: 'contactNotes',
 };
+
+// [{company/name, role/level}] -> "Company — Role" / "School — Level" lines,
+// for populating the edit form (the server parses the reverse direction
+// when a form is submitted — see app.py's _parse_lines).
+function entriesToLines(entries, keyA, keyB) {
+  return (entries || []).map(e => e[keyB] ? `${e[keyA]} — ${e[keyB]}` : e[keyA]).join('\n');
+}
 
 function readContactForm() {
   const data = {};
-  for (const [field, id] of Object.entries(contactFieldIds)) {
+  for (const [field, id] of Object.entries(contactSimpleFieldIds)) {
     data[field] = document.getElementById(id).value.trim();
   }
+  data.emails = document.getElementById('contactEmails').value.trim();
+  data.workplaces = document.getElementById('contactWorkplaces').value;
+  data.schools = document.getElementById('contactSchools').value;
   return data;
 }
 
 function clearContactForm() {
-  for (const id of Object.values(contactFieldIds)) document.getElementById(id).value = '';
+  for (const id of Object.values(contactSimpleFieldIds)) document.getElementById(id).value = '';
+  document.getElementById('contactEmails').value = '';
+  document.getElementById('contactWorkplaces').value = '';
+  document.getElementById('contactSchools').value = '';
 }
 
 function startEditContact(index) {
   const c = contacts.find(x => x.index === index);
   if (!c) return;
-  for (const [field, id] of Object.entries(contactFieldIds)) document.getElementById(id).value = c[field] || '';
+  for (const [field, id] of Object.entries(contactSimpleFieldIds)) document.getElementById(id).value = c[field] || '';
+  document.getElementById('contactEmails').value = (c.emails || []).join(', ');
+  document.getElementById('contactWorkplaces').value = entriesToLines(c.workplaces, 'company', 'role');
+  document.getElementById('contactSchools').value = entriesToLines(c.schools, 'name', 'level');
   editingContactIndex = index;
   document.getElementById('addContactBtn').textContent = 'Save changes';
   document.getElementById('cancelEditContactBtn').style.display = '';
@@ -633,17 +673,17 @@ document.getElementById('addContactBtn').onclick = async () => {
 function renderContacts() {
   const table = document.getElementById('contactsTable');
   if (!contacts.length) {
-    table.innerHTML = '<tbody><tr><td class="hint">No contacts yet — add one above.</td></tr></tbody>';
+    table.innerHTML = '<tbody><tr><td class="hint">No contacts yet — add one above, or import from LinkedIn below.</td></tr></tbody>';
     return;
   }
   table.innerHTML = `
-    <thead><tr><th>Name</th><th>Company</th><th>Role</th><th>School</th><th>Relationship</th><th>Notes</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Email(s)</th><th>Workplaces</th><th>Schools</th><th>Relationship</th><th>Notes</th><th></th></tr></thead>
     <tbody>${contacts.map(c => `
       <tr>
         <td>${c.linkedin_url ? `<a href="${c.linkedin_url}" target="_blank" rel="noopener">${c.name}</a>` : c.name}</td>
-        <td>${c.company || ''}</td>
-        <td>${c.role || ''}</td>
-        <td>${c.school || ''}</td>
+        <td>${(c.emails || []).join(', ')}</td>
+        <td>${(c.workplaces || []).map(w => w.role ? `${w.company} (${w.role})` : w.company).join(', ')}</td>
+        <td>${(c.schools || []).map(s => s.level ? `${s.name} (${s.level})` : s.name).join(', ')}</td>
         <td>${c.relationship || ''}</td>
         <td>${c.notes || ''}</td>
         <td>
@@ -668,6 +708,32 @@ async function loadContacts() {
   contacts = await res.json();
   renderContacts();
 }
+
+document.getElementById('importLinkedinBtn').onclick = async () => {
+  const fileInput = document.getElementById('linkedinCsvFile');
+  const result = document.getElementById('linkedinImportResult');
+  const file = fileInput.files[0];
+  if (!file) { result.className = 'err'; result.textContent = 'Choose a CSV file first.'; return; }
+  result.className = ''; result.textContent = 'Importing…';
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch('/api/contacts/import-linkedin', { method: 'POST', body: formData });
+    const data = await res.json();
+    if (data.ok) {
+      result.className = data.added > 0 ? 'ok' : '';
+      result.textContent = data.message;
+      fileInput.value = '';
+      loadContacts();
+    } else {
+      result.className = 'err';
+      result.textContent = data.message || 'Import failed.';
+    }
+  } catch (e) {
+    result.className = 'err';
+    result.textContent = 'Import failed — see server log.';
+  }
+};
 
 // --- Map ---------------------------------------------------------------
 let mapLoaded = false;

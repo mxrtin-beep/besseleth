@@ -17,6 +17,7 @@ the open internet as-is.
 from __future__ import annotations
 
 import argparse
+import re
 from datetime import date
 from pathlib import Path
 
@@ -24,7 +25,7 @@ import markdown as md
 from flask import Flask, abort, jsonify, render_template, request, send_from_directory
 
 from ..config import Config, load_config
-from ..contacts_store import Contact, add_contact, load_contacts, remove_contact, update_contact
+from ..contacts_store import Contact, add_contact, import_linkedin_csv, load_contacts, remove_contact, update_contact
 from ..db import DB
 from ..feeds_store import add_feed, load_feeds, remove_feed
 from ..pipeline import fetch_all
@@ -405,22 +406,44 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         contacts = load_contacts(config.contacts_path)
         return jsonify(
             [
-                {"index": i, "name": c.name, "company": c.company, "role": c.role, "school": c.school,
-                 "linkedin_url": c.linkedin_url, "relationship": c.relationship, "notes": c.notes}
+                {
+                    "index": i, "name": c.name, "emails": c.emails, "linkedin_url": c.linkedin_url,
+                    "workplaces": c.workplaces, "schools": c.schools,
+                    "relationship": c.relationship, "notes": c.notes,
+                }
                 for i, c in enumerate(contacts)
             ]
         )
+
+    def _parse_lines(text: str, key_a: str, key_b: str) -> list[dict]:
+        """One entry per non-blank line, "Value — Detail" (em dash, or a
+        plain hyphen) splitting into {key_a: Value, key_b: Detail} — the
+        detail half is optional (a line with no separator just gets an
+        empty key_b). Used for the Workplaces ("Company — Role") and
+        Schools ("School — Level") textareas."""
+        entries = []
+        for line in (text or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = re.split(r"\s*[—-]\s*", line, maxsplit=1)
+            value = parts[0].strip()
+            detail = parts[1].strip() if len(parts) > 1 else ""
+            if value:
+                entries.append({key_a: value, key_b: detail})
+        return entries
 
     def _contact_from_payload(payload: dict) -> Contact | None:
         name = (payload.get("name") or "").strip()
         if not name:
             return None
+        emails = [e.strip() for e in (payload.get("emails") or "").split(",") if e.strip()]
         return Contact(
             name=name,
-            company=(payload.get("company") or "").strip(),
-            role=(payload.get("role") or "").strip(),
-            school=(payload.get("school") or "").strip(),
+            emails=emails,
             linkedin_url=(payload.get("linkedin_url") or "").strip(),
+            workplaces=_parse_lines(payload.get("workplaces", ""), "company", "role"),
+            schools=_parse_lines(payload.get("schools", ""), "name", "level"),
             relationship=(payload.get("relationship") or "").strip(),
             notes=(payload.get("notes") or "").strip(),
         )
@@ -449,6 +472,27 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         if not remove_contact(config.contacts_path, index):
             abort(404)
         return jsonify({"ok": True})
+
+    @app.post("/api/contacts/import-linkedin")
+    def api_import_linkedin():
+        # LinkedIn has no API for pulling your connections into a third-
+        # party app — this reads the CSV LinkedIn itself lets you export
+        # (Settings & Privacy -> Data privacy -> Get a copy of your data
+        # -> Connections). Not live sync, but a real bulk import.
+        uploaded = request.files.get("file")
+        if not uploaded:
+            return jsonify({"ok": False, "message": "No file uploaded."}), 400
+        try:
+            text = uploaded.read().decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return jsonify({"ok": False, "message": "Couldn't read that file as text — is it the CSV LinkedIn emailed you?"}), 400
+        added = import_linkedin_csv(config.contacts_path, text)
+        if added == 0:
+            return jsonify({
+                "ok": True, "added": 0,
+                "message": "Found 0 new contacts — either everyone in it is already added, or this doesn't look like a LinkedIn Connections.csv export.",
+            })
+        return jsonify({"ok": True, "added": added, "message": f"Added {added} new contact(s)."})
 
     @app.delete("/api/item/<item_id>")
     def api_delete_item(item_id):
