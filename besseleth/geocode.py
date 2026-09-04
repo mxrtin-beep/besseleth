@@ -78,6 +78,16 @@ def geocode(location_text: str, cache_path: str | Path = ".geocode_cache.json") 
         return None
 
     coords = (float(results[0]["lat"]), float(results[0]["lon"]))
+    # (0, 0) is "Null Island" — open ocean in the Gulf of Guinea, not a
+    # real place. Nominatim shouldn't return it for a genuine query, but
+    # a vague/malformed location_text (e.g. the LLM guessing "Remote" or
+    # "Global") can occasionally resolve to something degenerate like
+    # this — treat it as a failed lookup rather than plotting an org in
+    # the ocean.
+    if abs(coords[0]) < 0.01 and abs(coords[1]) < 0.01:
+        cache[key] = None
+        _save_cache(path, cache)
+        return None
     cache[key] = list(coords)
     _save_cache(path, cache)
     return coords

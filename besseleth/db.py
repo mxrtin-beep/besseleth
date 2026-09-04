@@ -62,6 +62,21 @@ CREATE TABLE IF NOT EXISTS job_board_cache (
     slug TEXT,
     checked_at TEXT NOT NULL
 );
+
+-- Whether a web lookup (see web_lookup.py) already tried to find an
+-- org's location, so a miss isn't re-queried every enrich run — same
+-- idea as job_board_cache. The location itself is cached too (not just
+-- found/not), so a later item for the same org that's missing a
+-- location can be backfilled for free from here instead of re-querying
+-- Wikidata.
+CREATE TABLE IF NOT EXISTS org_location_cache (
+    org TEXT PRIMARY KEY,
+    found INTEGER NOT NULL,
+    location_text TEXT,
+    lat REAL,
+    lon REAL,
+    checked_at TEXT NOT NULL
+);
 """
 
 # Columns added after the initial release — migrated in with ALTER TABLE
@@ -273,6 +288,70 @@ class DB:
         cur = self.conn.execute(
             f"UPDATE items SET org = NULL, org_description = NULL WHERE org IS NOT NULL AND lower(org) IN ({placeholders})",
             [n.lower() for n in names],
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def distinct_locations(self) -> list[str]:
+        """Every distinct location_text value currently stored — same
+        idea as distinct_orgs(), for sweeping existing rows against
+        enrich.py's location validity check."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT location_text FROM items WHERE location_text IS NOT NULL AND location_text != ''"
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def clear_location_matches(self, texts: list[str]) -> int:
+        """Nulls out location_text/lat/lon on any item whose location_text
+        exact-matches (case-insensitive) one of `texts` — cleanup for
+        items enriched before enrich.py started rejecting vague guesses
+        like "Remote"/"Global" (which could geocode to something
+        nonsensical, e.g. an org plotted in open ocean). Returns how many
+        rows were cleared."""
+        if not texts:
+            return 0
+        placeholders = ",".join("?" for _ in texts)
+        cur = self.conn.execute(
+            f"""UPDATE items SET location_text = NULL, lat = NULL, lon = NULL
+                WHERE location_text IS NOT NULL AND lower(location_text) IN ({placeholders})""",
+            [t.lower() for t in texts],
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def orgs_missing_location(self) -> list[str]:
+        """Valid, non-empty orgs that have no located item at all (every
+        item mentioning them has lat IS NULL) — candidates for the
+        web_lookup.py backfill pass."""
+        rows = self.conn.execute(
+            """SELECT org FROM items WHERE org IS NOT NULL AND org != '' GROUP BY org HAVING MAX(lat) IS NULL"""
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def get_org_location_cache(self, org: str) -> sqlite3.Row | None:
+        self.conn.row_factory = sqlite3.Row
+        return self.conn.execute("SELECT * FROM org_location_cache WHERE org = ?", (org,)).fetchone()
+
+    def set_org_location_cache(
+        self, org: str, found: bool, location_text: str | None = None, lat: float | None = None, lon: float | None = None
+    ) -> None:
+        self.conn.execute(
+            """INSERT INTO org_location_cache (org, found, location_text, lat, lon, checked_at) VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(org) DO UPDATE SET found = excluded.found, location_text = excluded.location_text,
+               lat = excluded.lat, lon = excluded.lon, checked_at = excluded.checked_at""",
+            (org, int(found), location_text, lat, lon, datetime.now(timezone.utc).isoformat()),
+        )
+        self.conn.commit()
+
+    def set_org_location(self, org: str, location_text: str, lat: float, lon: float) -> int:
+        """Backfills location_text/lat/lon on every item for `org` that
+        doesn't already have one — additive only, never overwrites a
+        location an item's own text already gave (that one came from the
+        item itself, more specific than an org-level HQ guess). Returns
+        how many items were updated."""
+        cur = self.conn.execute(
+            "UPDATE items SET location_text = ?, lat = ?, lon = ? WHERE org = ? AND lat IS NULL",
+            (location_text, lat, lon, org),
         )
         self.conn.commit()
         return cur.rowcount

@@ -38,9 +38,11 @@ from __future__ import annotations
 import json
 import re
 import time
+from datetime import datetime, timedelta, timezone
 
 import requests
 
+from . import web_lookup
 from .config import Config, env
 from .db import DB
 from .geocode import geocode
@@ -137,6 +139,29 @@ _GENERIC_GROUP_RE = re.compile(
 )
 
 
+_NON_LOCATION_EXACT = {
+    "unknown", "n/a", "na", "none", "unspecified", "not specified", "not mentioned", "not applicable",
+    "remote", "global", "worldwide", "international", "online", "virtual", "earth", "various", "multiple",
+    "various locations", "multiple locations", "tbd", "n/a, n/a",
+}
+
+
+def _looks_like_a_real_location(location_text: str) -> bool:
+    """Same idea as _looks_like_a_named_org: rejects a vague/non-answer
+    the LLM handed back instead of null (e.g. "Remote", "Global") before
+    it ever reaches geocoding — this is what was landing orgs at
+    implausible points (an ocean, a country's random centroid) instead
+    of just staying unlocated."""
+    normalized = location_text.strip().lower().strip(",. ")
+    if not normalized or normalized in _NON_LOCATION_EXACT:
+        return False
+    # A real "City, Country" (or just a country/region) answer has some
+    # alphabetic content; a bare punctuation/number string isn't one.
+    if not any(c.isalpha() for c in normalized):
+        return False
+    return True
+
+
 def _looks_like_a_named_org(org: str, config: Config) -> bool:
     """False for anything that isn't naming a specific organization: the
     industry name/a keyword verbatim, an explicit non-answer ('unknown',
@@ -195,6 +220,8 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
     elif not org:
         org_description = None
     location_text = data.get("location") or None
+    if location_text and not _looks_like_a_real_location(location_text):
+        location_text = None
     lat = lon = None
     if location_text:
         coords = geocode(location_text)
@@ -244,6 +271,52 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
     return True
 
 
+def _backfill_org_locations(config: Config, db: DB) -> int:
+    """Fills in a missing location for orgs that have none, via a free
+    web lookup (Wikidata — see web_lookup.py), independent of the LLM
+    pass above: that one only ever knows what a given item's own text
+    says, so an org whose location was simply never mentioned in any
+    item stays unlocated forever without this. Bounded per run
+    (enrichment.max_org_lookups_per_run) and cached — found or not — so
+    a miss isn't re-queried every run; a cached hit is reapplied for
+    free if a newer item for the same org shows up without its own
+    location. Returns how many orgs got newly filled in."""
+    cfg = config.raw.get("enrichment", {}) or {}
+    max_lookups = cfg.get("max_org_lookups_per_run", 8)
+    recheck_days = cfg.get("location_recheck_days", 30)
+    if max_lookups <= 0:
+        return 0
+
+    filled = 0
+    attempted = 0
+    for org in db.orgs_missing_location():
+        cached = db.get_org_location_cache(org)
+        if cached and cached["found"]:
+            # Already know this one — reapply from cache, free (no web call,
+            # doesn't count against this run's lookup budget).
+            db.set_org_location(org, cached["location_text"], cached["lat"], cached["lon"])
+            filled += 1
+            continue
+        if cached and not cached["found"]:
+            checked_at = datetime.fromisoformat(cached["checked_at"])
+            if datetime.now(timezone.utc) - checked_at < timedelta(days=recheck_days):
+                continue  # checked recently, nothing found — don't re-probe yet
+
+        if attempted >= max_lookups:
+            continue
+        attempted += 1
+        result = web_lookup.lookup_org_location(org)
+        if result:
+            label, lat, lon = result
+            db.set_org_location(org, label, lat, lon)
+            db.set_org_location_cache(org, found=True, location_text=label, lat=lat, lon=lon)
+            filled += 1
+        else:
+            db.set_org_location_cache(org, found=False)
+
+    return filled
+
+
 def enrich_items_detailed(config: Config, db: DB) -> dict:
     """Enriches up to `enrichment.max_items_per_run` unenriched items.
     Returns {"processed": int, "message": str, "backend": str} — the
@@ -268,6 +341,17 @@ def enrich_items_detailed(config: Config, db: DB) -> dict:
     if cleared:
         print(f"[enrich] Cleared {cleared} item(s) whose 'org' was actually the industry name/a keyword.")
 
+    invalid_locations = [loc for loc in db.distinct_locations() if not _looks_like_a_real_location(loc)]
+    locations_cleared = db.clear_location_matches(invalid_locations)
+    if locations_cleared:
+        print(f"[enrich] Cleared {locations_cleared} item(s) with a vague location guess (e.g. 'Remote'/'Global').")
+
+    # Independent of the LLM pass below — a free web lookup (Wikidata)
+    # for orgs whose location was never mentioned in any item's own
+    # text, so those don't just stay unlocated forever.
+    locations_filled = _backfill_org_locations(config, db)
+    location_note = f" Filled in a location for {locations_filled} org(s) via web lookup." if locations_filled else ""
+
     sources = cfg.get("sources", DEFAULT_SOURCES)
     max_items = cfg.get("max_items_per_run", 20)
 
@@ -275,7 +359,7 @@ def enrich_items_detailed(config: Config, db: DB) -> dict:
     if not rows:
         return {
             "processed": 0,
-            "message": "Nothing to enrich — every item in enrichment.sources is already tagged (or unknown).",
+            "message": f"Nothing to enrich — every item in enrichment.sources is already tagged (or unknown).{location_note}",
             "backend": backend,
         }
 
@@ -288,13 +372,14 @@ def enrich_items_detailed(config: Config, db: DB) -> dict:
         msg = (
             f"summarizer.backend is {backend!r}, not 'ollama' — marked {len(rows)} item(s) 'unknown' rather than "
             f"leaving them pending. Set summarizer.backend: \"ollama\" in config.yaml and have Ollama running to "
-            f"actually extract org/modality/location/etc."
+            f"actually extract org/modality/location/etc.{location_note}"
         )
         print(f"[enrich] {msg}")
         return {"processed": len(rows), "message": msg, "backend": backend}
 
     ok, status_msg = ollama_status(summarizer_cfg)
     if not ok:
+        status_msg += location_note
         print(f"[enrich] {status_msg}")
         return {"processed": 0, "message": status_msg, "backend": backend}
 
@@ -318,6 +403,7 @@ def enrich_items_detailed(config: Config, db: DB) -> dict:
         message = f"Enriched {processed}/{len(rows)} — the rest failed mid-call and will retry next run (see server log)."
     else:
         message = f"Enriched {processed} item(s)."
+    message += location_note
     print(f"[enrich] {message}")
     return {"processed": processed, "message": message, "backend": backend}
 

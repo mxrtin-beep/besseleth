@@ -220,6 +220,15 @@ enrichment:
   pause_seconds: 0     # e.g. 2 — sleep this long between items during a run
   sources: ["arxiv", "news", "blog"]
 
+  # A separate pass, independent of the LLM extraction above: for orgs
+  # that have no location at all (never mentioned in any item's text),
+  # tries a free web lookup (Wikidata — see besseleth/web_lookup.py) for
+  # its headquarters. Runs every enrich call, bounded per run since a
+  # never-checked org costs a couple of requests; cached (found or not)
+  # so a miss isn't re-queried every time.
+  max_org_lookups_per_run: 8
+  location_recheck_days: 30
+
 summarizer:
   # Uses a local LLM via Ollama (https://ollama.ai) — free, runs offline.
   # `ollama pull llama3.1` (or any model you like) before running.
