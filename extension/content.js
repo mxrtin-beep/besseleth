@@ -170,16 +170,20 @@ function injectPostButton(postEl, config) {
     // rather than guessing a fixed corner offset — reads its actual
     // rendered position instead of assuming where it sits in the DOM,
     // so this doesn't depend on knowing the site's exact markup nesting.
+    //
+    // Placed just BELOW that icon row (right-aligned under it), not
+    // squeezed in beside it — X's icon row can pack the "..." button
+    // right up against a Grok icon/audience selector, and LinkedIn's
+    // against a close "X" in some contexts (a reshare/quote view), so
+    // any fixed horizontal gap eventually collides with something in
+    // that crowded row on one site or the other. The row below is
+    // reliably clear space on both.
     const anchorEl = config.anchorSelector ? postEl.querySelector(config.anchorSelector) : null;
     if (anchorEl) {
       const postRect = postEl.getBoundingClientRect();
       const anchorRect = anchorEl.getBoundingClientRect();
-      // Shifted left by the button's own width (16px, see .besseleth-post-btn
-      // in content.css) plus a wider gap (16px, up from the standard 6px) —
-      // on X the "..." button sits right next to the Grok icon, and this
-      // extra margin keeps ours from crowding it.
-      btn.style.top = `${anchorRect.top - postRect.top + anchorRect.height / 2 - 8}px`;
-      btn.style.right = `${postRect.right - anchorRect.left + 16 + 16}px`;
+      btn.style.top = `${anchorRect.bottom - postRect.top + 4}px`;
+      btn.style.right = `${postRect.right - anchorRect.right}px`;
     }
 
     btn.addEventListener("click", (e) => {
