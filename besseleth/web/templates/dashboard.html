@@ -43,6 +43,11 @@
   table.datatable { border-collapse: collapse; width: 100%; margin-top: 1rem; font-size: .85rem; }
   table.datatable th, table.datatable td { border: 1px solid #8883; padding: .5rem .7rem; text-align: left; vertical-align: top; }
   table.datatable th { background: #8881; }
+  /* Fixed layout + explicit column widths (via <colgroup>) so a long
+     value in one column (e.g. a verbose location) can't squeeze another
+     (e.g. the job title) into a narrow, multi-line wrap. */
+  #jobsTable { table-layout: fixed; }
+  #jobsTable td { overflow-wrap: break-word; }
   .metric-tags { display: flex; flex-wrap: wrap; gap: .3rem; }
   .metric-tag { display: inline-block; border: 1px solid #4a90d966; background: #4a90d914; border-radius: 999px;
                 padding: .15rem .6rem; font-size: .78rem; white-space: nowrap; }
@@ -336,6 +341,10 @@ function wireReportNav() {
       const res = await fetch(`/api/report/${btn.dataset.report}`);
       const data = await res.json();
       reportPane.innerHTML = data.html;
+      // The rendered-from-markdown report body doesn't set target itself
+      // (python-markdown has no option for it) — every citation link in
+      // it should still open in a new tab like the rest of the dashboard.
+      reportPane.querySelectorAll('a:not([target])').forEach(a => { a.target = '_blank'; a.rel = 'noopener'; });
     };
   });
   document.querySelectorAll('.delBtn').forEach(btn => {
@@ -913,6 +922,10 @@ function renderJobs() {
 
   const table = document.getElementById('jobsTable');
   table.innerHTML = `
+    <colgroup>
+      <col style="width:16%"><col style="width:34%"><col style="width:20%">
+      <col style="width:12%"><col style="width:9%"><col style="width:9%">
+    </colgroup>
     <thead><tr><th>Org</th><th>Title</th><th>Location</th><th>Platform</th><th>First seen</th><th>Status</th></tr></thead>
     <tbody>${rows.map(j => `
       <tr>
