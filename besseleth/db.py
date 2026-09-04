@@ -468,6 +468,41 @@ class DB:
         self.conn.commit()
         return cur.rowcount
 
+    def location_text_variants(self) -> list[sqlite3.Row]:
+        """Every distinct (location_text, lat, lon, count) with a
+        location set — lets near-identical geocoded points that differ
+        only in how much detail the LLM included ("Mountain View" vs.
+        "Mountain View, CA" vs. "Mountain View, California, United
+        States") be clustered and standardized (see enrich.py's
+        _standardize_location_names)."""
+        self.conn.row_factory = sqlite3.Row
+        return list(
+            self.conn.execute(
+                """SELECT location_text, lat, lon, COUNT(*) as n FROM items
+                   WHERE lat IS NOT NULL AND location_text IS NOT NULL
+                   GROUP BY location_text, lat, lon ORDER BY n DESC"""
+            ).fetchall()
+        )
+
+    def standardize_location(
+        self, old_text: str, old_lat: float, old_lon: float, new_text: str, new_lat: float, new_lon: float
+    ) -> int:
+        """Rewrites every item currently at exactly (old_text, old_lat,
+        old_lon) — the caller clusters by rounded coordinates and passes
+        each variant's own exact values — to the cluster's chosen
+        canonical (new_text, new_lat, new_lon). Snapping lat/lon to one
+        point too (not just the text label) is what actually merges
+        several near-identical geocoded points into one Map tab marker;
+        the values only ever come from another item that already
+        geocoded to (within ~1km of) the same real place, never guessed.
+        Returns how many items changed."""
+        cur = self.conn.execute(
+            "UPDATE items SET location_text = ?, lat = ?, lon = ? WHERE location_text = ? AND lat = ? AND lon = ?",
+            (new_text, new_lat, new_lon, old_text, old_lat, old_lon),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
     def org_location_votes(self, org: str) -> list[sqlite3.Row]:
         """Every distinct (location_text, lat, lon) items for `org` carry,
         most-agreed-on first — lets a consensus location be picked when

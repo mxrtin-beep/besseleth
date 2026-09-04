@@ -599,6 +599,43 @@ def _backfill_contact_locations(config: Config, db: DB) -> int:
     return filled
 
 
+def _standardize_location_names(db: DB) -> int:
+    """Different items naming the same real-world place at different
+    levels of detail — "Mountain View", "Mountain View, CA", "Mountain
+    View, California, United States" — all geocode to the same (or a
+    near-identical) point, but stayed as different-looking rows/markers
+    since nothing reconciled the TEXT, only the coordinates came from
+    geocoding. Clusters items by lat/lon rounded to 2 decimal places
+    (~1km — same city, not just same country) and snaps every variant in
+    a cluster to whichever (text, lat, lon) is most common, the same
+    "most-used spelling wins" idiom _canonicalize_existing_orgs uses for
+    org names. lat/lon only ever gets replaced by another item's own
+    already-geocoded point within that ~1km cluster (never guessed), so
+    this stays safe to run unattended — worst case it nudges a marker by
+    under a kilometer to match its neighbors, never invents a location.
+    Returns how many items were changed. Runs BEFORE
+    _apply_location_consensus so that sweep isn't fooled into seeing
+    "one org, several disagreeing locations" when it's really "one
+    location, several spellings/jittered coordinates"."""
+    clusters: dict[tuple[float, float], list[sqlite3.Row]] = {}
+    for row in db.location_text_variants():
+        key = (round(row["lat"], 2), round(row["lon"], 2))
+        clusters.setdefault(key, []).append(row)
+
+    renamed = 0
+    for variants in clusters.values():
+        if len(variants) < 2:
+            continue
+        canonical = max(variants, key=lambda r: r["n"])
+        for v in variants:
+            if (v["location_text"], v["lat"], v["lon"]) == (canonical["location_text"], canonical["lat"], canonical["lon"]):
+                continue
+            renamed += db.standardize_location(
+                v["location_text"], v["lat"], v["lon"], canonical["location_text"], canonical["lat"], canonical["lon"]
+            )
+    return renamed
+
+
 def _apply_location_consensus(db: DB) -> int:
     """Each item gets its location guessed independently (from its own
     text, by whichever LLM call enriched it) — so one org's items can
@@ -721,6 +758,10 @@ def enrich_items_detailed(config: Config, db: DB) -> dict:
     locations_cleared = db.clear_location_matches(invalid_locations)
     if locations_cleared:
         print(f"[enrich] Cleared {locations_cleared} item(s) with a vague location guess (e.g. 'Remote'/'Global').")
+
+    standardized_locations = _standardize_location_names(db)
+    if standardized_locations:
+        print(f"[enrich] Standardized {standardized_locations} item(s)' location label to match others at the same place.")
 
     reconciled_locations = _apply_location_consensus(db)
     if reconciled_locations:
