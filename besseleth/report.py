@@ -89,7 +89,7 @@ def _trend_section(trend_devices, trend_chart_paths, trend_metrics) -> str:
     parts.append(
         "_The interactive version of this — adjustable axes, time on the X axis to see "
         "progress over releases, click-through to each device's specific source — lives in "
-        "the dashboard's Trends explorer tab._"
+        "the dashboard's Trends tab._"
     )
     parts.append("")
     parts.append("| Device | Org | Type | FDA status | Metrics | Source |")

@@ -92,9 +92,8 @@
     <button id="tabOrgs">Orgs</button>
     <button id="tabJobs">Jobs</button>
     <button id="tabMap">Map</button>
-    <button id="tabTrends">Trends explorer</button>
+    <button id="tabTrends">Trends</button>
     <button id="tabPaste">Paste</button>
-    <button id="tabFeeds">Feeds</button>
     <button id="tabContacts">Contacts</button>
   </div>
 
@@ -219,9 +218,8 @@
     <p class="hint">Deleting here removes it outright — unlike scraped items, a paste can't be re-fetched, so this
       is the way to take one back (wrong link, changed your mind, duplicate).</p>
     <table class="datatable" id="pastedTable"></table>
-  </div>
 
-  <div id="feedsPane" style="display:none">
+    <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Add a feed</h3>
     <p class="hint">Add an RSS/Atom feed URL for besseleth to check on every fetch, alongside the ones already in
       config.yaml — for a news/trade-press site or a blog it's missing. No code editing required; takes effect on
       the next fetch, no restart needed.</p>
@@ -303,7 +301,6 @@ const jobsPane = document.getElementById('jobsPane');
 const mapPane = document.getElementById('mapPane');
 const trendsPane = document.getElementById('trendsPane');
 const pastePane = document.getElementById('pastePane');
-const feedsPane = document.getElementById('feedsPane');
 const contactsPane = document.getElementById('contactsPane');
 const tabReport = document.getElementById('tabReport');
 const tabPapers = document.getElementById('tabPapers');
@@ -312,7 +309,6 @@ const tabJobs = document.getElementById('tabJobs');
 const tabMap = document.getElementById('tabMap');
 const tabTrends = document.getElementById('tabTrends');
 const tabPaste = document.getElementById('tabPaste');
-const tabFeeds = document.getElementById('tabFeeds');
 const tabContacts = document.getElementById('tabContacts');
 
 function showTab(which) {
@@ -323,7 +319,6 @@ function showTab(which) {
   mapPane.style.display = which === 'map' ? 'block' : 'none';
   trendsPane.style.display = which === 'trends' ? 'block' : 'none';
   pastePane.style.display = which === 'paste' ? 'block' : 'none';
-  feedsPane.style.display = which === 'feeds' ? 'block' : 'none';
   contactsPane.style.display = which === 'contacts' ? 'block' : 'none';
   tabReport.classList.toggle('active', which === 'report');
   tabPapers.classList.toggle('active', which === 'papers');
@@ -332,14 +327,12 @@ function showTab(which) {
   tabMap.classList.toggle('active', which === 'map');
   tabTrends.classList.toggle('active', which === 'trends');
   tabPaste.classList.toggle('active', which === 'paste');
-  tabFeeds.classList.toggle('active', which === 'feeds');
   tabContacts.classList.toggle('active', which === 'contacts');
   if (which === 'papers' && !papersLoaded) loadPapers();
   if (which === 'orgs' && !orgsLoaded) loadOrgs();
   if (which === 'jobs' && !jobsLoaded) loadJobs();
   if (which === 'map' && !mapLoaded) loadMap();
-  if (which === 'paste') loadPasted();
-  if (which === 'feeds') loadFeeds();
+  if (which === 'paste') { loadPasted(); loadFeeds(); }
   if (which === 'contacts') loadContacts();
 }
 tabReport.onclick = () => showTab('report');
@@ -349,7 +342,6 @@ tabJobs.onclick = () => showTab('jobs');
 tabMap.onclick = () => showTab('map');
 tabTrends.onclick = () => showTab('trends');
 tabPaste.onclick = () => showTab('paste');
-tabFeeds.onclick = () => showTab('feeds');
 tabContacts.onclick = () => showTab('contacts');
 
 function wireReportNav() {

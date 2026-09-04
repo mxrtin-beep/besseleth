@@ -486,13 +486,19 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             text = uploaded.read().decode("utf-8-sig")
         except UnicodeDecodeError:
             return jsonify({"ok": False, "message": "Couldn't read that file as text — is it the CSV LinkedIn emailed you?"}), 400
-        added = import_linkedin_csv(config.contacts_path, text)
+        # Your LinkedIn export is your whole network, not just neurotech —
+        # only import connections whose company/title look on-topic, using
+        # the same keyword list scrapers use to judge relevance.
+        added = import_linkedin_csv(config.contacts_path, text, keywords=config.keywords)
         if added == 0:
             return jsonify({
                 "ok": True, "added": 0,
-                "message": "Found 0 new contacts — either everyone in it is already added, or this doesn't look like a LinkedIn Connections.csv export.",
+                "message": (
+                    "Found 0 new contacts — either everyone relevant is already added, this doesn't look "
+                    f"like a LinkedIn Connections.csv export, or nobody in it looks like {config.industry_name}."
+                ),
             })
-        return jsonify({"ok": True, "added": added, "message": f"Added {added} new contact(s)."})
+        return jsonify({"ok": True, "added": added, "message": f"Added {added} new contact(s) working in {config.industry_name}."})
 
     @app.delete("/api/item/<item_id>")
     def api_delete_item(item_id):

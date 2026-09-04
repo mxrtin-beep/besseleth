@@ -27,6 +27,8 @@ from pathlib import Path
 
 import yaml
 
+from .scrapers.util import text_matches_keywords
+
 
 @dataclass
 class Contact:
@@ -194,17 +196,35 @@ def parse_linkedin_connections_csv(csv_text: str) -> list[Contact]:
     return contacts
 
 
-def import_linkedin_csv(path: str | Path, csv_text: str) -> int:
+def _is_relevant(contact: Contact, keywords: list[str]) -> bool:
+    """A LinkedIn export is your whole network, not just the neurotech
+    corner of it — only import connections whose company/title actually
+    look like this industry, matched against the same keyword list
+    scrapers use to decide whether an article is on-topic (see
+    text_matches_keywords). No keywords configured -> don't filter (an
+    empty allowlist would silently import nobody and look like a bug)."""
+    if not keywords:
+        return True
+    text = " ".join(f"{w.get('company', '')} {w.get('role', '')}" for w in contact.workplaces)
+    return bool(text_matches_keywords(text, keywords))
+
+
+def import_linkedin_csv(path: str | Path, csv_text: str, keywords: list[str] | None = None) -> int:
     """Appends every contact parsed from `csv_text` that isn't already
     present (matched by linkedin_url if both have one, else by exact
-    name) — safe to import the same export twice without duplicating
-    everyone. Returns how many new contacts were added."""
+    name) AND looks relevant to `keywords` (your company/role mentions
+    the industry) — safe to import the same export twice without
+    duplicating everyone, and skips the rest of your LinkedIn network
+    that has nothing to do with this industry. Returns how many new
+    contacts were added."""
     existing = load_contacts(path)
     existing_urls = {c.linkedin_url for c in existing if c.linkedin_url}
     existing_names = {c.name.strip().lower() for c in existing}
 
     added = 0
     for contact in parse_linkedin_connections_csv(csv_text):
+        if not _is_relevant(contact, keywords or []):
+            continue
         if contact.linkedin_url and contact.linkedin_url in existing_urls:
             continue
         if not contact.linkedin_url and contact.name.strip().lower() in existing_names:

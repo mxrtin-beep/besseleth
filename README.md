@@ -204,7 +204,7 @@ doing and when. Tabs:
 - **Map** — the companies/labs behind those papers, plotted by location
   (free via OpenStreetMap), sized by how much has been fetched about
   each. See "Map" below.
-- **Trends explorer** — devices and companies as an interactive chart
+- **Trends** — devices and companies as an interactive chart
   (Plotly, client-side, no static PNGs) — a Devices/Companies toggle
   switches dataset. Pick any metric for the X axis — including **time**
   (`date_reported`), to see e.g. information transfer rate improving
@@ -398,7 +398,7 @@ Every `run` renders a scatter chart per pair of numeric metrics (colored
 by FDA status, shaped by industry vs. academic) plus an FDA-status bar
 chart, embeds them in the report, and lists every tracked device/company
 in a table with human-readable metric tags (not raw `key=value` pairs)
-and its cited source. The dashboard's **Trends explorer** tab is the
+and its cited source. The dashboard's **Trends** tab is the
 live, interactive version of the same two datasets — a Devices/Companies
 toggle, adjustable X/Y axes (including **time**, to watch a metric
 improve release over release), color by any categorical field, click a
