@@ -165,8 +165,8 @@ def generate_weekly_report(config: Config, db: DB) -> str:
     # Persist personalization matches (and merged summaries) back to the DB.
     for i in all_items:
         db.conn.execute(
-            "UPDATE items SET matched_contact = ?, matched_company = ?, summary = ? WHERE id = ?",
-            (i.matched_contact, i.matched_company, i.summary, i.id),
+            "UPDATE items SET matched_contact = ?, matched_company = ?, matched_reason = ?, summary = ? WHERE id = ?",
+            (i.matched_contact, i.matched_company, i.matched_reason, i.summary, i.id),
         )
     db.conn.commit()
 

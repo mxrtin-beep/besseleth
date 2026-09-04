@@ -93,6 +93,7 @@ ENRICHMENT_COLUMNS = {
     "lat": "REAL",                     # geocoded from location_text (Nominatim/OSM, free) — NULL if ungeocodable
     "lon": "REAL",
     "enriched_at": "TEXT",             # ISO8601 once enrichment has run for this item (even if it found nothing)
+    "matched_reason": "TEXT",          # "company" | "school" — why matched_contact matched (see personalize.py)
 }
 
 
@@ -107,6 +108,7 @@ class Item:
     matched_keywords: list[str] = field(default_factory=list)
     matched_contact: Optional[str] = None
     matched_company: Optional[str] = None
+    matched_reason: Optional[str] = None
     org: Optional[str] = None
     org_type: Optional[str] = None
     modality: Optional[str] = None

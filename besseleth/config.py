@@ -53,8 +53,22 @@ class Config:
         return Path(self.raw.get("feeds_path", "feeds.yaml"))
 
     @property
+    def contacts_path(self) -> Path:
+        return Path(self.raw.get("contacts_path", "contacts.yaml"))
+
+    @property
     def contacts(self) -> list[dict]:
-        return list(self.raw.get("contacts", []))
+        """config.yaml's own `contacts:` list (legacy — still honored)
+        plus contacts.yaml (the dashboard's Contacts tab writes only
+        here). Both are supported so migrating isn't required, but new
+        contacts should go through the tab."""
+        from dataclasses import asdict
+
+        from .contacts_store import load_contacts
+
+        merged = list(self.raw.get("contacts", []))
+        merged.extend(asdict(c) for c in load_contacts(self.contacts_path))
+        return merged
 
     def source(self, name: str) -> dict:
         return self.raw.get("sources", {}).get(name, {}) or {}

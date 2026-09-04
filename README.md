@@ -120,7 +120,10 @@ still works — set `schedule.enabled: false` in `config.yaml` and:
 
 ## Personalization
 
-Add contacts to `config.yaml`:
+Add contacts from the dashboard's **Contacts** tab (name, company, role,
+school, LinkedIn URL, relationship, notes) — stored in `contacts.yaml`,
+same pattern as devices.yaml/companies.yaml. `config.yaml`'s own legacy
+`contacts:` list (if you have one) still works too, merged in alongside:
 
 ```yaml
 contacts:
@@ -129,11 +132,13 @@ contacts:
     role: "Research Scientist"
 ```
 
-Any item — scraped or pasted, from any source — whose text mentions
-`Neuralink` gets flagged with `matched_contact: Jane Doe` and surfaced first
-in the report's "For you" section, tagged with which contact/company it's
-relevant to — this is how a job posting at a friend's company gets called
-out specifically.
+Any item — scraped or pasted, from any source — whose text mentions a
+contact's **company** gets flagged with `matched_contact: Jane Doe` and
+surfaced first in the report's "For you" section (this is how a job
+posting at a friend's company gets called out specifically); their
+**school** is checked too when company doesn't match — more
+serendipitous ("the place your friend studied just published
+something"), and tagged accordingly.
 
 ## On LinkedIn
 

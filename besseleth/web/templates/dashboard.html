@@ -95,6 +95,7 @@
     <button id="tabTrends">Trends explorer</button>
     <button id="tabPaste">Paste</button>
     <button id="tabFeeds">Feeds</button>
+    <button id="tabContacts">Contacts</button>
   </div>
 
   <div id="reportPane"><p class="hint">Pick a report from the sidebar.</p></div>
@@ -245,6 +246,28 @@
     <h3 style="margin-top:1.5rem; font-size:1rem;">Blog feeds</h3>
     <table class="datatable" id="blogFeedsTable"></table>
   </div>
+
+  <div id="contactsPane" style="display:none">
+    <p class="hint">Friends, ex-coworkers, LinkedIn contacts — anyone whose company or school you'd want flagged
+      when it shows up in a report. An item mentioning a contact's <b>company</b> is surfaced first ("your friend's
+      employer is in the news"); their <b>school</b> is checked too if company doesn't match (more serendipitous —
+      "the place your friend studied just published something"). See the report's "For you" section.</p>
+    <div class="controls" style="align-items:stretch; flex-wrap:wrap">
+      <div><label for="contactName">Name *</label><input type="text" id="contactName" placeholder="Jane Doe"></div>
+      <div><label for="contactCompany">Company</label><input type="text" id="contactCompany" placeholder="Neuralink"></div>
+      <div><label for="contactRole">Role</label><input type="text" id="contactRole" placeholder="Research Scientist"></div>
+      <div><label for="contactSchool">School</label><input type="text" id="contactSchool" placeholder="Stanford"></div>
+      <div><label for="contactLinkedin">LinkedIn URL</label><input type="text" id="contactLinkedin" placeholder="https://linkedin.com/in/..."></div>
+      <div><label for="contactRelationship">Relationship</label><input type="text" id="contactRelationship" placeholder="college friend"></div>
+      <div style="flex:1; min-width:200px"><label for="contactNotes">Notes</label><input type="text" id="contactNotes" style="width:100%; box-sizing:border-box" placeholder="optional"></div>
+    </div>
+    <div class="controls">
+      <div><button class="btn" id="addContactBtn">Add contact</button></div>
+      <div><button class="btn" id="cancelEditContactBtn" style="display:none">Cancel edit</button></div>
+    </div>
+    <div id="contactResult"></div>
+    <table class="datatable" id="contactsTable" style="margin-top:1rem"></table>
+  </div>
 </main>
 
 <script>
@@ -256,6 +279,7 @@ const mapPane = document.getElementById('mapPane');
 const trendsPane = document.getElementById('trendsPane');
 const pastePane = document.getElementById('pastePane');
 const feedsPane = document.getElementById('feedsPane');
+const contactsPane = document.getElementById('contactsPane');
 const tabReport = document.getElementById('tabReport');
 const tabPapers = document.getElementById('tabPapers');
 const tabOrgs = document.getElementById('tabOrgs');
@@ -264,6 +288,7 @@ const tabMap = document.getElementById('tabMap');
 const tabTrends = document.getElementById('tabTrends');
 const tabPaste = document.getElementById('tabPaste');
 const tabFeeds = document.getElementById('tabFeeds');
+const tabContacts = document.getElementById('tabContacts');
 
 function showTab(which) {
   reportPane.style.display = which === 'report' ? 'block' : 'none';
@@ -274,6 +299,7 @@ function showTab(which) {
   trendsPane.style.display = which === 'trends' ? 'block' : 'none';
   pastePane.style.display = which === 'paste' ? 'block' : 'none';
   feedsPane.style.display = which === 'feeds' ? 'block' : 'none';
+  contactsPane.style.display = which === 'contacts' ? 'block' : 'none';
   tabReport.classList.toggle('active', which === 'report');
   tabPapers.classList.toggle('active', which === 'papers');
   tabOrgs.classList.toggle('active', which === 'orgs');
@@ -282,12 +308,14 @@ function showTab(which) {
   tabTrends.classList.toggle('active', which === 'trends');
   tabPaste.classList.toggle('active', which === 'paste');
   tabFeeds.classList.toggle('active', which === 'feeds');
+  tabContacts.classList.toggle('active', which === 'contacts');
   if (which === 'papers' && !papersLoaded) loadPapers();
   if (which === 'orgs' && !orgsLoaded) loadOrgs();
   if (which === 'jobs' && !jobsLoaded) loadJobs();
   if (which === 'map' && !mapLoaded) loadMap();
   if (which === 'paste') loadPasted();
   if (which === 'feeds') loadFeeds();
+  if (which === 'contacts') loadContacts();
 }
 tabReport.onclick = () => showTab('report');
 tabPapers.onclick = () => showTab('papers');
@@ -297,6 +325,7 @@ tabMap.onclick = () => showTab('map');
 tabTrends.onclick = () => showTab('trends');
 tabPaste.onclick = () => showTab('paste');
 tabFeeds.onclick = () => showTab('feeds');
+tabContacts.onclick = () => showTab('contacts');
 
 function wireReportNav() {
   document.querySelectorAll('.reportBtn').forEach(btn => {
@@ -535,6 +564,109 @@ async function loadFeeds() {
   const feeds = await res.json();
   renderFeedsTable('newsFeedsTable', 'news', feeds.news || []);
   renderFeedsTable('blogFeedsTable', 'blog', feeds.blog || []);
+}
+
+// --- Contacts ------------------------------------------------------------
+let contacts = [];
+let editingContactIndex = null;
+
+const contactFieldIds = {
+  name: 'contactName', company: 'contactCompany', role: 'contactRole', school: 'contactSchool',
+  linkedin_url: 'contactLinkedin', relationship: 'contactRelationship', notes: 'contactNotes',
+};
+
+function readContactForm() {
+  const data = {};
+  for (const [field, id] of Object.entries(contactFieldIds)) {
+    data[field] = document.getElementById(id).value.trim();
+  }
+  return data;
+}
+
+function clearContactForm() {
+  for (const id of Object.values(contactFieldIds)) document.getElementById(id).value = '';
+}
+
+function startEditContact(index) {
+  const c = contacts.find(x => x.index === index);
+  if (!c) return;
+  for (const [field, id] of Object.entries(contactFieldIds)) document.getElementById(id).value = c[field] || '';
+  editingContactIndex = index;
+  document.getElementById('addContactBtn').textContent = 'Save changes';
+  document.getElementById('cancelEditContactBtn').style.display = '';
+  document.getElementById('contactName').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function cancelEditContact() {
+  editingContactIndex = null;
+  clearContactForm();
+  document.getElementById('addContactBtn').textContent = 'Add contact';
+  document.getElementById('cancelEditContactBtn').style.display = 'none';
+}
+document.getElementById('cancelEditContactBtn').onclick = cancelEditContact;
+
+document.getElementById('addContactBtn').onclick = async () => {
+  const data = readContactForm();
+  const result = document.getElementById('contactResult');
+  if (!data.name) { result.className = 'err'; result.textContent = 'Name is required.'; return; }
+  result.className = ''; result.textContent = editingContactIndex === null ? 'Adding…' : 'Saving…';
+  try {
+    const url = editingContactIndex === null ? '/api/contacts' : `/api/contacts/${editingContactIndex}`;
+    const method = editingContactIndex === null ? 'POST' : 'PUT';
+    const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+    const respData = await res.json();
+    if (respData.ok) {
+      result.className = 'ok';
+      result.textContent = editingContactIndex === null ? 'Added.' : 'Saved.';
+      cancelEditContact();
+      loadContacts();
+    } else {
+      result.className = 'err';
+      result.textContent = respData.message || 'Failed.';
+    }
+  } catch (e) {
+    result.className = 'err';
+    result.textContent = 'Failed — see server log.';
+  }
+};
+
+function renderContacts() {
+  const table = document.getElementById('contactsTable');
+  if (!contacts.length) {
+    table.innerHTML = '<tbody><tr><td class="hint">No contacts yet — add one above.</td></tr></tbody>';
+    return;
+  }
+  table.innerHTML = `
+    <thead><tr><th>Name</th><th>Company</th><th>Role</th><th>School</th><th>Relationship</th><th>Notes</th><th></th></tr></thead>
+    <tbody>${contacts.map(c => `
+      <tr>
+        <td>${c.linkedin_url ? `<a href="${c.linkedin_url}" target="_blank" rel="noopener">${c.name}</a>` : c.name}</td>
+        <td>${c.company || ''}</td>
+        <td>${c.role || ''}</td>
+        <td>${c.school || ''}</td>
+        <td>${c.relationship || ''}</td>
+        <td>${c.notes || ''}</td>
+        <td>
+          <button class="delBtn" data-edit-contact="${c.index}" title="Edit">✏️</button>
+          <button class="delBtn" data-del-contact="${c.index}" title="Delete">🗑</button>
+        </td>
+      </tr>`).join('')}</tbody>`;
+  table.querySelectorAll('[data-edit-contact]').forEach(btn => {
+    btn.onclick = () => startEditContact(parseInt(btn.dataset.editContact, 10));
+  });
+  table.querySelectorAll('[data-del-contact]').forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm('Delete this contact?')) return;
+      await fetch(`/api/contacts/${btn.dataset.delContact}`, { method: 'DELETE' });
+      loadContacts();
+    };
+  });
+}
+
+async function loadContacts() {
+  const res = await fetch('/api/contacts');
+  contacts = await res.json();
+  renderContacts();
 }
 
 // --- Map ---------------------------------------------------------------

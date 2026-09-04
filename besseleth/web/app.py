@@ -24,6 +24,7 @@ import markdown as md
 from flask import Flask, abort, jsonify, render_template, request, send_from_directory
 
 from ..config import Config, load_config
+from ..contacts_store import Contact, add_contact, load_contacts, remove_contact, update_contact
 from ..db import DB
 from ..feeds_store import add_feed, load_feeds, remove_feed
 from ..pipeline import fetch_all
@@ -396,6 +397,56 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             return jsonify({"ok": False, "message": "category must be 'news' or 'blog'."}), 400
         removed = remove_feed(config.feeds_path, category, url)
         if not removed:
+            abort(404)
+        return jsonify({"ok": True})
+
+    @app.get("/api/contacts")
+    def api_contacts():
+        contacts = load_contacts(config.contacts_path)
+        return jsonify(
+            [
+                {"index": i, "name": c.name, "company": c.company, "role": c.role, "school": c.school,
+                 "linkedin_url": c.linkedin_url, "relationship": c.relationship, "notes": c.notes}
+                for i, c in enumerate(contacts)
+            ]
+        )
+
+    def _contact_from_payload(payload: dict) -> Contact | None:
+        name = (payload.get("name") or "").strip()
+        if not name:
+            return None
+        return Contact(
+            name=name,
+            company=(payload.get("company") or "").strip(),
+            role=(payload.get("role") or "").strip(),
+            school=(payload.get("school") or "").strip(),
+            linkedin_url=(payload.get("linkedin_url") or "").strip(),
+            relationship=(payload.get("relationship") or "").strip(),
+            notes=(payload.get("notes") or "").strip(),
+        )
+
+    @app.post("/api/contacts")
+    def api_add_contact():
+        payload = request.get_json(silent=True) or {}
+        contact = _contact_from_payload(payload)
+        if not contact:
+            return jsonify({"ok": False, "message": "Name is required."}), 400
+        add_contact(config.contacts_path, contact)
+        return jsonify({"ok": True})
+
+    @app.put("/api/contacts/<int:index>")
+    def api_update_contact(index):
+        payload = request.get_json(silent=True) or {}
+        contact = _contact_from_payload(payload)
+        if not contact:
+            return jsonify({"ok": False, "message": "Name is required."}), 400
+        if not update_contact(config.contacts_path, index, contact):
+            abort(404)
+        return jsonify({"ok": True})
+
+    @app.delete("/api/contacts/<int:index>")
+    def api_remove_contact(index):
+        if not remove_contact(config.contacts_path, index):
             abort(404)
         return jsonify({"ok": True})
 
