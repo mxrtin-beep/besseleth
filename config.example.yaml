@@ -222,13 +222,15 @@ enrichment:
 
   # A separate pass, independent of the LLM extraction above: for orgs
   # that have no location at all (never mentioned in any item's text),
-  # tries to find its headquarters — see besseleth/web_lookup.py. Two
-  # tiers: Wikidata first (free, structured, but only covers orgs
-  # notable enough for an entry), then a general DuckDuckGo web search
-  # read by the local LLM for anything Wikidata misses (covers small/
-  # early-stage companies, at the cost of an LLM call — Ollama required
-  # for this tier). Runs every enrich call, bounded per run since a
-  # never-checked org costs a few requests; cached (found or not) so a
+  # tries to find its headquarters — see besseleth/web_lookup.py. Three
+  # tiers: Wikidata, then Wikipedia's own coordinates if Wikidata's
+  # property graph didn't resolve (this pair reliably covers real
+  # institutions — universities, labs, research institutes almost
+  # always have one or the other), then a general DuckDuckGo web search
+  # read by the local LLM for anything neither knows about (covers
+  # small/early-stage companies, at the cost of an LLM call — Ollama
+  # required for this tier). Runs every enrich call, bounded per run
+  # since a never-checked org costs a few requests; cached (found or not) so a
   # miss isn't re-queried every time.
   max_org_lookups_per_run: 8
   location_recheck_days: 30

@@ -314,10 +314,10 @@ def _backfill_org_locations(config: Config, db: DB) -> int:
     """Fills in a missing location for orgs that have none, independent
     of the LLM pass above (that one only ever knows what a given item's
     own text says, so an org whose location was never mentioned in any
-    item stays unlocated forever without this): tries a free Wikidata
-    lookup first, then a general web search read by the local LLM if
-    that comes back empty — see web_lookup.py's docstring for why in
-    that order. Bounded per run (enrichment.max_org_lookups_per_run,
+    item stays unlocated forever without this): tries a free Wikidata/
+    Wikipedia lookup first, then a general web search read by the local
+    LLM if that comes back empty — see web_lookup.py's docstring for why
+    in that order. Bounded per run (enrichment.max_org_lookups_per_run,
     shared across both tiers) and cached — found or not — so a miss
     isn't re-queried every run; a cached hit is reapplied for free if a
     newer item for the same org shows up without its own location.
