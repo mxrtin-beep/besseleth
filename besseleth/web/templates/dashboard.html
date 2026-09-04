@@ -173,28 +173,30 @@
   <div id="trendsPane" style="display:none">
     <div class="controls">
       <div class="dataset-toggle">
-        <button id="dsDevices" class="active">Devices</button><button id="dsCompanies">Companies</button>
+        <button id="dsDevices" class="active">Devices</button><button id="dsCompanies">Companies</button><button id="dsFdaTimeline">FDA timeline</button><button id="dsIpoTimeline">IPO timeline</button>
       </div>
-      <div>
-        <label for="xAxis">X axis</label>
-        <select id="xAxis"></select>
-      </div>
-      <div>
-        <label for="yAxis">Y axis</label>
-        <select id="yAxis"></select>
-      </div>
-      <div id="colorByWrap">
-        <label for="colorBy">Color by</label>
-        <select id="colorBy">
-          <option value="fda_status">FDA status</option>
-          <option value="org_type">Org type</option>
-          <option value="device_type">Device type</option>
-          <option value="material">Material</option>
-        </select>
+      <div id="axisControls">
+        <div>
+          <label for="xAxis">X axis</label>
+          <select id="xAxis"></select>
+        </div>
+        <div>
+          <label for="yAxis">Y axis</label>
+          <select id="yAxis"></select>
+        </div>
+        <div id="colorByWrap">
+          <label for="colorBy">Color by</label>
+          <select id="colorBy">
+            <option value="fda_status">FDA status</option>
+            <option value="org_type">Org type</option>
+            <option value="device_type">Device type</option>
+            <option value="material">Material</option>
+          </select>
+        </div>
       </div>
     </div>
     <div id="chart"></div>
-    <p class="hint">Hover a point for its details and source; click it to open the source link. This accumulates over time — every device/company you or device-suggest add stays here across every future report.</p>
+    <p class="hint" id="trendsHint">Hover a point for its details and source; click it to open the source link. This accumulates over time — every device/company you or device-suggest add stays here across every future report.</p>
     <table class="datatable" id="dataTable"></table>
   </div>
 
@@ -1021,43 +1023,61 @@ function renderPapers() {
       </tr>`).join('')}</tbody>`;
 }
 
-// --- Trends explorer (devices + companies) -------------------------------
+// --- Trends explorer (devices + companies + FDA/IPO timelines) -----------
 let metricsData = { numeric: [], categorical: [], company_numeric: [] };
 let devices = [];
 let companies = [];
+let fdaStages = [];
 let currentDataset = 'devices';
 
 async function loadTrends() {
-  const [metricsRes, devicesRes, companiesRes] = await Promise.all([
-    fetch('/api/metrics'), fetch('/api/devices'), fetch('/api/companies'),
+  const [metricsRes, devicesRes, companiesRes, stagesRes] = await Promise.all([
+    fetch('/api/metrics'), fetch('/api/devices'), fetch('/api/companies'), fetch('/api/trends/fda-stages'),
   ]);
   metricsData = await metricsRes.json();
   devices = await devicesRes.json();
   companies = await companiesRes.json();
+  fdaStages = await stagesRes.json();
 
   document.getElementById('dsDevices').onclick = () => switchDataset('devices');
   document.getElementById('dsCompanies').onclick = () => switchDataset('companies');
+  document.getElementById('dsFdaTimeline').onclick = () => switchDataset('fda_timeline');
+  document.getElementById('dsIpoTimeline').onclick = () => switchDataset('ipo_timeline');
   switchDataset('devices');
 }
+
+const TRENDS_HINTS = {
+  devices: 'Hover a point for its details and source; click it to open the source link. This accumulates over time — every device you or device-suggest add stays here across every future report.',
+  companies: 'Hover a point for its details and source; click it to open the source link. This accumulates over time.',
+  fda_timeline: 'Each line is one org’s devices, ordered by report date, plotted against the FDA stage ladder (see trends/fda_stages.py for what each rung means) — a rising line is regulatory progress; a flat one means no new dated report yet. Hover a point for the device and its exact fda_status text; click to open the source.',
+  ipo_timeline: 'One point per company that has gone public, plotted at its IPO date. Hover for the exchange/ticker; click to open the source that reported it.',
+};
 
 function switchDataset(which) {
   currentDataset = which;
   document.getElementById('dsDevices').classList.toggle('active', which === 'devices');
   document.getElementById('dsCompanies').classList.toggle('active', which === 'companies');
+  document.getElementById('dsFdaTimeline').classList.toggle('active', which === 'fda_timeline');
+  document.getElementById('dsIpoTimeline').classList.toggle('active', which === 'ipo_timeline');
+  document.getElementById('trendsHint').textContent = TRENDS_HINTS[which];
+
+  const isTimeline = which === 'fda_timeline' || which === 'ipo_timeline';
+  document.getElementById('axisControls').style.display = isTimeline ? 'none' : 'flex';
   document.getElementById('colorByWrap').style.display = which === 'devices' ? 'block' : 'none';
 
-  const xSel = document.getElementById('xAxis');
-  const ySel = document.getElementById('yAxis');
-  const numeric = which === 'devices' ? metricsData.numeric : metricsData.company_numeric;
-  const options = [metricsData.time_axis, ...numeric];
-  xSel.innerHTML = options.map(m => `<option value="${m.key}">${m.label}${m.unit ? ' (' + m.unit + ')' : ''}</option>`).join('');
-  ySel.innerHTML = numeric.map(m => `<option value="${m.key}">${m.label}${m.unit ? ' (' + m.unit + ')' : ''}</option>`).join('');
-  xSel.value = 'date_reported';
-  if (numeric.length) ySel.value = numeric[0].key;
-
-  xSel.onchange = renderChart;
-  ySel.onchange = renderChart;
-  document.getElementById('colorBy').onchange = renderChart;
+  if (!isTimeline) {
+    const xSel = document.getElementById('xAxis');
+    const ySel = document.getElementById('yAxis');
+    const numeric = which === 'devices' ? metricsData.numeric : metricsData.company_numeric;
+    const options = [metricsData.time_axis, ...numeric];
+    xSel.innerHTML = options.map(m => `<option value="${m.key}">${m.label}${m.unit ? ' (' + m.unit + ')' : ''}</option>`).join('');
+    ySel.innerHTML = numeric.map(m => `<option value="${m.key}">${m.label}${m.unit ? ' (' + m.unit + ')' : ''}</option>`).join('');
+    xSel.value = 'date_reported';
+    if (numeric.length) ySel.value = numeric[0].key;
+    xSel.onchange = renderChart;
+    ySel.onchange = renderChart;
+    document.getElementById('colorBy').onchange = renderChart;
+  }
   renderTable();
   renderChart();
 }
@@ -1088,6 +1108,9 @@ function renderChart() {
       'The table below still works. See README for how to vendor plotly.min.js locally.</p>';
     return;
   }
+  if (currentDataset === 'fda_timeline') return renderFdaTimeline();
+  if (currentDataset === 'ipo_timeline') return renderIpoTimeline();
+
   const xKey = document.getElementById('xAxis').value;
   const yKey = document.getElementById('yAxis').value;
   const colorBy = document.getElementById('colorBy').value;
@@ -1141,8 +1164,119 @@ function renderChart() {
   });
 }
 
+function renderFdaTimeline() {
+  const dated = devices.filter(d => d.date_reported);
+  if (!dated.length) {
+    Plotly.purge('chart');
+    document.getElementById('chart').innerHTML =
+      '<p class="hint">No dated device reports yet — devices need a date_reported and an FDA-status mention to show up here.</p>';
+    return;
+  }
+  const byOrg = {};
+  dated.forEach(d => (byOrg[d.org] ||= []).push(d));
+  Object.values(byOrg).forEach(rows => rows.sort((a, b) => a.date_reported.localeCompare(b.date_reported)));
+
+  const traces = Object.entries(byOrg).map(([org, rows]) => ({
+    x: rows.map(d => d.date_reported),
+    y: rows.map(d => d.fda_stage_rank),
+    text: rows.map(d => `${d.name}<br>${d.fda_status}`),
+    customdata: rows.map(d => d.source_url || ''),
+    mode: 'markers+lines',
+    type: 'scatter',
+    name: org,
+    marker: { size: 12, symbol: rows[0].org_type === 'academic' ? 'triangle-up' : 'circle' },
+    line: { shape: 'hv' },
+    hovertemplate: '%{text}<br>%{x}<extra>' + org + '</extra>',
+  }));
+
+  const layout = {
+    xaxis: { title: 'Date reported', type: 'date' },
+    yaxis: {
+      title: 'FDA stage',
+      tickvals: fdaStages.map(s => s.rank),
+      ticktext: fdaStages.map(s => s.label),
+      range: [-0.5, Math.max(...fdaStages.map(s => s.rank)) + 0.5],
+    },
+    margin: { t: 20, l: 160 },
+    legend: { orientation: 'h' },
+    hovermode: 'closest',
+    hoverlabel: { bgcolor: '#1e1e1eee', bordercolor: '#4a90d9', font: { color: '#f5f5f5', size: 12 } },
+  };
+  Plotly.newPlot('chart', traces, layout, { responsive: true }).then(gd => {
+    gd.removeAllListeners && gd.removeAllListeners('plotly_click');
+    gd.on('plotly_click', (ev) => {
+      const url = ev.points[0].customdata;
+      if (url) window.open(url, '_blank');
+    });
+  });
+}
+
+function renderIpoTimeline() {
+  const ipoed = companies.filter(c => c.ipo_date).sort((a, b) => a.ipo_date.localeCompare(b.ipo_date));
+  if (!ipoed.length) {
+    Plotly.purge('chart');
+    document.getElementById('chart').innerHTML =
+      '<p class="hint">No IPOs tracked yet — set ipo_date on a company (via enrichment picking one up from a scraped ' +
+      'item, or by hand) to see it here.</p>';
+    return;
+  }
+  const trace = {
+    x: ipoed.map(c => c.ipo_date),
+    y: ipoed.map(c => c.name),
+    text: ipoed.map(c => `${c.name}${c.stock_exchange ? ' — ' + c.stock_exchange : ''}${c.stock_ticker ? ': ' + c.stock_ticker : ''}`),
+    customdata: ipoed.map(c => c.source_url || ''),
+    mode: 'markers',
+    type: 'scatter',
+    marker: { size: 14, color: '#4a90d9' },
+    hovertemplate: '%{text}<br>%{x}<extra></extra>',
+  };
+  const layout = {
+    xaxis: { title: 'IPO date', type: 'date' },
+    yaxis: { title: '', automargin: true },
+    margin: { t: 20, l: 160 },
+    hovermode: 'closest',
+    hoverlabel: { bgcolor: '#1e1e1eee', bordercolor: '#4a90d9', font: { color: '#f5f5f5', size: 12 } },
+  };
+  Plotly.newPlot('chart', [trace], layout, { responsive: true }).then(gd => {
+    gd.removeAllListeners && gd.removeAllListeners('plotly_click');
+    gd.on('plotly_click', (ev) => {
+      const url = ev.points[0].customdata;
+      if (url) window.open(url, '_blank');
+    });
+  });
+}
+
 function renderTable() {
   const table = document.getElementById('dataTable');
+  if (currentDataset === 'fda_timeline') {
+    const dated = devices.filter(d => d.date_reported).slice().sort((a, b) => b.date_reported.localeCompare(a.date_reported));
+    table.innerHTML = `
+      <thead><tr><th>Org</th><th>Device</th><th>Stage</th><th>FDA status (raw)</th><th>Reported</th><th>Source</th></tr></thead>
+      <tbody>${dated.map(d => `
+        <tr>
+          <td>${d.org}</td>
+          <td>${d.name}</td>
+          <td>${d.fda_stage_label}</td>
+          <td>${d.fda_status}</td>
+          <td>${d.date_reported}</td>
+          <td>${d.source_url ? `<a href="${d.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
+        </tr>`).join('')}</tbody>`;
+    return;
+  }
+  if (currentDataset === 'ipo_timeline') {
+    const ipoed = companies.filter(c => c.ipo_date).slice().sort((a, b) => b.ipo_date.localeCompare(a.ipo_date));
+    table.innerHTML = `
+      <thead><tr><th>Company</th><th>IPO date</th><th>Exchange</th><th>Ticker</th><th>Source</th></tr></thead>
+      <tbody>${ipoed.map(c => `
+        <tr>
+          <td>${c.name}</td>
+          <td>${c.ipo_date}</td>
+          <td>${c.stock_exchange || ''}</td>
+          <td>${c.stock_ticker || ''}</td>
+          <td>${c.source_url ? `<a href="${c.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
+        </tr>`).join('')}</tbody>`;
+    return;
+  }
   if (currentDataset === 'devices') {
     table.innerHTML = `
       <thead><tr><th>Device</th><th>Org</th><th>Type</th><th>FDA status</th><th>Metrics</th><th>Reported</th><th>Source</th></tr></thead>

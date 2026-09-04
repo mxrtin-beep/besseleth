@@ -629,6 +629,30 @@ class DB:
         self.conn.commit()
         return True
 
+    def set_company_ipo(self, name: str, ipo_date: str, stock_exchange: str) -> None:
+        """Records that a company went public — inserts a bare row if
+        it's brand new (an IPO is newsworthy enough to add on its own,
+        unlike auto_upsert_company's funding-only trigger), but only
+        fills ipo_date/stock_exchange if not already set, so a
+        hand-corrected value is never clobbered by a later, possibly
+        secondhand mention of the same IPO."""
+        if not self.add_company(
+            name=name, stock_ticker="", stock_price=None, stock_price_updated_at="",
+            funding_total_usd=None, last_funding_round="", last_funding_date="",
+            ipo_date=ipo_date, stock_exchange=stock_exchange, is_public=1,
+            source_url="", notes="Auto-extracted by besseleth from a scraped item — verify before trusting.",
+            auto_extracted=1,
+        ):
+            self.conn.execute(
+                """UPDATE companies SET
+                       ipo_date = COALESCE(NULLIF(ipo_date, ''), ?),
+                       stock_exchange = COALESCE(NULLIF(stock_exchange, ''), ?),
+                       is_public = 1
+                   WHERE lower(name) = lower(?)""",
+                (ipo_date, stock_exchange, name),
+            )
+            self.conn.commit()
+
     def update_company(self, name: str, **fields: Any) -> None:
         if not fields:
             return

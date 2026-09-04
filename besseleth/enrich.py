@@ -48,7 +48,7 @@ from .config import Config, env
 from .db import DB
 from .feeds_store import load_feeds
 from .geocode import geocode
-from .trends.company_store import auto_upsert_company
+from .trends.company_store import auto_mark_ipo, auto_upsert_company
 from .trends.store import auto_append_device
 from . import summarizer as summarizer_mod
 
@@ -121,8 +121,11 @@ def _build_prompt(row, config: Config, context: str) -> str:
         '  "device_metrics": an object with any of these keys the text reports concrete numbers/values for — '
         f"{metric_keys}, {categorical_keys} — omit keys with no data, use {{}} if none reported\n"
         '  "company_funding": an object {"funding_total_usd": number or null, "last_funding_round": string or '
-        'null, "last_funding_date": "YYYY-MM-DD" or null} if this item reports a specific funding amount/round '
-        'for "org" — use {} if not a funding story\n\n'
+        'null, "last_funding_date": "YYYY-MM-DD" or null, "ipo_date": "YYYY-MM-DD" or null, "stock_exchange": '
+        'string or null} — funding_total_usd/last_funding_round/last_funding_date if this item reports a specific '
+        'funding amount/round for "org"; ipo_date/stock_exchange only if this item reports "org" actually going '
+        'public (an IPO that happened or a completed direct listing — e.g. "NASDAQ: XYZ" starts trading), NOT a '
+        'mere announcement/rumor of a planned future IPO — use {} if none of this applies\n\n'
         f"Item title: {row['title']}\nItem text: {(row['summary'] or '')[:1500]}\n\n"
         f"Other recent items on the same topic (for novelty comparison):\n{context}\n\n"
         "Respond with ONLY the JSON object, no other text."
@@ -406,6 +409,13 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
             last_funding_round=funding.get("last_funding_round") or "",
             last_funding_date=funding.get("last_funding_date") or "",
             source_url=row["url"] or "",
+        )
+    if org and funding.get("ipo_date"):
+        auto_mark_ipo(
+            config.companies_path,
+            name=org,
+            ipo_date=funding["ipo_date"],
+            stock_exchange=funding.get("stock_exchange") or "",
         )
 
     return True

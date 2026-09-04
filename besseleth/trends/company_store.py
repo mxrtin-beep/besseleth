@@ -132,6 +132,22 @@ def auto_upsert_company(
         db.close()
 
 
+def auto_mark_ipo(path: str | Path, name: str, ipo_date: str, stock_exchange: str) -> None:
+    """Records an IPO extracted from a scraped item — adds the company if
+    it's new, or fills in ipo_date/stock_exchange on an existing row only
+    if not already set (never overwrites a correction). Powers the
+    Trends tab's IPO timeline."""
+    if not name or not ipo_date:
+        return
+    from ..db import DB
+
+    db = DB(Path(path))
+    try:
+        db.set_company_ipo(name, ipo_date, stock_exchange or "")
+    finally:
+        db.close()
+
+
 def refresh_stock_prices(path: str | Path) -> list[str]:
     """Fetches current stock prices (free, no API key) for every company
     with a `stock_ticker` set, via Stooq's public CSV quote endpoint.

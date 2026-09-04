@@ -32,6 +32,7 @@ from ..pipeline import fetch_all
 from ..scheduler import SchedulerStatus, run_now, start_scheduler
 from ..scrapers.manual_drop import add_smart_item
 from ..trends.company_store import load_companies
+from ..trends.fda_stages import FDA_STAGES, stage_for
 from ..trends.store import load_devices
 
 
@@ -80,22 +81,32 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
     @app.get("/api/devices")
     def api_devices():
         devices = load_devices(config.devices_path, config.legacy_devices_yaml_path)
-        return jsonify(
-            [
+        result = []
+        for d in devices:
+            stage_rank, stage_label = stage_for(d.fda_status)
+            result.append(
                 {
                     "name": d.name,
                     "org": d.org,
                     "org_type": d.org_type,
                     "fda_status": d.fda_status or "unknown",
+                    "fda_stage_rank": stage_rank,
+                    "fda_stage_label": stage_label,
                     "metrics": d.metrics,
                     "source_url": d.source_url,
                     "date_reported": d.date_reported,
                     "notes": d.notes,
                     "auto_extracted": d.auto_extracted,
                 }
-                for d in devices
-            ]
-        )
+            )
+        return jsonify(result)
+
+    @app.get("/api/trends/fda-stages")
+    def api_fda_stages():
+        # The canonical stage ladder itself (rank + label), for the
+        # Trends tab's FDA timeline to build a shared, ordered Y axis
+        # from — see trends/fda_stages.py for what each rung means.
+        return jsonify([{"rank": rank, "label": label} for rank, label in FDA_STAGES])
 
     @app.get("/api/companies")
     def api_companies():
