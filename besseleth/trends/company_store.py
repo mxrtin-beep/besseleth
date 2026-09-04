@@ -14,6 +14,16 @@ citing the specific article, never a homepage) and adds them via
 `auto_upsert_company()` — which only ever adds brand-new companies, never
 overwrites an existing row (hand-edited or previously auto-extracted), so
 nothing you've corrected gets clobbered on the next fetch.
+
+Deliberately NOT fuzzy-matched at insert time: two company names that
+are a couple of edits apart are just as often two real, distinct
+companies (e.g. "Precision Neuroscience" vs. "Precision Neurotech",
+"Neurable" vs. "Neurala") as they are one company typo'd two ways — a
+similarity score alone can't tell those apart, so guessing wrong would
+silently fold one company's data into another's with no record it
+happened. find_possible_duplicate_companies() below surfaces likely
+typos (e.g. "Axfot" for "Axoft") for a human to actually look at and
+merge — via merge_company_pair() — instead of merging on its own.
 """
 from __future__ import annotations
 
@@ -21,33 +31,19 @@ import difflib
 from dataclasses import dataclass
 from pathlib import Path
 
-# How close two names need to be to treat them as the same company typed/
-# extracted two different ways — catches an LLM typo (e.g. "Axfot" for
-# "Axoft") that exact/squash matching misses since the letters aren't just
-# differently cased or punctuated, they're actually rearranged. The length
-# guard keeps two short-but-unrelated names ("3M" vs "AI") from colliding
-# just because a 2-character SequenceMatcher ratio is noisy.
+# How close two names need to be to flag them as a *possible* typo of one
+# another for a human to review — never used to auto-merge (see module
+# docstring). Deliberately conservative: a real false negative here (a
+# typo that doesn't get flagged) just means you spot it yourself later;
+# a false positive would suggest merging two unrelated companies.
 _FUZZY_MATCH_RATIO = 0.78
-_FUZZY_MATCH_MAX_LEN_DIFF = 3
+_FUZZY_MATCH_MAX_LEN_DIFF = 2
 
 
 def _is_fuzzy_match(a: str, b: str) -> bool:
     if abs(len(a) - len(b)) > _FUZZY_MATCH_MAX_LEN_DIFF:
         return False
     return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio() >= _FUZZY_MATCH_RATIO
-
-
-def _resolve_existing_name(name: str, db) -> str:
-    """Reuses an existing company's exact spelling if `name` is a close
-    fuzzy match to one already stored — otherwise returns `name`
-    unchanged. db.get_company() already handles exact/case-insensitive
-    matches; this only kicks in for a near-miss like a misspelling."""
-    if db.get_company(name):
-        return name
-    for row in db.companies():
-        if _is_fuzzy_match(name, row["name"]):
-            return row["name"]
-    return name
 
 
 @dataclass
@@ -142,7 +138,6 @@ def auto_upsert_company(
 
     db = DB(Path(path))
     try:
-        name = _resolve_existing_name(name, db)
         return db.add_company(
             name=name,
             stock_ticker="",
@@ -173,39 +168,43 @@ def auto_mark_ipo(path: str | Path, name: str, ipo_date: str, stock_exchange: st
 
     db = DB(Path(path))
     try:
-        name = _resolve_existing_name(name, db)
         db.set_company_ipo(name, ipo_date, stock_exchange or "")
     finally:
         db.close()
 
 
-def merge_fuzzy_duplicate_companies(path: str | Path) -> int:
-    """Retroactive sweep: clusters every currently-stored company by the
-    same fuzzy-match rule new entries are resolved against (see
-    _resolve_existing_name), and folds each duplicate into whichever
-    name in the cluster is used as `org` more often elsewhere — the same
-    "most-used spelling wins" tiebreak enrich.py uses for orgs. Fixes a
-    typo'd duplicate (e.g. "Axfot"/"Axoft") that slipped in before this
-    fuzzy check existed. Returns how many rows were merged away."""
+def find_possible_duplicate_companies(path: str | Path) -> list[tuple[str, str, float]]:
+    """Flags pairs of stored companies whose names are close enough to be
+    a typo of each other (e.g. "Axfot"/"Axoft") — for a human to look at
+    and decide, via merge_company_pair() below, NOT an automatic merge:
+    see the module docstring for why a similarity score alone can't
+    reliably tell a typo apart from two real, similarly-named companies.
+    Returns (name_a, name_b, ratio) tuples, highest ratio first."""
     from ..db import DB
 
     db = DB(Path(path))
     try:
         names = [r["name"] for r in db.companies()]
-        item_counts = db.org_item_counts()
-        merged = 0
-        dropped: set[str] = set()
+        candidates = []
         for i, name in enumerate(names):
-            if name in dropped:
-                continue
             for other in names[i + 1 :]:
-                if other in dropped or not _is_fuzzy_match(name, other):
-                    continue
-                keep, drop = sorted((name, other), key=lambda n: item_counts.get(n, 0), reverse=True)
-                db.merge_company(keep_name=keep, drop_name=drop)
-                dropped.add(drop)
-                merged += 1
-        return merged
+                if _is_fuzzy_match(name, other):
+                    candidates.append((name, other, difflib.SequenceMatcher(None, name.lower(), other.lower()).ratio()))
+        candidates.sort(key=lambda c: c[2], reverse=True)
+        return candidates
+    finally:
+        db.close()
+
+
+def merge_company_pair(path: str | Path, keep_name: str, drop_name: str) -> None:
+    """Explicit, human-requested merge — the dashboard calls this when
+    you confirm two flagged companies (see find_possible_duplicate_companies)
+    are actually the same one. Never called automatically."""
+    from ..db import DB
+
+    db = DB(Path(path))
+    try:
+        db.merge_company(keep_name=keep_name, drop_name=drop_name)
     finally:
         db.close()
 

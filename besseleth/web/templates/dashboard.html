@@ -178,6 +178,11 @@
     </div>
     <div id="chart"></div>
     <p class="hint" id="trendsHint">Hover a point for its details and source; click it to open the source link. This accumulates over time — every device/company you or device-suggest add stays here across every future report.</p>
+    <div id="possibleDupesBox" style="display:none; margin-bottom:1rem; padding:.75rem 1rem; border:1px solid #e0763666; border-radius:8px; background:#e0763611;">
+      <strong style="font-size:.9rem;">Possible duplicate companies</strong>
+      <p class="hint" style="margin:.3rem 0 .6rem;">Flagged by name similarity only — not merged automatically, since a similar name is just as often two real, different companies. Check both before merging.</p>
+      <div id="possibleDupesList"></div>
+    </div>
     <table class="datatable" id="dataTable"></table>
   </div>
 
@@ -1003,14 +1008,18 @@ let companies = [];
 let fdaStages = [];
 let currentDataset = 'devices';
 
+let possibleDupes = [];
+
 async function loadTrends() {
-  const [metricsRes, devicesRes, companiesRes, stagesRes] = await Promise.all([
+  const [metricsRes, devicesRes, companiesRes, stagesRes, dupesRes] = await Promise.all([
     fetch('/api/metrics'), fetch('/api/devices'), fetch('/api/companies'), fetch('/api/trends/fda-stages'),
+    fetch('/api/companies/possible-duplicates'),
   ]);
   metricsData = await metricsRes.json();
   devices = await devicesRes.json();
   companies = await companiesRes.json();
   fdaStages = await stagesRes.json();
+  possibleDupes = await dupesRes.json();
 
   document.getElementById('dsDevices').onclick = () => switchDataset('devices');
   document.getElementById('dsCompanies').onclick = () => switchDataset('companies');
@@ -1051,8 +1060,41 @@ function switchDataset(which) {
     ySel.onchange = renderChart;
     document.getElementById('colorBy').onchange = renderChart;
   }
+  document.getElementById('possibleDupesBox').style.display = which === 'companies' && possibleDupes.length ? 'block' : 'none';
+  if (which === 'companies') renderPossibleDupes();
   renderTable();
   renderChart();
+}
+
+function renderPossibleDupes() {
+  document.getElementById('possibleDupesList').innerHTML = possibleDupes.map((d, i) => `
+    <div style="display:flex; align-items:center; gap:.6rem; padding:.3rem 0; font-size:.9rem;">
+      <span>${d.a}</span><span class="hint">vs</span><span>${d.b}</span>
+      <span class="hint">(${Math.round(d.ratio * 100)}% similar)</span>
+      <button class="btn" style="padding:.2rem .6rem; font-size:.8rem;" data-i="${i}" data-keep="a">Keep "${d.a}"</button>
+      <button class="btn" style="padding:.2rem .6rem; font-size:.8rem;" data-i="${i}" data-keep="b">Keep "${d.b}"</button>
+      <button class="btn" style="padding:.2rem .6rem; font-size:.8rem; opacity:.6;" data-i="${i}" data-keep="neither">Not duplicates</button>
+    </div>`).join('');
+  document.querySelectorAll('#possibleDupesList button').forEach(btn => {
+    btn.onclick = async () => {
+      const dupe = possibleDupes[Number(btn.dataset.i)];
+      if (btn.dataset.keep !== 'neither') {
+        const keep = btn.dataset.keep === 'a' ? dupe.a : dupe.b;
+        const drop = btn.dataset.keep === 'a' ? dupe.b : dupe.a;
+        await fetch('/api/companies/merge', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ keep, drop }),
+        });
+        const companiesRes = await fetch('/api/companies');
+        companies = await companiesRes.json();
+      }
+      possibleDupes = possibleDupes.filter((_, i) => i !== Number(btn.dataset.i));
+      document.getElementById('possibleDupesBox').style.display = possibleDupes.length ? 'block' : 'none';
+      renderPossibleDupes();
+      renderTable();
+      renderChart();
+    };
+  });
 }
 
 function allMetricsMeta() {

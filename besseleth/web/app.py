@@ -31,7 +31,7 @@ from ..feeds_store import add_feed, load_feeds, remove_feed
 from ..pipeline import fetch_all
 from ..scheduler import SchedulerStatus, run_now, start_scheduler
 from ..scrapers.manual_drop import add_smart_item
-from ..trends.company_store import load_companies
+from ..trends.company_store import find_possible_duplicate_companies, load_companies, merge_company_pair
 from ..trends.fda_stages import FDA_STAGES, stage_for
 from ..trends.store import load_devices
 
@@ -131,6 +131,23 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
                 for c in companies
             ]
         )
+
+    @app.get("/api/companies/possible-duplicates")
+    def api_possible_duplicate_companies():
+        # Flagged, never auto-merged — see company_store's module
+        # docstring for why a name-similarity score alone can't be
+        # trusted to decide two companies are the same one.
+        pairs = find_possible_duplicate_companies(config.companies_path)
+        return jsonify([{"a": a, "b": b, "ratio": round(ratio, 2)} for a, b, ratio in pairs])
+
+    @app.post("/api/companies/merge")
+    def api_merge_companies():
+        payload = request.get_json(force=True) or {}
+        keep, drop = payload.get("keep"), payload.get("drop")
+        if not keep or not drop:
+            return jsonify({"ok": False, "message": "Both 'keep' and 'drop' are required."}), 400
+        merge_company_pair(config.companies_path, keep_name=keep, drop_name=drop)
+        return jsonify({"ok": True})
 
     @app.get("/api/jobs")
     def api_jobs():

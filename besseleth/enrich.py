@@ -695,18 +695,23 @@ def enrich_items_detailed(config: Config, db: DB) -> dict:
     if renamed:
         print(f"[enrich] Merged {renamed} item(s) into an existing org's canonical spelling (casing/spacing variants).")
 
-    # Same idea, for the devices/companies tables: a device row that's
-    # just the org's own name (an older bug — see _enrich_one's
-    # device_name gate) never belonged on the FDA timeline, and two
-    # companies that are really the same one typed/extracted two ways
-    # (e.g. "Axfot" for "Axoft") shouldn't be two rows on the funding chart.
+    # A device row that's just the org's own name (an older bug — see
+    # _enrich_one's device_name gate) never belonged on the FDA timeline.
+    # Safe to auto-remove: unlike a company-name typo, "name == org" is
+    # unambiguous, no judgment call involved.
     bogus_devices = db.delete_bogus_devices()
     if bogus_devices:
         print(f"[enrich] Removed {bogus_devices} device row(s) whose 'name' was just the org's own name.")
 
-    merged_companies = company_store.merge_fuzzy_duplicate_companies(config.companies_path)
-    if merged_companies:
-        print(f"[enrich] Merged {merged_companies} near-duplicate company row(s) (likely a typo'd extraction).")
+    # NOT auto-merged, deliberately: two similar company names ("Precision
+    # Neuroscience" vs. "Precision Neurotech") are just as often two real
+    # companies as one typo'd twice, and a wrong auto-merge would silently
+    # fold one company's data into another's. This only flags candidates
+    # for a human to confirm — see find_possible_duplicate_companies's
+    # docstring — surfaced in the dashboard's Trends tab, never merged here.
+    possible_dupes = company_store.find_possible_duplicate_companies(config.companies_path)
+    if possible_dupes:
+        print(f"[enrich] {len(possible_dupes)} possible duplicate company pair(s) flagged for review in the dashboard.")
 
     dated_companies = company_store.backfill_missing_funding_dates(config.companies_path)
     if dated_companies:
