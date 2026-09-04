@@ -38,10 +38,24 @@ class Config:
 
     @property
     def devices_path(self) -> Path:
-        return Path(self.raw.get("trends", {}).get("devices_path", "devices.yaml"))
+        """Devices/companies live in the main sqlite db now (see db.py) —
+        a few data points didn't need their own hand-copied YAML file,
+        and a sqlite table gets new columns via migration instead of
+        needing devices.example.yaml re-copied by hand. This still
+        returns the *db* path; legacy_devices_yaml_path below is the old
+        file, imported once (see trends/store.py) if you have one."""
+        return self.db_path
 
     @property
     def companies_path(self) -> Path:
+        return self.db_path
+
+    @property
+    def legacy_devices_yaml_path(self) -> Path:
+        return Path(self.raw.get("trends", {}).get("devices_path", "devices.yaml"))
+
+    @property
+    def legacy_companies_yaml_path(self) -> Path:
         return Path(self.raw.get("trends", {}).get("companies_path", "companies.yaml"))
 
     @property

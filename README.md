@@ -24,10 +24,12 @@ A weekly industry-briefing bot. Point it at an industry (e.g.
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp config.example.yaml config.yaml
-cp devices.example.yaml devices.yaml       # for the trends feature — optional
-cp companies.example.yaml companies.yaml   # for company/business tracking — optional
 # edit config.yaml: industry keywords, contacts, feeds, watchlists
 ```
+
+Devices and companies (the trends feature) live in the same sqlite db as
+everything else now — add entries via the dashboard's Trends tab, no
+file to copy.
 
 Optional — for local LLM summaries:
 

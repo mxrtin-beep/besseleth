@@ -77,7 +77,58 @@ CREATE TABLE IF NOT EXISTS org_location_cache (
     lon REAL,
     checked_at TEXT NOT NULL
 );
+
+-- Devices/systems tracked over time (trends/store.py) — e.g. for
+-- neurotech, each BCI's information transfer rate, implant longevity,
+-- FDA regulatory status. Used to live in a hand-copied devices.yaml;
+-- moved here so (a) new metric columns show up automatically instead of
+-- needing devices.example.yaml re-copied by hand, and (b) the same
+-- device can gain a *new* dated row as its story develops (a later FDA
+-- designation, a new metric reading) rather than being a single
+-- never-updated entry — that's what makes a real timeline possible.
+-- One row per (name, org, date_reported); auto-extraction only skips an
+-- exact repeat of that triple, not the device itself.
+CREATE TABLE IF NOT EXISTS devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    org TEXT NOT NULL,
+    org_type TEXT,                  -- industry | academic
+    fda_status TEXT,
+    metrics_json TEXT,              -- {"metric_key": number, ...}
+    source_url TEXT,
+    date_reported TEXT,
+    notes TEXT,
+    auto_extracted INTEGER DEFAULT 0,
+    recorded_at TEXT NOT NULL        -- when this row was captured (distinct from date_reported)
+);
+CREATE INDEX IF NOT EXISTS idx_devices_name_org ON devices(name, org);
+
+-- Company-level business metrics (trends/company_store.py) — funding,
+-- stock price, IPO status. Same rationale as `devices` for living here
+-- instead of companies.yaml. One row per company, kept up to date in
+-- place (unlike devices, a company isn't a timeline of reports).
+CREATE TABLE IF NOT EXISTS companies (
+    name TEXT PRIMARY KEY,
+    stock_ticker TEXT,
+    stock_price REAL,
+    stock_price_updated_at TEXT,
+    funding_total_usd REAL,
+    last_funding_round TEXT,
+    last_funding_date TEXT,
+    ipo_date TEXT,                  -- ISO8601 date, if it's gone public
+    stock_exchange TEXT,            -- e.g. "NASDAQ" — set once ipo_date is
+    is_public INTEGER DEFAULT 0,
+    source_url TEXT,
+    notes TEXT,
+    auto_extracted INTEGER DEFAULT 0
+);
 """
+
+# Columns added after the initial release to `devices`/`companies` —
+# same auto-migration idiom as ENRICHMENT_COLUMNS, for the same reason:
+# a new metric shouldn't require anyone to re-copy an example file.
+DEVICE_COLUMNS: dict[str, str] = {}
+COMPANY_COLUMNS: dict[str, str] = {}
 
 # Columns added after the initial release — migrated in with ALTER TABLE
 # (each guarded individually so an existing DB upgrades in place).
@@ -134,6 +185,14 @@ class DB:
         for col, sqltype in ENRICHMENT_COLUMNS.items():
             if col not in existing:
                 self.conn.execute(f"ALTER TABLE items ADD COLUMN {col} {sqltype}")
+        existing = {row[1] for row in self.conn.execute("PRAGMA table_info(devices)")}
+        for col, sqltype in DEVICE_COLUMNS.items():
+            if col not in existing:
+                self.conn.execute(f"ALTER TABLE devices ADD COLUMN {col} {sqltype}")
+        existing = {row[1] for row in self.conn.execute("PRAGMA table_info(companies)")}
+        for col, sqltype in COMPANY_COLUMNS.items():
+            if col not in existing:
+                self.conn.execute(f"ALTER TABLE companies ADD COLUMN {col} {sqltype}")
 
     def close(self):
         self.conn.close()
@@ -509,3 +568,74 @@ class DB:
         placeholders = ",".join("?" for _ in sources)
         q = f"SELECT * FROM items WHERE source IN ({placeholders}) ORDER BY published_at DESC"
         return list(self.conn.execute(q, sources).fetchall())
+
+    # --- devices/companies (trends) -------------------------------------
+
+    def devices(self) -> list[sqlite3.Row]:
+        self.conn.row_factory = sqlite3.Row
+        return list(self.conn.execute("SELECT * FROM devices ORDER BY date_reported, id").fetchall())
+
+    def device_exists(self, name: str, org: str, date_reported: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM devices WHERE lower(name) = lower(?) AND lower(org) = lower(?) AND date_reported = ?",
+            (name, org, date_reported),
+        ).fetchone()
+        return row is not None
+
+    def add_device(
+        self,
+        name: str,
+        org: str,
+        org_type: str,
+        fda_status: str,
+        metrics_json: str,
+        source_url: str,
+        date_reported: str,
+        notes: str,
+        auto_extracted: bool,
+    ) -> int:
+        cur = self.conn.execute(
+            """INSERT INTO devices
+               (name, org, org_type, fda_status, metrics_json, source_url, date_reported, notes, auto_extracted, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                name, org, org_type, fda_status, metrics_json, source_url, date_reported, notes,
+                1 if auto_extracted else 0, datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def companies(self) -> list[sqlite3.Row]:
+        self.conn.row_factory = sqlite3.Row
+        return list(self.conn.execute("SELECT * FROM companies ORDER BY name").fetchall())
+
+    def get_company(self, name: str) -> sqlite3.Row | None:
+        self.conn.row_factory = sqlite3.Row
+        return self.conn.execute("SELECT * FROM companies WHERE lower(name) = lower(?)", (name,)).fetchone()
+
+    def add_company(self, **fields: Any) -> bool:
+        """Inserts a new company row if `fields['name']` doesn't already
+        exist (case-insensitive) — mirrors the old auto_upsert_company's
+        never-overwrite semantics. Returns True if it inserted."""
+        if self.get_company(fields["name"]):
+            return False
+        cols = list(fields.keys())
+        placeholders = ",".join("?" for _ in cols)
+        self.conn.execute(
+            f"INSERT INTO companies ({','.join(cols)}) VALUES ({placeholders})",
+            [fields[c] for c in cols],
+        )
+        self.conn.commit()
+        return True
+
+    def update_company(self, name: str, **fields: Any) -> None:
+        if not fields:
+            return
+        cols = list(fields.keys())
+        set_clause = ", ".join(f"{c} = ?" for c in cols)
+        self.conn.execute(
+            f"UPDATE companies SET {set_clause} WHERE lower(name) = lower(?)",
+            [fields[c] for c in cols] + [name],
+        )
+        self.conn.commit()

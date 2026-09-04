@@ -187,10 +187,10 @@ enrichment:
   # surprising it is vs. other recent items on the same topic) — this is
   # what powers the dashboard's filterable Papers table and Map tab.
   # When an item reports concrete numbers, the same pass also drafts and
-  # appends entries to devices.yaml (metrics) and companies.yaml
-  # (funding) automatically — additive only, never overwrites an
-  # existing entry, and every auto-added row is tagged auto_extracted:
-  # true so it's visibly distinct from a hand-verified one. Bounded per
+  # adds rows to the devices/companies tables in the db (metrics/funding)
+  # automatically — additive only, never overwrites an existing entry,
+  # and every auto-added row is tagged auto_extracted: true so it's
+  # visibly distinct from a hand-verified one. Bounded per
   # run so one fetch cycle can't trigger unbounded LLM calls; catches up
   # over successive fetches if there's a backlog, or run
   # `besseleth.cli enrich --all` to process everything at once. Requires
@@ -290,11 +290,11 @@ schedule:
   report_cron: "0 8 * * MON"   # 5-field cron (UTC) for rendering the weekly report
 
 trends:
-  # Manually (or LLM-drafted, then human-confirmed) maintained datasets —
-  # see besseleth/trends/store.py. Copy devices.example.yaml/
-  # companies.example.yaml to devices.yaml/companies.yaml and edit as you
-  # read papers/news. Both accumulate over time — nothing here is ever
-  # replaced by a later report, only appended to (or edited by you).
+  # Manually (via the dashboard's Trends tab) or LLM-drafted, then
+  # auto-added — see besseleth/trends/store.py. Both datasets live in the
+  # main sqlite db now, not a YAML file; these two keys only matter if
+  # you have an old devices.yaml/companies.yaml from before that move —
+  # they're imported once, automatically, then safe to delete.
   devices_path: "devices.yaml"
   companies_path: "companies.yaml"
   charts_dir: "reports/trends"

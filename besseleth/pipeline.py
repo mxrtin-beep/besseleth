@@ -174,8 +174,8 @@ def generate_weekly_report(config: Config, db: DB) -> str:
     max_n = report_cfg.get("max_items_per_section", 12)
     days_back = config.source("news").get("days_back", 8)
 
-    trend_devices = trend_store.load_devices(config.devices_path)
-    trend_companies = company_store.load_companies(config.companies_path)
+    trend_devices = trend_store.load_devices(config.devices_path, config.legacy_devices_yaml_path)
+    trend_companies = company_store.load_companies(config.companies_path, config.legacy_companies_yaml_path)
     trend_charts: list = []
     if trend_devices:
         charts_dir = config.raw.get("trends", {}).get("charts_dir", "reports/trends")

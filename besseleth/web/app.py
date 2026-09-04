@@ -79,7 +79,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
 
     @app.get("/api/devices")
     def api_devices():
-        devices = load_devices(config.devices_path)
+        devices = load_devices(config.devices_path, config.legacy_devices_yaml_path)
         return jsonify(
             [
                 {
@@ -99,7 +99,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
 
     @app.get("/api/companies")
     def api_companies():
-        companies = load_companies(config.companies_path)
+        companies = load_companies(config.companies_path, config.legacy_companies_yaml_path)
         return jsonify(
             [
                 {
@@ -110,6 +110,9 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
                     "funding_total_usd": c.funding_total_usd,
                     "last_funding_round": c.last_funding_round,
                     "last_funding_date": c.last_funding_date,
+                    "ipo_date": c.ipo_date,
+                    "stock_exchange": c.stock_exchange,
+                    "is_public": c.is_public,
                     "source_url": c.source_url,
                     "notes": c.notes,
                     "auto_extracted": c.auto_extracted,
@@ -181,15 +184,15 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
     def api_orgs():
         # Every org besseleth has ever extracted, not just the ones that
         # geocoded (that subset is /api/locations, for the map). Enriched
-        # with funding/stock data from companies.yaml where the names
-        # match, so this one table covers labs, academic/gov orgs, and
-        # funded companies alike.
+        # with funding/stock data from the companies table where the
+        # names match, so this one table covers labs, academic/gov orgs,
+        # and funded companies alike.
         db = DB(config.db_path)
         try:
             rows = db.orgs()
         finally:
             db.close()
-        companies_by_name = {c.name.lower(): c for c in load_companies(config.companies_path)}
+        companies_by_name = {c.name.lower(): c for c in load_companies(config.companies_path, config.legacy_companies_yaml_path)}
         result = []
         for r in rows:
             company = companies_by_name.get((r["org"] or "").lower())
