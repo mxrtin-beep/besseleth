@@ -15,8 +15,8 @@ from .db import Item
 
 
 def _extractive_fallback(items: list[Item], max_sentences: int = 3) -> str:
-    text = " ".join(f"{i.title}." for i in items[:max_sentences])
-    return text or "No notable developments this week."
+    parts = [f"[{i.title}]({i.url})." if i.url else f"{i.title}." for i in items[:max_sentences]]
+    return " ".join(parts) or "No notable developments this week."
 
 
 def _ollama_generate(prompt: str, ollama_url: str, model: str, timeout: int = 120, num_thread: int | None = None) -> str | None:
@@ -54,14 +54,19 @@ def summarize_section(items: list[Item], section_name: str, industry_name: str, 
     max_items = cfg.get("max_items_per_summary_call", 8)
 
     bullet_list = "\n".join(
-        f"- {i.title}: {i.summary[:400]}" for i in items[:max_items]
+        f"- {i.title} ({i.url or 'no link'}): {i.summary[:400]}" for i in items[:max_items]
     )
     prompt = (
         f"You are writing the '{section_name}' section of a weekly industry "
         f"briefing about {industry_name} for a busy professional. Summarize the "
-        f"following {len(items[:max_items])} items into a tight, informative "
-        f"paragraph (4-6 sentences). Mention the most important 2-3 developments "
-        f"by name. Be factual, no fluff, no preamble like 'Here is a summary'.\n\n"
+        f"following {len(items[:max_items])} items into a tight, flowing paragraph "
+        f"(4-6 sentences) that reads as prose — not a list, and no separate list "
+        f"or bullet points after it. Whenever you mention a specific item by "
+        f"name, cite it as an inline markdown link using its EXACT url from "
+        f'below, e.g. "Neuralink [announced](https://example.com/article) a new '
+        f'device" — never invent a url, and skip the citation for an item marked '
+        f"'no link'. Mention the most important 2-3 developments by name/link. "
+        f"Be factual, no fluff, no preamble like 'Here is a summary'.\n\n"
         f"Items:\n{bullet_list}\n\nSummary:"
     )
     result = _ollama_generate(prompt, ollama_url, model, num_thread=cfg.get("num_thread"))
