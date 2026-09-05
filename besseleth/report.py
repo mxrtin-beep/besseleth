@@ -143,8 +143,16 @@ def build_report(
     news_summary = summarizer.summarize_section(news_items, "News", industry_name, summarizer_cfg)
     blog_summary = summarizer.summarize_section(blog_items, "Blogs", industry_name, summarizer_cfg)
 
+    def _relevance_tag(item: Item) -> str:
+        # matched_contact/matched_company always come straight from your
+        # own contacts.yaml/config.yaml entry, never a placeholder — so
+        # this already renders whoever you actually added.
+        if item.matched_reason == "school":
+            return f"_Relevant because **{item.matched_contact}** went to **{item.matched_company}**._"
+        return f"_Relevant because **{item.matched_contact}** works at **{item.matched_company}**._"
+
     personalized_lines = "\n".join(
-        f"- **{item.title}**" + (f" ([link]({item.url}))" if item.url else "")
+        f"- **{item.title}**" + (f" ([link]({item.url}))" if item.url else "") + f"\n  {_relevance_tag(item)}"
         for item in personalized_items
     )
 
