@@ -9,7 +9,9 @@ report cadence:
     (default: every 6 hours).
   - `report_cron` — a standard 5-field cron expression for when to render
     the weekly report from whatever's accumulated since the last one
-    (default: Monday 8am — `0 8 * * MON`).
+    (default: Monday 4am — `0 4 * * MON`). Interpreted in `schedule.timezone`
+    if set, otherwise in the host's local timezone — so the default means
+    4am local time, overnight, rather than 4am UTC.
 
 Status (last run time, last error, next scheduled run) is kept in a small
 in-memory object so besseleth.web.app can show it; it's not persisted, so
@@ -22,6 +24,7 @@ import threading
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -130,6 +133,18 @@ def _initial_fetch_delay(config: Config, fetch_hours: float) -> datetime:
     return due_at if due_at > now else now
 
 
+def _resolve_timezone(schedule_cfg: dict):
+    """`schedule.timezone` names an IANA zone (e.g. "America/Los_Angeles").
+    Left unset, we fall back to whatever the host's local timezone is
+    (rather than UTC) so a plain time like `report_cron: "0 4 * * MON"`
+    means 4am where besseleth is actually running."""
+    tz_name = schedule_cfg.get("timezone")
+    if tz_name:
+        return ZoneInfo(tz_name)
+    local_tz = datetime.now().astimezone().tzinfo
+    return local_tz or timezone.utc
+
+
 def start_scheduler(config: Config) -> tuple[BackgroundScheduler | None, SchedulerStatus]:
     """Starts the background jobs per `schedule` in config.yaml. Returns
     (scheduler_or_None, status) — scheduler is None if schedule.enabled is
@@ -143,15 +158,16 @@ def start_scheduler(config: Config) -> tuple[BackgroundScheduler | None, Schedul
         return None, status
 
     fetch_hours = schedule_cfg.get("fetch_interval_hours", 6)
-    report_cron = schedule_cfg.get("report_cron", "0 8 * * MON")
+    report_cron = schedule_cfg.get("report_cron", "0 4 * * MON")
+    tz = _resolve_timezone(schedule_cfg)
 
-    scheduler = BackgroundScheduler(timezone="UTC")
+    scheduler = BackgroundScheduler(timezone=tz)
     first_fetch_at = _initial_fetch_delay(config, fetch_hours)
     fetch_job = scheduler.add_job(
         _run_fetch, IntervalTrigger(hours=fetch_hours), args=[config, status], id="fetch", next_run_time=first_fetch_at
     )
     report_job = scheduler.add_job(
-        _run_report, CronTrigger.from_crontab(report_cron), args=[config, status], id="report"
+        _run_report, CronTrigger.from_crontab(report_cron, timezone=tz), args=[config, status], id="report"
     )
     scheduler.start()
 
@@ -164,7 +180,7 @@ def start_scheduler(config: Config) -> tuple[BackgroundScheduler | None, Schedul
     scheduler.add_listener(lambda event: _sync_next_runs())
 
     print(
-        f"[scheduler] Started: fetch every {fetch_hours}h, report on cron '{report_cron}' "
+        f"[scheduler] Started: fetch every {fetch_hours}h, report on cron '{report_cron}' ({tz}) "
         f"(next fetch {status.next_fetch_at}, next report {status.next_report_at})."
     )
     return scheduler, status

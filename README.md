@@ -50,9 +50,10 @@ it running —
 ```
 
 — it fetches sources on `schedule.fetch_interval_hours` (default: every 6h)
-and renders a report on `schedule.report_cron` (default: Monday 8am UTC)
-for as long as the process is alive, no cron needed. Adjust both in
-`config.yaml`'s `schedule` section. The dashboard's status bar shows when
+and renders a report on `schedule.report_cron` (default: Monday 4am, in
+`schedule.timezone` or the host's local timezone if unset) for as long as
+the process is alive, no cron needed. Adjust both in `config.yaml`'s
+`schedule` section. The dashboard's status bar shows when
 it last ran and when it's next due, and has a **Run now** button for an
 immediate fetch+report outside the schedule.
 
@@ -495,14 +496,17 @@ hand-maintained.
 ## Reports: cadence and cleanup
 
 `schedule.report_cron` (in `config.yaml`) is a plain 5-field cron
-expression, so the report cadence is whatever you want, not just weekly:
+expression, so the report cadence is whatever you want, not just weekly.
+It's interpreted in `schedule.timezone` (an IANA zone name) if set,
+otherwise in the host's local timezone:
 
 ```yaml
 schedule:
-  report_cron: "0 8 * * *"      # daily
-  report_cron: "0 8 * * MON"    # weekly (default)
-  report_cron: "0 8 1 * *"      # monthly
-  report_cron: "0 8 1 1 *"      # yearly
+  report_cron: "0 4 * * *"      # daily
+  report_cron: "0 4 * * MON"    # weekly (default) — Monday 4am local time
+  report_cron: "0 4 1 * *"      # monthly
+  report_cron: "0 4 1 1 *"      # yearly
+  timezone: "America/Los_Angeles"  # optional; defaults to the host's local tz
 ```
 
 Reports accumulate in `reports/` — each is its own dated file, never
