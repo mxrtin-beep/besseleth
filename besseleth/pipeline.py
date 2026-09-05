@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 from .config import Config
 from .db import DB, Item
@@ -145,6 +146,21 @@ def generate_weekly_report(config: Config, db: DB) -> str:
 
     all_items_raw = [i for src in SOURCES for i in items_by_source[src]]
 
+    # Report ids are per-day ("report-2026-09-05.md"), so a second run on
+    # the same day (e.g. hitting "Run now" twice, or a manual `cli run`
+    # after the scheduled one) would otherwise silently overwrite that
+    # day's real report with an empty one — everything unreported was
+    # already consumed and marked reported by the first run. Bail out
+    # instead of clobbering it.
+    if not all_items_raw:
+        existing = Path(config.report.get("output_dir", "reports")) / f"report-{date.today().isoformat()}.md"
+        if existing.exists():
+            print(
+                f"[pipeline] No unreported items and {existing} already exists for today; "
+                "skipping report generation so it isn't overwritten with an empty one."
+            )
+            return str(existing)
+
     # Collapse near-duplicates across sources (e.g. a pasted LinkedIn post
     # about the same story as a scraped news article) into one item, so
     # the report doesn't repeat the same fact twice. The kept item's
@@ -206,8 +222,6 @@ def _prune_old_reports(config: Config):
     keep_last = config.raw.get("reports", {}).get("keep_last", 0)
     if not keep_last:
         return
-    from pathlib import Path
-
     reports_dir = Path(config.report.get("output_dir", "reports"))
     reports = sorted(reports_dir.glob("report-*.md"), reverse=True)
     for stale in reports[keep_last:]:
