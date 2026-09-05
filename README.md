@@ -443,14 +443,15 @@ fetch, besseleth asks the local LLM to tag every new item with:
 
 This is bounded per fetch (`enrichment.max_items_per_run`, default 20) so
 one fetch cycle can't trigger unbounded LLM calls — it catches up over
-successive fetches if there's a backlog, or run it against everything at
-once:
+successive fetches if there's a backlog, or run through the whole thing
+in one go, no cap, however long that takes:
 
 ```bash
 .venv/bin/python -m besseleth.cli enrich --all
 ```
 
-...or hit **Enrich now** on the Papers tab. Requires
+...or check **Enrich everything** next to **Enrich now** on the Papers
+tab before clicking it. Requires
 `summarizer.backend: "ollama"` to actually extract anything (Ollama
 running) — without it, items are marked `org_type: unknown` etc. rather
 than left unprocessed forever, since there's nothing more to learn

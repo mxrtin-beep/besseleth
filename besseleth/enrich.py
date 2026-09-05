@@ -697,10 +697,10 @@ def _sync_duplicate_novelty(config: Config, db: DB) -> int:
     return synced
 
 
-def enrich_items_detailed(config: Config, db: DB, force: bool = False) -> dict:
-    """Enriches up to `enrichment.max_items_per_run` items. Returns
-    {"processed": int, "message": str, "backend": str} — the message
-    always explains a 0, so 'nothing happened' is never silent:
+def enrich_items_detailed(config: Config, db: DB, force: bool = False, run_until_done: bool = False) -> dict:
+    """Enriches up to `enrichment.max_items_per_run` items per batch.
+    Returns {"processed": int, "message": str, "backend": str} — the
+    message always explains a 0, so 'nothing happened' is never silent:
     enrichment disabled in config, nothing left to enrich (already
     caught up), no LLM configured (marked unknown instead), or Ollama
     unreachable (left pending — will retry once it's back).
@@ -710,7 +710,17 @@ def enrich_items_detailed(config: Config, db: DB, force: bool = False) -> dict:
     for catching up already-stored data after enrich.py's extraction
     logic improves, without re-running the LLM on everything at once:
     still capped by max_items_per_run, so a big backlog cycles through
-    over repeated runs rather than one long burst."""
+    over repeated runs rather than one long burst.
+
+    run_until_done=True keeps pulling and enriching batch after batch —
+    ignoring the per-run cap — until the never-enriched queue is
+    genuinely empty, instead of stopping after one `max_items_per_run`
+    batch: for "kick this off and walk away, come back to everything
+    filled in" rather than clicking Enrich repeatedly. Not honored with
+    force=True: re-checking already-enriched items has no natural end
+    (the oldest-checked-first queue never runs dry — the batch you just
+    re-checked is simply the newest-checked now), so that still cycles
+    one capped batch per call, on purpose."""
     cfg = config.raw.get("enrichment", {}) or {}
     summarizer_cfg = config.summarizer
     backend = summarizer_cfg.get("backend", "none")
@@ -787,9 +797,10 @@ def enrich_items_detailed(config: Config, db: DB, force: bool = False) -> dict:
 
     sources = cfg.get("sources", DEFAULT_SOURCES)
     max_items = cfg.get("max_items_per_run", 20)
+    keep_going = run_until_done and not force
 
-    rows = db.items_to_reenrich(sources, max_items) if force else db.unenriched_items(sources, max_items)
-    if not rows:
+    first_rows = db.items_to_reenrich(sources, max_items) if force else db.unenriched_items(sources, max_items)
+    if not first_rows:
         message = (
             f"Nothing to re-enrich — enrichment.sources is empty.{location_note}" if force else
             f"Nothing to enrich — every item in enrichment.sources is already tagged (or unknown).{location_note}"
@@ -801,6 +812,7 @@ def enrich_items_detailed(config: Config, db: DB, force: bool = False) -> dict:
         }
 
     if backend != "ollama":
+        rows = first_rows
         for row in rows:
             db.save_enrichment(
                 row["id"], org=None, org_type="unknown", modality="unknown",
@@ -822,36 +834,65 @@ def enrich_items_detailed(config: Config, db: DB, force: bool = False) -> dict:
 
     pause_seconds = cfg.get("pause_seconds", 0)
 
-    processed = 0
+    total_processed = 0
+    total_attempted = 0
     work_seconds = 0.0  # excludes the deliberate pause_seconds sleeps — this is actual enrich time, not throttling
-    for i, row in enumerate(rows):
-        item_start = time.time()
-        try:
-            if _enrich_one(row, db, config, summarizer_cfg):
-                processed += 1
-        except Exception as e:
-            print(f"[enrich] Failed on item {row['id']}: {e}")
-        work_seconds += time.time() - item_start
-        # Gives the CPU a breather between LLM calls instead of hammering
-        # it back-to-back for the whole batch — set enrichment.pause_seconds
-        # in config.yaml if enrich runs are making the machine unusable.
-        # Skipped after the last item so it doesn't delay returning.
-        if pause_seconds and i < len(rows) - 1:
-            time.sleep(pause_seconds)
+    rows = first_rows
+    while rows:
+        total_attempted += len(rows)
+        batch_processed = 0
+        for i, row in enumerate(rows):
+            item_start = time.time()
+            try:
+                if _enrich_one(row, db, config, summarizer_cfg):
+                    total_processed += 1
+                    batch_processed += 1
+            except Exception as e:
+                print(f"[enrich] Failed on item {row['id']}: {e}")
+            work_seconds += time.time() - item_start
+            # Gives the CPU a breather between LLM calls instead of hammering
+            # it back-to-back for the whole batch — set enrichment.pause_seconds
+            # in config.yaml if enrich runs are making the machine unusable.
+            # Skipped after the last item so it doesn't delay returning.
+            if pause_seconds and i < len(rows) - 1:
+                time.sleep(pause_seconds)
 
-    if processed:
-        db.record_enrich_run(processed, work_seconds)
+        if not keep_going:
+            break
+        if not batch_processed:
+            # Nothing in this batch actually got enriched (Ollama up, but
+            # every item errored/timed out) — unenriched_items() would keep
+            # handing back this same stuck batch forever, so stop instead
+            # of spinning. Whatever succeeded elsewhere is still kept.
+            print(f"[enrich] Stopping: {len(rows)} item(s) in the last batch made no progress (see errors above).")
+            break
+        rows = db.unenriched_items(sources, max_items)
+        if rows:
+            print(f"[enrich] Batch done ({total_processed} so far) — {len(rows)}+ item(s) left, continuing...")
+            ok, status_msg = ollama_status(summarizer_cfg)
+            if not ok:
+                print(f"[enrich] Stopping: {status_msg}")
+                break
+
+    if total_processed:
+        db.record_enrich_run(total_processed, work_seconds)
     stats = db.get_enrich_stats()
 
-    if processed < len(rows):
-        message = f"Enriched {processed}/{len(rows)} — the rest failed mid-call and will retry next run (see server log)."
+    if total_processed < total_attempted:
+        message = f"Enriched {total_processed}/{total_attempted} — the rest failed mid-call and will retry next run (see server log)."
     else:
-        message = f"Enriched {processed} item(s)."
-    if processed:
-        message += f" ({work_seconds:.1f}s, {work_seconds / processed:.1f}s/item)"
+        message = f"Enriched {total_processed} item(s)."
+    if total_processed:
+        message += f" ({work_seconds:.1f}s, {work_seconds / total_processed:.1f}s/item)"
     message += location_note
     print(f"[enrich] {message}")
-    return {"processed": processed, "message": message, "backend": backend, "elapsed_seconds": work_seconds, "stats": stats}
+    return {
+        "processed": total_processed,
+        "message": message,
+        "backend": backend,
+        "elapsed_seconds": work_seconds,
+        "stats": stats,
+    }
 
 
 def enrich_items(config: Config, db: DB) -> int:

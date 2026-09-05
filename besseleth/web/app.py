@@ -387,10 +387,16 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
     def api_enrich():
         from ..enrich import enrich_items_detailed
 
-        force = bool((request.get_json(silent=True) or {}).get("force"))
+        payload = request.get_json(silent=True) or {}
+        force = bool(payload.get("force"))
+        run_until_done = bool(payload.get("run_until_done"))
+        # Runs synchronously in the request thread, same as /api/run-now —
+        # with run_until_done this can take a long while (the whole
+        # backlog, not one capped batch), so this blocks until it's
+        # actually done rather than pretending it finished after one batch.
         db = DB(config.db_path)
         try:
-            result = enrich_items_detailed(config, db, force=force)
+            result = enrich_items_detailed(config, db, force=force, run_until_done=run_until_done)
         finally:
             db.close()
         return jsonify({
