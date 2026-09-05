@@ -500,6 +500,24 @@ it below the configured default) and stores whatever new items it finds
 in the same DB — it doesn't touch devices.yaml/companies.yaml, which stay
 hand-maintained.
 
+How far back this can actually reach depends on the source, not just how
+far back you ask:
+
+- **arXiv** has a real historical archive and paginates as far back as
+  you ask (there's a generous hard cap per keyword per run so an
+  extremely broad keyword/category combo over many years can't page
+  forever — re-run the backfill to keep going deeper if you hit it).
+- **News, blogs, and conference-news feeds are RSS/Atom** — a feed only
+  ever exposes its current live entries (typically the last few dozen to
+  a couple hundred), not a historical archive. Backfilling to 2020 asks
+  for a wider window, but there's nothing from 2020 left *in the feed*
+  to widen into — this is a limitation of RSS itself, not something a
+  bigger `days_back` can fix. Expect years-old news/blog coverage to
+  stay thin no matter what you backfill to; arXiv is the source that
+  actually has deep history.
+- **Events and the LinkedIn/social paste-in path** aren't date-windowed
+  fetches at all — a backfill doesn't apply to them.
+
 ## Reports: cadence and cleanup
 
 `schedule.report_cron` (in `config.yaml`) is a plain 5-field cron

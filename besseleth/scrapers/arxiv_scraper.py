@@ -26,55 +26,84 @@ def _search_query(keyword: str, categories: list[str]) -> str:
     return kw
 
 
+MAX_RESULTS_PER_KEYWORD_HARD_CAP = 1000  # backfill safety valve — see fetch()'s docstring
+
+
 def fetch(config, days_back: int, max_results_per_keyword: int) -> list[Item]:
+    """Fetches papers matching each configured keyword, newest first,
+    stopping once results fall outside the `days_back` window.
+
+    Paginates past `max_results_per_keyword` when needed: arXiv's API
+    returns one page (of that size) per request, sorted newest first, so
+    a single page only ever holds the *newest* N papers — a `days_back`
+    of years (a deep backfill) needs several pages to actually reach that
+    far back, not just a bigger cutoff applied to the same handful of
+    recent results. Stops paginating for a keyword once a page's oldest
+    entry falls before the cutoff (everything after it, on this page and
+    any further one, is older still) or a hard cap of
+    MAX_RESULTS_PER_KEYWORD_HARD_CAP total is hit, so an extremely broad
+    keyword/category combo with a multi-year backfill can't page forever."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
     items: list[Item] = []
     seen_urls: set[str] = set()
 
     for keyword in config.keywords:
-        params = {
-            "search_query": _search_query(keyword, config.arxiv_categories),
-            "sortBy": "submittedDate",
-            "sortOrder": "descending",
-            "max_results": max_results_per_keyword,
-        }
-        try:
-            resp = requests.get(ARXIV_API, params=params, timeout=20)
-            resp.raise_for_status()
-        except requests.RequestException as e:
-            print(f"[arxiv] request failed for '{keyword}': {e}")
-            continue
-
-        feed = feedparser.parse(resp.text)
-        for entry in feed.entries:
-            url = entry.get("link", "")
-            if url in seen_urls:
-                continue
-            published_str = entry.get("published", "")
+        start = 0
+        while True:
+            params = {
+                "search_query": _search_query(keyword, config.arxiv_categories),
+                "sortBy": "submittedDate",
+                "sortOrder": "descending",
+                "start": start,
+                "max_results": max_results_per_keyword,
+            }
             try:
-                published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
-            except Exception:
-                published = None
-            if published and published < cutoff:
-                continue
+                resp = requests.get(ARXIV_API, params=params, timeout=20)
+                resp.raise_for_status()
+            except requests.RequestException as e:
+                print(f"[arxiv] request failed for '{keyword}' (start={start}): {e}")
+                break
 
-            title = entry.get("title", "").strip()
-            summary = strip_html(entry.get("summary", ""))
-            hits = text_matches_keywords(f"{title} {summary}", config.keywords)
+            feed = feedparser.parse(resp.text)
+            if not feed.entries:
+                break
 
-            items.append(
-                Item(
-                    id=stable_id("arxiv", url or title),
-                    source="arxiv",
-                    title=title,
-                    url=url,
-                    summary=summary,
-                    published_at=(published or datetime.now(timezone.utc)).isoformat(),
-                    matched_keywords=hits or [keyword],
+            reached_cutoff = False
+            for entry in feed.entries:
+                url = entry.get("link", "")
+                try:
+                    published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+                except Exception:
+                    published = None
+                if published and published < cutoff:
+                    # Sorted newest-first, so nothing from here on (this
+                    # page or the next) can be back in the window either.
+                    reached_cutoff = True
+                    break
+                if url in seen_urls:
+                    continue
+
+                title = entry.get("title", "").strip()
+                summary = strip_html(entry.get("summary", ""))
+                hits = text_matches_keywords(f"{title} {summary}", config.keywords)
+
+                items.append(
+                    Item(
+                        id=stable_id("arxiv", url or title),
+                        source="arxiv",
+                        title=title,
+                        url=url,
+                        summary=summary,
+                        published_at=(published or datetime.now(timezone.utc)).isoformat(),
+                        matched_keywords=hits or [keyword],
+                    )
                 )
-            )
-            seen_urls.add(url)
+                seen_urls.add(url)
 
-        time.sleep(1)  # be polite to arXiv's free API
+            start += len(feed.entries)
+            time.sleep(3)  # arXiv's own usage policy asks for >=3s between paginated requests
+
+            if reached_cutoff or len(feed.entries) < max_results_per_keyword or start >= MAX_RESULTS_PER_KEYWORD_HARD_CAP:
+                break
 
     return items
