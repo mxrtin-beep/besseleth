@@ -147,8 +147,15 @@ def generate_weekly_report(config: Config, db: DB) -> str:
                 summary=row["summary"] or "",
                 published_at=row["published_at"] or "",
                 matched_keywords=(row["matched_keywords"] or "").split(",") if row["matched_keywords"] else [],
-                matched_contact=row["matched_contact"],
-                matched_company=row["matched_company"],
+                # Deliberately NOT carried over from the row: matched_contact/
+                # matched_company/matched_reason get recomputed fresh below,
+                # every run, against the *current* contacts/interests config.
+                # Loading the old stored values here would make a stale match
+                # from a past run (a contact since edited or removed, an old
+                # matching bug) stick forever — personalize_items/flag_interests
+                # only ever set these fields on a new match, they never clear a
+                # leftover one, so starting from None each time is what makes
+                # that actually self-correcting instead of permanent.
             )
         )
 
