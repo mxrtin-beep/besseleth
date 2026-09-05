@@ -302,15 +302,29 @@ class DB:
         )
         self.conn.commit()
 
-    def unenriched_items(self, sources: list[str], limit: int) -> list[sqlite3.Row]:
-        """Items in the given sources that enrich.py hasn't processed yet."""
+    def unenriched_items(
+        self, sources: list[str], limit: Optional[int], days_back: Optional[float] = None
+    ) -> list[sqlite3.Row]:
+        """Items in the given sources that enrich.py hasn't processed yet,
+        newest-published first. With `days_back` set, only considers items
+        published (or fetched, if unpublished-dated) within that window —
+        used for the default "Enrich now" (just the recent stuff you'd
+        normally care about, no count cap: pass limit=None). Leave
+        `days_back` unset and `limit` set for "Enrich everything" (the
+        whole backlog regardless of age, batched by `limit` per call)."""
         self.conn.row_factory = sqlite3.Row
         placeholders = ",".join("?" for _ in sources)
-        q = (
-            f"SELECT * FROM items WHERE source IN ({placeholders}) AND enriched_at IS NULL "
-            "ORDER BY published_at DESC LIMIT ?"
-        )
-        return list(self.conn.execute(q, [*sources, limit]).fetchall())
+        q = f"SELECT * FROM items WHERE source IN ({placeholders}) AND enriched_at IS NULL"
+        params: list[Any] = [*sources]
+        if days_back is not None:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).isoformat()
+            q += " AND COALESCE(NULLIF(published_at, ''), fetched_at) >= ?"
+            params.append(cutoff)
+        q += " ORDER BY published_at DESC"
+        if limit is not None:
+            q += " LIMIT ?"
+            params.append(limit)
+        return list(self.conn.execute(q, params).fetchall())
 
     def items_to_reenrich(self, sources: list[str], limit: int) -> list[sqlite3.Row]:
         """Every item in the given sources, oldest-enriched (or never

@@ -441,10 +441,15 @@ fetch, besseleth asks the local LLM to tag every new item with:
   is relative, not just "does this sound impressive in isolation"),
   with a one-sentence rationale shown on hover
 
-This is bounded per fetch (`enrichment.max_items_per_run`, default 20) so
-one fetch cycle can't trigger unbounded LLM calls — it catches up over
-successive fetches if there's a backlog, or run through the whole thing
-in one go, no cap, however long that takes:
+The automatic pass after each fetch is bounded (`enrichment.max_items_per_run`,
+default 10) so one fetch cycle can't trigger unbounded LLM calls — it
+catches up over successive fetches if there's a backlog. Run it yourself
+— **Enrich now** on the Papers tab, or `besseleth.cli enrich` — and
+there's no count cap at all: it just works through everything unenriched
+from the last `enrichment.default_days_back` days (default 14), since
+that's normally all there is to do. For an actual backlog older than
+that, run through the whole thing in one go instead, no cap, however
+long that takes:
 
 ```bash
 .venv/bin/python -m besseleth.cli enrich --all

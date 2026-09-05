@@ -697,30 +697,44 @@ def _sync_duplicate_novelty(config: Config, db: DB) -> int:
     return synced
 
 
-def enrich_items_detailed(config: Config, db: DB, force: bool = False, run_until_done: bool = False) -> dict:
-    """Enriches up to `enrichment.max_items_per_run` items per batch.
-    Returns {"processed": int, "message": str, "backend": str} — the
+def enrich_items_detailed(
+    config: Config, db: DB, force: bool = False, run_until_done: bool = False, background: bool = False
+) -> dict:
+    """Returns {"processed": int, "message": str, "backend": str} — the
     message always explains a 0, so 'nothing happened' is never silent:
     enrichment disabled in config, nothing left to enrich (already
     caught up), no LLM configured (marked unknown instead), or Ollama
     unreachable (left pending — will retry once it's back).
 
-    force=True re-checks items that already have enrichment too (oldest-
-    checked first), instead of only ones that have never been enriched —
-    for catching up already-stored data after enrich.py's extraction
-    logic improves, without re-running the LLM on everything at once:
-    still capped by max_items_per_run, so a big backlog cycles through
-    over repeated runs rather than one long burst.
-
-    run_until_done=True keeps pulling and enriching batch after batch —
-    ignoring the per-run cap — until the never-enriched queue is
-    genuinely empty, instead of stopping after one `max_items_per_run`
-    batch: for "kick this off and walk away, come back to everything
-    filled in" rather than clicking Enrich repeatedly. Not honored with
-    force=True: re-checking already-enriched items has no natural end
-    (the oldest-checked-first queue never runs dry — the batch you just
-    re-checked is simply the newest-checked now), so that still cycles
-    one capped batch per call, on purpose."""
+    Modes:
+      - default, interactive (force=False, run_until_done=False,
+        background=False — the dashboard's "Enrich now" and a plain
+        `cli enrich`): everything unenriched from the last
+        `enrichment.default_days_back` days (default 14), no count cap
+        — this is what a normal fetch/paste cycle leaves behind, so
+        there's no need to cap it; an older backlog beyond that window
+        is left alone rather than crowding out what you actually just
+        added.
+      - background=True (the automatic post-fetch enrichment step —
+        `enrich_items()`, run unattended every fetch): the original
+        behavior, capped at `enrichment.max_items_per_run` with no day
+        window — deliberately conservative since this runs on its own,
+        possibly on a schedule, with nobody watching CPU load.
+      - run_until_done=True: ignores the day window and the per-run cap
+        — keeps pulling and enriching batch after batch (still
+        `enrichment.max_items_per_run` at a time) until the never-
+        enriched queue is genuinely empty, however old. For "kick this
+        off and walk away, come back to the whole backlog filled in"
+        rather than clicking Enrich repeatedly.
+      - force=True: re-checks items that already have enrichment too
+        (oldest-checked first), instead of only ones that have never
+        been enriched — for catching up already-stored data after
+        enrich.py's extraction logic improves. Ignores the day window
+        (there's no "recent" backlog here, only "all of it"), and not
+        combined with run_until_done: re-checking has no natural end
+        (the oldest-checked-first queue never runs dry — the batch you
+        just re-checked is simply the newest-checked now), so this
+        still cycles one capped batch per call, on purpose."""
     cfg = config.raw.get("enrichment", {}) or {}
     summarizer_cfg = config.summarizer
     backend = summarizer_cfg.get("backend", "none")
@@ -797,9 +811,19 @@ def enrich_items_detailed(config: Config, db: DB, force: bool = False, run_until
 
     sources = cfg.get("sources", DEFAULT_SOURCES)
     max_items = cfg.get("max_items_per_run", 20)
+    default_days_back = cfg.get("default_days_back", 14)
     keep_going = run_until_done and not force
 
-    first_rows = db.items_to_reenrich(sources, max_items) if force else db.unenriched_items(sources, max_items)
+    if force:
+        first_rows = db.items_to_reenrich(sources, max_items)
+    elif run_until_done or background:
+        first_rows = db.unenriched_items(sources, max_items)  # batched below — the whole backlog, any age
+    else:
+        # The common interactive case: whatever's unenriched from normal
+        # recent use (a fetch or two, a few pastes), not a years-old
+        # backlog — so no count cap, just a time window
+        # (enrichment.default_days_back).
+        first_rows = db.unenriched_items(sources, None, days_back=default_days_back)
     if not first_rows:
         message = (
             f"Nothing to re-enrich — enrichment.sources is empty.{location_note}" if force else
@@ -896,6 +920,8 @@ def enrich_items_detailed(config: Config, db: DB, force: bool = False, run_until
 
 
 def enrich_items(config: Config, db: DB) -> int:
-    """Same as enrich_items_detailed(), returning just the count — kept
-    for existing callers (the post-fetch pipeline step)."""
-    return enrich_items_detailed(config, db)["processed"]
+    """Same as enrich_items_detailed(background=True), returning just the
+    count — kept for existing callers (the post-fetch pipeline step, run
+    unattended after every fetch, so stays capped rather than picking up
+    the interactive default's uncapped day window)."""
+    return enrich_items_detailed(config, db, background=True)["processed"]

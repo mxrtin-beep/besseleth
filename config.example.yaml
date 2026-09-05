@@ -217,6 +217,9 @@ enrichment:
   #     comes, which is expected, not stuck.
   enabled: true
   max_items_per_run: 10   # smaller bursts, catches up over more fetches instead of one big spike
+  default_days_back: 14   # "Enrich now"/`cli enrich` (no flags): enrich everything unenriched from this many
+                           # days back, uncapped — not max_items_per_run, which only bounds the automatic
+                           # per-fetch run and `enrich --all`/"Enrich everything" (the whole backlog, any age)
   pause_seconds: 2        # sleep between items during a run — turns a CPU spike into a trickle
   sources: ["arxiv", "news", "blog"]
 
