@@ -203,9 +203,10 @@ export BESSELETH_AUTH_PASSWORD="something-only-you-know"
 
 before starting the app — every route then requires that username/
 password (a plain browser login prompt, HTTP Basic Auth). Deliberately
-env vars, not a config.yaml setting: that file is tracked in git now, and
-a password has no business in version control. Leave both unset and
-nothing changes.
+env vars, not a config.yaml setting: `config.yaml` is your own file
+(gitignored, machine-specific), but a password still has no business
+sitting in a plaintext config file that gets copied, backed up, or
+pasted into a bug report. Leave both unset and nothing changes.
 
 Unlike the CLI, this doesn't need a `besseleth.cli run` first — starting
 it also starts the background schedule (see Usage above), so it fetches
@@ -575,3 +576,10 @@ extension/                # browser extension: select text anywhere -> POST /api
   access must be available to the process running this (some sandboxed dev
   environments restrict outbound hosts — this is unrelated to the code).
 - `data/besseleth.db` and `reports/*.md` are local, gitignored artifacts.
+- `config.yaml` is gitignored too, same as `contacts.yaml`/`devices.yaml`/
+  `companies.yaml`/`interests.yaml`/`feeds.yaml`/`job_boards.yaml` — it's
+  your own settings/contacts, not something to version control or diff
+  against another machine's copy. `config.example.yaml` is the tracked
+  template `cp` it from; pull in a code update's config changes (a new
+  key, a changed default) by diffing `config.example.yaml` yourself and
+  copying over what you want.
