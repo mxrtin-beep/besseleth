@@ -372,7 +372,19 @@ function wireReportNav() {
       const rid = btn.dataset.del;
       if (!confirm(`Delete report ${rid}? This can't be undone.`)) return;
       await fetch(`/api/report/${rid}`, { method: 'DELETE' });
-      btn.closest('.reportRow').remove();
+      const row = btn.closest('.reportRow');
+      const wasActive = row.classList.contains('active');
+      row.remove();
+      // Deleting the report you're currently looking at removed its
+      // sidebar row, but left the already-rendered content sitting in
+      // the main pane — nothing told it to refresh. Load whatever's
+      // next in the list, or the empty-state placeholder if that was
+      // the last one.
+      if (wasActive) {
+        const next = document.querySelector('.reportBtn');
+        if (next) next.click();
+        else reportPane.innerHTML = '<p class="hint">Pick a report from the sidebar.</p>';
+      }
     };
   });
 }
