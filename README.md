@@ -507,14 +507,22 @@ far back you ask:
   you ask (there's a generous hard cap per keyword per run so an
   extremely broad keyword/category combo over many years can't page
   forever — re-run the backfill to keep going deeper if you hit it).
-- **News, blogs, and conference-news feeds are RSS/Atom** — a feed only
-  ever exposes its current live entries (typically the last few dozen to
-  a couple hundred), not a historical archive. Backfilling to 2020 asks
-  for a wider window, but there's nothing from 2020 left *in the feed*
-  to widen into — this is a limitation of RSS itself, not something a
-  bigger `days_back` can fix. Expect years-old news/blog coverage to
-  stay thin no matter what you backfill to; arXiv is the source that
-  actually has deep history.
+- **News via Google News search** (the default feed) also paginates a
+  deep backfill (`days_back` beyond 30) — not by "going back" in the feed
+  itself (it has no offset/page parameter and always returns roughly its
+  newest ~100 matches, however far back you ask), but by slicing the
+  requested range into ~30-day chunks and querying Google News once per
+  chunk with its `after:`/`before:` date-bound search operators, so a
+  multi-year backfill actually samples each month instead of only ever
+  the same latest handful. This is specific to Google News search URLs
+  (detected by domain) — an ordinary RSS feed (a blog, a publication's
+  own feed, or NewsAPI's free tier) has no such operator and no
+  historical archive to page into either way, so those stay thin no
+  matter how far back you backfill; that part really is a limitation of
+  the source, not something more code can fix.
+- **Blogs and conference-news feeds are plain RSS/Atom**, same
+  limitation as above — a feed only ever exposes its current live
+  entries, not a historical archive, so backfilling doesn't help there.
 - **Events and the LinkedIn/social paste-in path** aren't date-windowed
   fetches at all — a backfill doesn't apply to them.
 
