@@ -302,6 +302,21 @@ class DB:
         )
         return list(self.conn.execute(q, [*sources, limit]).fetchall())
 
+    def items_to_reenrich(self, sources: list[str], limit: int) -> list[sqlite3.Row]:
+        """Every item in the given sources, oldest-enriched (or never
+        enriched) first — for the dashboard's "re-check already-enriched
+        items too" toggle. Oldest-first (not just "everything at once")
+        means a big backlog gets cycled through gradually over repeated
+        runs, same CPU-friendly batching as a normal enrich, rather than
+        one huge re-enrich burst."""
+        self.conn.row_factory = sqlite3.Row
+        placeholders = ",".join("?" for _ in sources)
+        q = (
+            f"SELECT * FROM items WHERE source IN ({placeholders}) "
+            "ORDER BY enriched_at IS NOT NULL, enriched_at ASC LIMIT ?"
+        )
+        return list(self.conn.execute(q, [*sources, limit]).fetchall())
+
     def recent_items_for_dedupe(self, sources: list[str], limit: int = 300) -> list[Item]:
         """The most recent items in the given sources, as Item objects
         (novelty_score/novelty_rationale included) — for

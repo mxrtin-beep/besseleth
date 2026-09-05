@@ -349,9 +349,10 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
     def api_enrich():
         from ..enrich import enrich_items_detailed
 
+        force = bool((request.get_json(silent=True) or {}).get("force"))
         db = DB(config.db_path)
         try:
-            result = enrich_items_detailed(config, db)
+            result = enrich_items_detailed(config, db, force=force)
         finally:
             db.close()
         return jsonify({

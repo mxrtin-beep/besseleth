@@ -105,7 +105,12 @@
   <div id="reportPane"><p class="hint">Pick a report from the sidebar.</p></div>
 
   <div id="papersPane" style="display:none">
-    <p><button class="btn" id="enrichNowBtn">Enrich now</button></p>
+    <p>
+      <button class="btn" id="enrichNowBtn">Enrich now</button>
+      <label style="margin-left:.8rem; font-size:.85rem; font-weight:normal;">
+        <input type="checkbox" id="enrichForce"> Re-check already-enriched items too
+      </label>
+    </p>
     <p class="hint" id="enrichResult"></p>
     <p class="hint" id="enrichStats"></p>
     <div class="controls">
@@ -962,7 +967,10 @@ document.getElementById('enrichNowBtn').onclick = async (ev) => {
   btn.textContent = 'Enriching…';
   resultEl.textContent = '';
   try {
-    const res = await fetch('/api/enrich', { method: 'POST' });
+    const force = document.getElementById('enrichForce').checked;
+    const res = await fetch('/api/enrich', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force }),
+    });
     const data = await res.json();
     papersLoaded = false;
     await loadPapers();

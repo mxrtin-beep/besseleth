@@ -697,13 +697,20 @@ def _sync_duplicate_novelty(config: Config, db: DB) -> int:
     return synced
 
 
-def enrich_items_detailed(config: Config, db: DB) -> dict:
-    """Enriches up to `enrichment.max_items_per_run` unenriched items.
-    Returns {"processed": int, "message": str, "backend": str} — the
-    message always explains a 0, so 'nothing happened' is never silent:
+def enrich_items_detailed(config: Config, db: DB, force: bool = False) -> dict:
+    """Enriches up to `enrichment.max_items_per_run` items. Returns
+    {"processed": int, "message": str, "backend": str} — the message
+    always explains a 0, so 'nothing happened' is never silent:
     enrichment disabled in config, nothing left to enrich (already
     caught up), no LLM configured (marked unknown instead), or Ollama
-    unreachable (left pending — will retry once it's back)."""
+    unreachable (left pending — will retry once it's back).
+
+    force=True re-checks items that already have enrichment too (oldest-
+    checked first), instead of only ones that have never been enriched —
+    for catching up already-stored data after enrich.py's extraction
+    logic improves, without re-running the LLM on everything at once:
+    still capped by max_items_per_run, so a big backlog cycles through
+    over repeated runs rather than one long burst."""
     cfg = config.raw.get("enrichment", {}) or {}
     summarizer_cfg = config.summarizer
     backend = summarizer_cfg.get("backend", "none")
@@ -781,11 +788,15 @@ def enrich_items_detailed(config: Config, db: DB) -> dict:
     sources = cfg.get("sources", DEFAULT_SOURCES)
     max_items = cfg.get("max_items_per_run", 20)
 
-    rows = db.unenriched_items(sources, max_items)
+    rows = db.items_to_reenrich(sources, max_items) if force else db.unenriched_items(sources, max_items)
     if not rows:
+        message = (
+            f"Nothing to re-enrich — enrichment.sources is empty.{location_note}" if force else
+            f"Nothing to enrich — every item in enrichment.sources is already tagged (or unknown).{location_note}"
+        )
         return {
             "processed": 0,
-            "message": f"Nothing to enrich — every item in enrichment.sources is already tagged (or unknown).{location_note}",
+            "message": message,
             "backend": backend,
         }
 
