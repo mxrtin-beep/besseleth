@@ -217,6 +217,9 @@ enrichment:
   #     comes, which is expected, not stuck.
   enabled: true
   max_items_per_run: 10   # smaller bursts, catches up over more fetches instead of one big spike
+  default_days_back: 14   # "Enrich now"/`cli enrich` (no flags): enrich everything unenriched from this many
+                           # days back, uncapped — not max_items_per_run, which only bounds the automatic
+                           # per-fetch run and `enrich --all`/"Enrich everything" (the whole backlog, any age)
   pause_seconds: 2        # sleep between items during a run — turns a CPU spike into a trickle
   sources: ["arxiv", "news", "blog"]
 
@@ -293,7 +296,9 @@ schedule:
   # the dashboard's "Run now" button).
   enabled: true
   fetch_interval_hours: 6      # how often to pull fresh items into the DB
-  report_cron: "0 8 * * MON"   # 5-field cron (UTC) for rendering the weekly report
+  report_cron: "0 4 * * MON"   # 5-field cron for rendering the weekly report (4am, overnight)
+  # timezone: "America/Los_Angeles"  # IANA zone report_cron is interpreted in;
+                                      # defaults to this host's local timezone if unset
 
 trends:
   # Manually (via the dashboard's Trends tab) or LLM-drafted, then

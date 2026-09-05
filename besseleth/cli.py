@@ -13,6 +13,8 @@ Usage:
     python -m besseleth.cli report-delete <report-id>       # e.g. report-delete 2026-09-01
     python -m besseleth.cli item-delete --item-id <id>       # remove a pasted (or any) item outright
     python -m besseleth.cli enrich [--all]                   # tag arXiv/news/blog items for the Papers table
+                                                              # --all: work through the whole backlog, not just one
+                                                              # max_items_per_run batch — leave it running
     python -m besseleth.cli serve          [--config config.yaml]   # run continuously per `schedule` in config.yaml
 
 `serve` is the "regularly updating" mode — start it once (e.g. as a
@@ -137,9 +139,7 @@ def main(argv=None):
 
         db = DB(config.db_path)
         try:
-            if args.all:
-                config.raw.setdefault("enrichment", {})["max_items_per_run"] = 1_000_000
-            result = enrich_items_detailed(config, db)
+            result = enrich_items_detailed(config, db, run_until_done=args.all)
             print(f"[cli] {result['message']}")
         finally:
             db.close()

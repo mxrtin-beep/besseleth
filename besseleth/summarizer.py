@@ -149,6 +149,99 @@ def summarize_items_numbered(items: list[Item], industry_name: str, cfg: dict) -
     return "\n".join(lines)
 
 
+def summarize_context(new_items: list[Item], history: dict, industry_name: str, cfg: dict) -> str:
+    """The report's closing section: not a recap of what's already
+    summarized above, but what this run's new items mean set against
+    everything besseleth has accumulated across every past run (`history`,
+    from DB.accumulated_knowledge_stats()) — is a quiet org suddenly
+    active again, does this continue a trend already being tracked, is it
+    a genuinely new direction. Empty if there's nothing new to place."""
+    if not new_items:
+        return ""
+
+    total_items = history.get("total_items", 0)
+    total_orgs = history.get("total_orgs", 0)
+    top_orgs_str = ", ".join(f"{org} ({n})" for org, n in history.get("top_orgs", []))
+    earliest = history.get("earliest_date") or "an earlier date"
+
+    fallback = (
+        f"Besseleth has accumulated {total_items} items on {industry_name} since {earliest}, "
+        f"across {total_orgs} organizations"
+        + (f" — most active so far: {top_orgs_str}." if top_orgs_str else ".")
+    )
+
+    backend = cfg.get("backend", "none")
+    if backend != "ollama":
+        return fallback
+
+    model = cfg.get("model", "llama3.1")
+    ollama_url = cfg.get("ollama_url", "http://localhost:11434")
+    max_items = cfg.get("max_items_per_summary_call", 8)
+    new_titles = "\n".join(f"- {i.title}" for i in new_items[:max_items])
+    prompt = (
+        f"You are writing the closing 'Big picture' section of a weekly {industry_name} "
+        f"briefing. Besseleth has been tracking this industry since {earliest} and has "
+        f"accumulated {total_items} items total across {total_orgs} organizations, most "
+        f"active so far: {top_orgs_str or 'none tracked yet'}. In 2-4 sentences, place "
+        f"today's new items in that broader context — is an org that's been quiet suddenly "
+        f"active again, does this continue a trend already being tracked, or is it a "
+        f"genuinely new direction? Don't just restate the items — say what they mean given "
+        f"everything already known. Be factual, no fluff, no preamble like 'Here is a "
+        f"summary'.\n\n"
+        f"Today's new items:\n{new_titles}\n\nBig picture:"
+    )
+    result = _ollama_generate(prompt, ollama_url, model, num_thread=cfg.get("num_thread"))
+    return result or fallback
+
+
+_JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def summarize_linkedin_item(item: Item, cfg: dict) -> str:
+    """LinkedIn pastes are almost always a hiring post, and the pasted
+    text is the raw post — long, sometimes cut off mid-sentence by
+    whatever copied it, and headed by a useless generic page title
+    ("Feed | LinkedIn") rather than anything specific. The report just
+    wants the basics: role, company, location — not that raw text
+    truncated. Falls back to a short plain snippet (not the useless
+    title) if the LLM backend is off/unreachable or extraction fails."""
+    text = " ".join(item.summary.split())
+    fallback = (text[:150].rsplit(" ", 1)[0] + "…") if len(text) > 150 else text
+    fallback = fallback or item.title
+
+    backend = cfg.get("backend", "none")
+    if backend != "ollama":
+        return fallback
+
+    model = cfg.get("model", "llama3.1")
+    ollama_url = cfg.get("ollama_url", "http://localhost:11434")
+    prompt = (
+        "The following is a pasted LinkedIn post, almost always a hiring announcement. "
+        'Extract just the basics as JSON: {"role": "...", "company": "...", "location": "..."} '
+        "— use null for any field not clearly stated, don't guess. Output ONLY the JSON, no "
+        f"other text.\n\nPost:\n{item.summary[:800]}\n\nJSON:"
+    )
+    result = _ollama_generate(prompt, ollama_url, model, timeout=60, num_thread=cfg.get("num_thread"))
+    match = _JSON_BLOCK_RE.search(result or "")
+    try:
+        data = json.loads(match.group(0)) if match else {}
+    except json.JSONDecodeError:
+        data = {}
+
+    role = (data.get("role") or "").strip()
+    company = (data.get("company") or "").strip()
+    location = (data.get("location") or "").strip()
+    if not role and not company:
+        return fallback
+
+    line = role or "Opportunity"
+    if company:
+        line += f" at {company}"
+    if location:
+        line += f" ({location})"
+    return line
+
+
 def summarize_item(item: Item, cfg: dict) -> str:
     """One-line 'why it matters' for a single high-priority item (e.g. a
     personalized match). Falls back to the raw summary if unavailable."""

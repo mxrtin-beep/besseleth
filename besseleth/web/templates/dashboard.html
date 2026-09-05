@@ -118,6 +118,9 @@
       <label style="margin-left:.8rem; font-size:.85rem; font-weight:normal;">
         <input type="checkbox" id="enrichForce"> Re-check already-enriched items too
       </label>
+      <label style="margin-left:.8rem; font-size:.85rem; font-weight:normal;">
+        <input type="checkbox" id="enrichUntilDone"> Enrich everything
+      </label>
     </p>
     <p class="hint" id="enrichResult"></p>
     <p class="hint" id="enrichStats"></p>
@@ -1039,8 +1042,10 @@ document.getElementById('enrichNowBtn').onclick = async (ev) => {
   resultEl.textContent = '';
   try {
     const force = document.getElementById('enrichForce').checked;
+    const run_until_done = document.getElementById('enrichUntilDone').checked;
+    if (run_until_done) btn.textContent = 'Enriching everything… this can take a while, leave this tab open';
     const res = await fetch('/api/enrich', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force, run_until_done }),
     });
     const data = await res.json();
     papersLoaded = false;

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -273,10 +273,20 @@ class DB:
         q = f"SELECT * FROM items WHERE source IN ({placeholders}) ORDER BY fetched_at DESC LIMIT ?"
         return list(self.conn.execute(q, [*sources, limit]).fetchall())
 
-    def unreported_items(self, source: Optional[str] = None) -> list[sqlite3.Row]:
+    def items_in_window(self, days_back: int, source: Optional[str] = None) -> list[sqlite3.Row]:
+        """Every item published (or fetched, if it has no published date)
+        within the last `days_back` days — regardless of whether it's
+        already appeared in a past report. This is what the report is
+        built from: a fresh snapshot of "what's in the last N days" every
+        time it's generated, not a one-time consumable delta since the
+        last run — so re-running (e.g. while developing, or after
+        pasting something new) always reflects the current window as if
+        no report had ever run before, rather than skipping items an
+        earlier run already claimed."""
         self.conn.row_factory = sqlite3.Row
-        q = "SELECT * FROM items WHERE included_in_report IS NULL"
-        params: list[Any] = []
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).isoformat()
+        q = "SELECT * FROM items WHERE COALESCE(NULLIF(published_at, ''), fetched_at) >= ?"
+        params: list[Any] = [cutoff]
         if source:
             q += " AND source = ?"
             params.append(source)
@@ -292,15 +302,29 @@ class DB:
         )
         self.conn.commit()
 
-    def unenriched_items(self, sources: list[str], limit: int) -> list[sqlite3.Row]:
-        """Items in the given sources that enrich.py hasn't processed yet."""
+    def unenriched_items(
+        self, sources: list[str], limit: Optional[int], days_back: Optional[float] = None
+    ) -> list[sqlite3.Row]:
+        """Items in the given sources that enrich.py hasn't processed yet,
+        newest-published first. With `days_back` set, only considers items
+        published (or fetched, if unpublished-dated) within that window —
+        used for the default "Enrich now" (just the recent stuff you'd
+        normally care about, no count cap: pass limit=None). Leave
+        `days_back` unset and `limit` set for "Enrich everything" (the
+        whole backlog regardless of age, batched by `limit` per call)."""
         self.conn.row_factory = sqlite3.Row
         placeholders = ",".join("?" for _ in sources)
-        q = (
-            f"SELECT * FROM items WHERE source IN ({placeholders}) AND enriched_at IS NULL "
-            "ORDER BY published_at DESC LIMIT ?"
-        )
-        return list(self.conn.execute(q, [*sources, limit]).fetchall())
+        q = f"SELECT * FROM items WHERE source IN ({placeholders}) AND enriched_at IS NULL"
+        params: list[Any] = [*sources]
+        if days_back is not None:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).isoformat()
+            q += " AND COALESCE(NULLIF(published_at, ''), fetched_at) >= ?"
+            params.append(cutoff)
+        q += " ORDER BY published_at DESC"
+        if limit is not None:
+            q += " LIMIT ?"
+            params.append(limit)
+        return list(self.conn.execute(q, params).fetchall())
 
     def items_to_reenrich(self, sources: list[str], limit: int) -> list[sqlite3.Row]:
         """Every item in the given sources, oldest-enriched (or never
@@ -403,6 +427,25 @@ class DB:
         that check only runs on newly-enriched items otherwise."""
         rows = self.conn.execute("SELECT DISTINCT org FROM items WHERE org IS NOT NULL AND org != ''").fetchall()
         return [r[0] for r in rows]
+
+    def accumulated_knowledge_stats(self) -> dict:
+        """A snapshot of everything besseleth has accumulated across all
+        runs, ever — not just this week's items. Used to give the report's
+        closing 'big picture' section something to place new items
+        against (an org that's been quiet suddenly active again, a trend
+        that's been building for months, etc.)."""
+        total_items = self.conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        earliest = self.conn.execute(
+            "SELECT MIN(published_at) FROM items WHERE published_at IS NOT NULL AND published_at != ''"
+        ).fetchone()[0]
+        org_counts = self.org_item_counts()
+        top_orgs = sorted(org_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        return {
+            "total_items": total_items,
+            "total_orgs": len(org_counts),
+            "top_orgs": top_orgs,
+            "earliest_date": (earliest or "")[:10],
+        }
 
     def org_item_counts(self) -> dict[str, int]:
         """{org: item count} for every distinct org — used to pick which

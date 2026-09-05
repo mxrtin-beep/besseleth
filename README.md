@@ -50,9 +50,10 @@ it running —
 ```
 
 — it fetches sources on `schedule.fetch_interval_hours` (default: every 6h)
-and renders a report on `schedule.report_cron` (default: Monday 8am UTC)
-for as long as the process is alive, no cron needed. Adjust both in
-`config.yaml`'s `schedule` section. The dashboard's status bar shows when
+and renders a report on `schedule.report_cron` (default: Monday 4am, in
+`schedule.timezone` or the host's local timezone if unset) for as long as
+the process is alive, no cron needed. Adjust both in `config.yaml`'s
+`schedule` section. The dashboard's status bar shows when
 it last ran and when it's next due, and has a **Run now** button for an
 immediate fetch+report outside the schedule.
 
@@ -202,9 +203,10 @@ export BESSELETH_AUTH_PASSWORD="something-only-you-know"
 
 before starting the app — every route then requires that username/
 password (a plain browser login prompt, HTTP Basic Auth). Deliberately
-env vars, not a config.yaml setting: that file is tracked in git now, and
-a password has no business in version control. Leave both unset and
-nothing changes.
+env vars, not a config.yaml setting: `config.yaml` is your own file
+(gitignored, machine-specific), but a password still has no business
+sitting in a plaintext config file that gets copied, backed up, or
+pasted into a bug report. Leave both unset and nothing changes.
 
 Unlike the CLI, this doesn't need a `besseleth.cli run` first — starting
 it also starts the background schedule (see Usage above), so it fetches
@@ -440,16 +442,22 @@ fetch, besseleth asks the local LLM to tag every new item with:
   is relative, not just "does this sound impressive in isolation"),
   with a one-sentence rationale shown on hover
 
-This is bounded per fetch (`enrichment.max_items_per_run`, default 20) so
-one fetch cycle can't trigger unbounded LLM calls — it catches up over
-successive fetches if there's a backlog, or run it against everything at
-once:
+The automatic pass after each fetch is bounded (`enrichment.max_items_per_run`,
+default 10) so one fetch cycle can't trigger unbounded LLM calls — it
+catches up over successive fetches if there's a backlog. Run it yourself
+— **Enrich now** on the Papers tab, or `besseleth.cli enrich` — and
+there's no count cap at all: it just works through everything unenriched
+from the last `enrichment.default_days_back` days (default 14), since
+that's normally all there is to do. For an actual backlog older than
+that, run through the whole thing in one go instead, no cap, however
+long that takes:
 
 ```bash
 .venv/bin/python -m besseleth.cli enrich --all
 ```
 
-...or hit **Enrich now** on the Papers tab. Requires
+...or check **Enrich everything** next to **Enrich now** on the Papers
+tab before clicking it. Requires
 `summarizer.backend: "ollama"` to actually extract anything (Ollama
 running) — without it, items are marked `org_type: unknown` etc. rather
 than left unprocessed forever, since there's nothing more to learn
@@ -495,21 +503,37 @@ hand-maintained.
 ## Reports: cadence and cleanup
 
 `schedule.report_cron` (in `config.yaml`) is a plain 5-field cron
-expression, so the report cadence is whatever you want, not just weekly:
+expression, so the report cadence is whatever you want, not just weekly.
+It's interpreted in `schedule.timezone` (an IANA zone name) if set,
+otherwise in the host's local timezone:
 
 ```yaml
 schedule:
-  report_cron: "0 8 * * *"      # daily
-  report_cron: "0 8 * * MON"    # weekly (default)
-  report_cron: "0 8 1 * *"      # monthly
-  report_cron: "0 8 1 1 *"      # yearly
+  report_cron: "0 4 * * *"      # daily
+  report_cron: "0 4 * * MON"    # weekly (default) — Monday 4am local time
+  report_cron: "0 4 1 * *"      # monthly
+  report_cron: "0 4 1 1 *"      # yearly
+  timezone: "America/Los_Angeles"  # optional; defaults to the host's local tz
 ```
 
-Reports accumulate in `reports/` — each is its own dated file, never
-overwritten. Delete one you don't need from the dashboard sidebar (🗑 next
-to its date) or `besseleth.cli report-delete <report-id>`. To prune
+Reports accumulate in `reports/` — each is its own timestamped file
+(`report-2026-09-05-140322.md`), never overwritten, even by a same-day
+re-run. Delete one you don't need from the dashboard sidebar (🗑 next
+to it) or `besseleth.cli report-delete <report-id>`. To prune
 automatically instead, set `reports.keep_last: N` in config.yaml to keep
 only the N most recent (0/omitted = keep everything).
+
+Every report is built fresh from scratch: it pulls everything in the last
+`news.days_back` days (default 8) at the moment it runs, with no memory of
+what a previous report already showed. Re-running — while developing, or
+because something new got scraped or pasted — always reflects the current
+window exactly as if no report had ever run before; it never skips an
+item just because an earlier report already included it. The report's
+closing **🧠 Big picture** section is the one place that does look back
+further, across everything besseleth has ever accumulated (item counts,
+most-active organizations, how far back its knowledge goes) to say what
+this run's items mean in that larger context — a trend continuing, a
+quiet org suddenly active again, or something genuinely new.
 
 ## Project layout
 
@@ -552,3 +576,10 @@ extension/                # browser extension: select text anywhere -> POST /api
   access must be available to the process running this (some sandboxed dev
   environments restrict outbound hosts — this is unrelated to the code).
 - `data/besseleth.db` and `reports/*.md` are local, gitignored artifacts.
+- `config.yaml` is gitignored too, same as `contacts.yaml`/`devices.yaml`/
+  `companies.yaml`/`interests.yaml`/`feeds.yaml`/`job_boards.yaml` — it's
+  your own settings/contacts, not something to version control or diff
+  against another machine's copy. `config.example.yaml` is the tracked
+  template `cp` it from; pull in a code update's config changes (a new
+  key, a changed default) by diffing `config.example.yaml` yourself and
+  copying over what you want.

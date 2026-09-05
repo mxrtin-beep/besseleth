@@ -7,6 +7,7 @@ reports/
 *.db-wal
 *.db-shm
 linkedin_drops/
+config.yaml
 devices.yaml
 companies.yaml
 job_boards.yaml

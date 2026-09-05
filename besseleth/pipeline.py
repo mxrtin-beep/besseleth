@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 from .config import Config
 from .db import DB, Item
@@ -20,9 +21,6 @@ from . import report as report_mod
 from .dedupe import merge_near_duplicates
 from .enrich import enrich_items
 from .feeds_store import load_feeds
-from .trends import company_store
-from .trends import store as trend_store
-from .trends import plot as trend_plot
 
 SOURCES = ["arxiv", "news", "blog", "conference", "conference_news", "event", "social", "linkedin", "clip"]
 
@@ -125,11 +123,19 @@ def _dedupe_and_store(items: list[Item], db: DB) -> list[Item]:
 
 
 def generate_weekly_report(config: Config, db: DB) -> str:
-    """Pulls all unreported items from the DB, personalizes, summarizes,
-    renders, saves (and optionally emails) the report. Returns the file path."""
-    all_unreported = db.unreported_items()
+    """Builds the report from every item in the last `days_back` days
+    (config: `news.days_back`, default 8) — a fresh snapshot of "what's in
+    this window right now," recomputed from scratch every time. It does
+    NOT track or check what a previous report already included: re-running
+    (while developing, after pasting something new, whatever the reason)
+    always looks exactly as if no report had ever run before, and never
+    skips an item just because an earlier run already showed it. Each run
+    still gets its own timestamped file, so re-running never overwrites an
+    earlier report. Returns the saved file path."""
+    days_back = config.source("news").get("days_back", 8)
+    window_rows = db.items_in_window(days_back)
     items_by_source: dict[str, list[Item]] = {s: [] for s in SOURCES}
-    for row in all_unreported:
+    for row in window_rows:
         if row["source"] not in items_by_source:
             continue
         items_by_source[row["source"]].append(
@@ -141,8 +147,15 @@ def generate_weekly_report(config: Config, db: DB) -> str:
                 summary=row["summary"] or "",
                 published_at=row["published_at"] or "",
                 matched_keywords=(row["matched_keywords"] or "").split(",") if row["matched_keywords"] else [],
-                matched_contact=row["matched_contact"],
-                matched_company=row["matched_company"],
+                # Deliberately NOT carried over from the row: matched_contact/
+                # matched_company/matched_reason get recomputed fresh below,
+                # every run, against the *current* contacts/interests config.
+                # Loading the old stored values here would make a stale match
+                # from a past run (a contact since edited or removed, an old
+                # matching bug) stick forever — personalize_items/flag_interests
+                # only ever set these fields on a new match, they never clear a
+                # leftover one, so starting from None each time is what makes
+                # that actually self-correcting instead of permanent.
             )
         )
 
@@ -173,14 +186,6 @@ def generate_weekly_report(config: Config, db: DB) -> str:
 
     report_cfg = config.report
     max_n = report_cfg.get("max_items_per_section", 12)
-    days_back = config.source("news").get("days_back", 8)
-
-    trend_devices = trend_store.load_devices(config.devices_path, config.legacy_devices_yaml_path)
-    trend_companies = company_store.load_companies(config.companies_path, config.legacy_companies_yaml_path)
-    trend_charts: list = []
-    if trend_devices:
-        charts_dir = config.raw.get("trends", {}).get("charts_dir", "reports/trends")
-        trend_charts = trend_plot.generate_trend_charts(trend_devices, config.trend_metrics, charts_dir)
 
     report_id, markdown = report_mod.build_report(
         industry_name=config.industry_name,
@@ -196,19 +201,16 @@ def generate_weekly_report(config: Config, db: DB) -> str:
         clip_items=items_by_source["clip"][:max_n],
         personalized_items=personalized,
         summarizer_cfg=config.summarizer,
-        trend_devices=trend_devices,
-        trend_metrics=config.trend_metrics,
-        trend_chart_paths=trend_charts,
-        trend_companies=trend_companies,
+        history=db.accumulated_knowledge_stats(),
     )
 
     path = report_mod.save_report(markdown, report_id, report_cfg.get("output_dir", "reports"))
     report_mod.email_report(markdown, report_id, config.industry_name, report_cfg.get("email", {}))
     _prune_old_reports(config)
 
-    # Mark kept items AND the duplicates merged into them as reported —
-    # a dropped duplicate's content is now folded into its winner, so it
-    # shouldn't linger "unreported" and get re-considered every future run.
+    # Purely informational (the dashboard shows which report an item last
+    # appeared in) — selection above is windowed by date, not gated on
+    # this, so it doesn't affect what future reports include.
     all_ids = [i.id for i in all_items] + list(dropped_ids)
     db.mark_reported(all_ids, report_id)
 
@@ -220,8 +222,6 @@ def _prune_old_reports(config: Config):
     keep_last = config.raw.get("reports", {}).get("keep_last", 0)
     if not keep_last:
         return
-    from pathlib import Path
-
     reports_dir = Path(config.report.get("output_dir", "reports"))
     reports = sorted(reports_dir.glob("report-*.md"), reverse=True)
     for stale in reports[keep_last:]:
