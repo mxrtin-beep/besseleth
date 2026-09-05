@@ -92,7 +92,21 @@ def summarize_section(items: list[Item], section_name: str, industry_name: str, 
         f"Items:\n{bullet_list}\n\nSummary:"
     )
     result = _ollama_generate(prompt, ollama_url, model, num_thread=cfg.get("num_thread"))
-    return result or _extractive_fallback(items, max_sentences=max_items if cite_style == "per_item" else 3)
+    if not result:
+        return _extractive_fallback(items, max_sentences=max_items if cite_style == "per_item" else 3)
+
+    if cite_style == "per_item":
+        # Defensive backstop, not just a prompt instruction: an LLM
+        # skipping a citation here and there is common enough that "ask
+        # nicely" alone isn't reliable — append a source line for any
+        # paper whose link didn't make it into the generated prose, so
+        # every item is still traceable back to its source even if the
+        # model dropped one.
+        missing = [i for i in items[:max_items] if i.url and i.url not in result]
+        if missing:
+            result += "\n\n**Sources:** " + " · ".join(f"[{i.title}]({i.url})" for i in missing)
+
+    return result
 
 
 def summarize_item(item: Item, cfg: dict) -> str:
