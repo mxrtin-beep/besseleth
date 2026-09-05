@@ -1,0 +1,8 @@
+# Copy to interests.yaml and edit — or just add them from the dashboard's
+# Contacts tab, which writes here too. A flat list of phrases you
+# personally care about, independent of any contact: an item mentioning
+# one of these gets flagged in the report's "For you" section the same
+# way a mention of a contact's employer does. Matched as a whole phrase
+# (case-insensitive), not a search of individual words.
+- "speech decoding"
+- "wireless power transfer"

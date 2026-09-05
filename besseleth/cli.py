@@ -127,7 +127,7 @@ def main(argv=None):
 
         log = refresh_stock_prices(config.companies_path)
         if not log:
-            print("[cli] No companies with a stock_ticker set in companies.yaml.")
+            print("[cli] No companies with a stock_ticker set — add one via the dashboard's Trends tab.")
         for line in log:
             print(f"[cli] {line}")
         return

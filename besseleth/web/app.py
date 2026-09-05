@@ -11,33 +11,83 @@ Run with:
 Everything here reads the same config.yaml / devices.yaml / companies.yaml
 / reports/ / data/besseleth.db that the CLI writes — this is a viewer
 (plus the scheduler and the paste box), not a second copy of the
-pipeline. It's meant for local/personal use (no auth); don't expose it on
-the open internet as-is.
+pipeline. Meant for local/personal use; no auth by default (fine on your
+own Mac, or over Tailscale to your phone), but set BESSELETH_AUTH_USER/
+BESSELETH_AUTH_PASSWORD (env vars, never config.yaml — that's tracked in
+git) before putting this behind a public tunnel (ngrok, Cloudflare
+Tunnel, etc.) — see _require_auth() below.
 """
 from __future__ import annotations
 
 import argparse
+import os
+import re
+import secrets
 from datetime import date
 from pathlib import Path
 
 import markdown as md
-from flask import Flask, abort, jsonify, render_template, request, send_from_directory
+from flask import Flask, Response, abort, jsonify, render_template, request, send_from_directory
 
 from ..config import Config, load_config
+from ..contacts_store import Contact, add_contact, import_linkedin_csv, load_contacts, remove_contact, update_contact
 from ..db import DB
+from ..feeds_store import add_feed, load_feeds, remove_feed
+from ..interests_store import load_interests, save_interests
 from ..pipeline import fetch_all
 from ..scheduler import SchedulerStatus, run_now, start_scheduler
 from ..scrapers.manual_drop import add_smart_item
-from ..trends.company_store import load_companies
+from ..trends.company_store import find_possible_duplicate_companies, load_companies, merge_company_pair
+from ..trends.fda_stages import FDA_STAGES, stage_for
 from ..trends.store import load_devices
+
+
+def _require_auth() -> "Response | None":
+    """HTTP Basic Auth, gated entirely on two env vars — unset either one
+    (the default) and this is a no-op, so a plain local/Tailscale setup
+    is unaffected. Set BOTH before exposing the dashboard any other way
+    (a public tunnel, a machine other people can reach):
+
+        export BESSELETH_AUTH_USER="you"
+        export BESSELETH_AUTH_PASSWORD="something-only-you-know"
+
+    Deliberately not a config.yaml setting — that file is tracked in
+    git now (see an earlier commit), and a password has no business in
+    version control. secrets.compare_digest avoids leaking the correct
+    password one character at a time via response-time differences.
+    Returning a Response (rather than calling abort()) from a
+    before_request hook is what tells Flask to use it as the reply and
+    skip the view entirely — returning None proceeds as normal."""
+    user = os.environ.get("BESSELETH_AUTH_USER")
+    password = os.environ.get("BESSELETH_AUTH_PASSWORD")
+    if not user or not password:
+        return None
+    auth = request.authorization
+    valid = (
+        auth is not None
+        and secrets.compare_digest(auth.username, user)
+        and secrets.compare_digest(auth.password, password)
+    )
+    if valid:
+        return None
+    return Response("Authentication required.", 401, {"WWW-Authenticate": 'Basic realm="besseleth"'})
 
 
 def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
     app = Flask(__name__)
     app.config["BESSELETH_CONFIG"] = config
     app.config["BESSELETH_STATUS"] = status or SchedulerStatus(enabled=False)
+    app.before_request(_require_auth)
 
     reports_dir = Path(config.report.get("output_dir", "reports"))
+
+    @app.get("/favicon.ico")
+    def favicon():
+        # Safari fetches /favicon.ico directly for the tab icon and
+        # ignores the <link rel="icon"> tag in dashboard.html if this
+        # 404s — serve the same PNG from here too (browsers sniff content,
+        # not the extension) so the tab icon shows up there as well.
+        return send_from_directory(Path(app.static_folder), "favicon.png", mimetype="image/png")
 
     @app.get("/")
     def index():
@@ -68,27 +118,37 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
 
     @app.get("/api/devices")
     def api_devices():
-        devices = load_devices(config.devices_path)
-        return jsonify(
-            [
+        devices = load_devices(config.devices_path, config.legacy_devices_yaml_path)
+        result = []
+        for d in devices:
+            stage_rank, stage_label = stage_for(d.fda_status)
+            result.append(
                 {
                     "name": d.name,
                     "org": d.org,
                     "org_type": d.org_type,
                     "fda_status": d.fda_status or "unknown",
+                    "fda_stage_rank": stage_rank,
+                    "fda_stage_label": stage_label,
                     "metrics": d.metrics,
                     "source_url": d.source_url,
                     "date_reported": d.date_reported,
                     "notes": d.notes,
                     "auto_extracted": d.auto_extracted,
                 }
-                for d in devices
-            ]
-        )
+            )
+        return jsonify(result)
+
+    @app.get("/api/trends/fda-stages")
+    def api_fda_stages():
+        # The canonical stage ladder itself (rank + label), for the
+        # Trends tab's FDA timeline to build a shared, ordered Y axis
+        # from — see trends/fda_stages.py for what each rung means.
+        return jsonify([{"rank": rank, "label": label} for rank, label in FDA_STAGES])
 
     @app.get("/api/companies")
     def api_companies():
-        companies = load_companies(config.companies_path)
+        companies = load_companies(config.companies_path, config.legacy_companies_yaml_path)
         return jsonify(
             [
                 {
@@ -99,6 +159,9 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
                     "funding_total_usd": c.funding_total_usd,
                     "last_funding_round": c.last_funding_round,
                     "last_funding_date": c.last_funding_date,
+                    "ipo_date": c.ipo_date,
+                    "stock_exchange": c.stock_exchange,
+                    "is_public": c.is_public,
                     "source_url": c.source_url,
                     "notes": c.notes,
                     "auto_extracted": c.auto_extracted,
@@ -107,11 +170,59 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             ]
         )
 
-    @app.get("/api/papers")
-    def api_papers():
+    @app.get("/api/companies/possible-duplicates")
+    def api_possible_duplicate_companies():
+        # Flagged, never auto-merged — see company_store's module
+        # docstring for why a name-similarity score alone can't be
+        # trusted to decide two companies are the same one.
+        pairs = find_possible_duplicate_companies(config.companies_path)
+        return jsonify([{"a": a, "b": b, "ratio": round(ratio, 2)} for a, b, ratio in pairs])
+
+    @app.post("/api/companies/merge")
+    def api_merge_companies():
+        payload = request.get_json(force=True) or {}
+        keep, drop = payload.get("keep"), payload.get("drop")
+        if not keep or not drop:
+            return jsonify({"ok": False, "message": "Both 'keep' and 'drop' are required."}), 400
+        merge_company_pair(config.companies_path, keep_name=keep, drop_name=drop)
+        return jsonify({"ok": True})
+
+    @app.get("/api/jobs")
+    def api_jobs():
         db = DB(config.db_path)
         try:
-            rows = db.papers(config.raw.get("enrichment", {}).get("sources", ["arxiv", "news", "blog"]))
+            rows = db.job_postings()
+        finally:
+            db.close()
+        return jsonify(
+            [
+                {
+                    "id": r["id"],
+                    "org": r["org"],
+                    "platform": r["platform"],
+                    "title": r["title"],
+                    "url": r["url"],
+                    "location": r["location"],
+                    "first_seen_at": r["first_seen_at"],
+                    "last_seen_at": r["last_seen_at"],
+                    "removed_at": r["removed_at"],
+                }
+                for r in rows
+            ]
+        )
+
+    @app.get("/api/papers")
+    def api_papers():
+        # Renamed "Sources" in the UI — this used to default to just
+        # arxiv/news/blog, which silently hid manually-pasted LinkedIn/
+        # social/event clips from the table entirely. Now it shows every
+        # source by default; the source filter dropdown narrows it down
+        # to just arXiv (or whatever) if that's all you want.
+        db = DB(config.db_path)
+        try:
+            rows = db.papers(
+                config.raw.get("enrichment", {}).get("sources", ["arxiv", "news", "blog", "linkedin", "social", "event", "clip"])
+            )
         finally:
             db.close()
         return jsonify(
@@ -134,6 +245,40 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
                 for r in rows
             ]
         )
+
+    @app.get("/api/orgs")
+    def api_orgs():
+        # Every org besseleth has ever extracted, not just the ones that
+        # geocoded (that subset is /api/locations, for the map). Enriched
+        # with funding/stock data from the companies table where the
+        # names match, so this one table covers labs, academic/gov orgs,
+        # and funded companies alike.
+        db = DB(config.db_path)
+        try:
+            rows = db.orgs()
+        finally:
+            db.close()
+        companies_by_name = {c.name.lower(): c for c in load_companies(config.companies_path, config.legacy_companies_yaml_path)}
+        result = []
+        for r in rows:
+            company = companies_by_name.get((r["org"] or "").lower())
+            result.append(
+                {
+                    "org": r["org"],
+                    "org_description": r["org_description"],
+                    "source_url": r["source_url"],
+                    "org_type": r["org_type"],
+                    "location_text": r["location_text"],
+                    "lat": r["lat"],
+                    "lon": r["lon"],
+                    "item_count": r["n"],
+                    "sources": (r["sources"] or "").split(","),
+                    "stock_ticker": company.stock_ticker if company else None,
+                    "funding_total_usd": company.funding_total_usd if company else None,
+                    "last_funding_round": company.last_funding_round if company else None,
+                }
+            )
+        return jsonify(result)
 
     @app.get("/api/locations")
     def api_locations():
@@ -163,6 +308,40 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             entry["total"] += r["n"]
             entry["by_source"][r["source"]] = entry["by_source"].get(r["source"], 0) + r["n"]
         return jsonify(list(by_org.values()))
+
+    @app.get("/api/contacts/locations")
+    def api_contacts_locations():
+        # Where your contacts work, for the Map tab's "friends" layer —
+        # reuses org_location_cache (see enrich.py's
+        # _backfill_contact_locations), so this is a cache read, not a
+        # live lookup: fast, and never blocks a page load on a network
+        # call. A contact whose employer hasn't been resolved yet (new
+        # contact, or the next enrich run hasn't reached it) is just
+        # skipped rather than shown with no location.
+        db = DB(config.db_path)
+        try:
+            points = []
+            for contact in config.contacts:
+                workplaces = contact.get("workplaces") or []
+                if not workplaces or not workplaces[0].get("company"):
+                    continue
+                company = workplaces[0]["company"]
+                cached = db.get_org_location_cache(company)
+                if not cached or not cached["found"]:
+                    continue
+                points.append(
+                    {
+                        "name": contact.get("name"),
+                        "company": company,
+                        "role": workplaces[0].get("role", ""),
+                        "location_text": cached["location_text"],
+                        "lat": cached["lat"],
+                        "lon": cached["lon"],
+                    }
+                )
+        finally:
+            db.close()
+        return jsonify(points)
 
     @app.get("/api/metrics")
     def api_metrics():
@@ -208,12 +387,27 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
     def api_enrich():
         from ..enrich import enrich_items_detailed
 
+        force = bool((request.get_json(silent=True) or {}).get("force"))
         db = DB(config.db_path)
         try:
-            result = enrich_items_detailed(config, db)
+            result = enrich_items_detailed(config, db, force=force)
         finally:
             db.close()
-        return jsonify({"ok": True, "enriched": result["processed"], "message": result["message"], "backend": result["backend"]})
+        return jsonify({
+            "ok": True, "enriched": result["processed"], "message": result["message"], "backend": result["backend"],
+            "stats": result.get("stats"),
+        })
+
+    @app.get("/api/enrich/stats")
+    def api_enrich_stats():
+        # Read-only — for the dashboard to show "enriched N items so far,
+        # avg Xs/item" on page load, without triggering a run.
+        db = DB(config.db_path)
+        try:
+            stats = db.get_enrich_stats()
+        finally:
+            db.close()
+        return jsonify(stats)
 
     @app.post("/api/backfill")
     def api_backfill():
@@ -276,6 +470,166 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
                 for r in rows
             ]
         )
+
+    @app.get("/api/feeds")
+    def api_feeds():
+        return jsonify(load_feeds(config.feeds_path))
+
+    @app.post("/api/feeds")
+    def api_add_feed():
+        payload = request.get_json(silent=True) or {}
+        category = payload.get("category", "")
+        url = (payload.get("url") or "").strip()
+        label = (payload.get("label") or "").strip()
+        if category not in ("news", "blog"):
+            return jsonify({"ok": False, "message": "category must be 'news' or 'blog'."}), 400
+        if not url.startswith(("http://", "https://")):
+            return jsonify({"ok": False, "message": "URL must start with http:// or https://."}), 400
+
+        added = add_feed(config.feeds_path, category, url, label)
+        if not added:
+            return jsonify({"ok": False, "message": "That feed URL is already in the list."}), 409
+
+        # Best-effort validation, after adding: a feed that fails to parse
+        # right now might just be a transient fetch error, not a bad URL
+        # (some sites block server-side/non-browser requests intermittently),
+        # so this warns rather than rejecting the submission outright — it
+        # stays in the list either way and gets retried on the next fetch.
+        warning = None
+        try:
+            import feedparser
+
+            parsed = feedparser.parse(url)
+            if not parsed.entries:
+                warning = "Added, but couldn't find any entries in it just now — double-check the URL, or it may just be temporarily empty/unreachable."
+        except Exception:
+            warning = "Added, but couldn't validate it just now — it'll still be tried on the next fetch."
+
+        return jsonify({"ok": True, "warning": warning})
+
+    @app.delete("/api/feeds")
+    def api_remove_feed():
+        payload = request.get_json(silent=True) or {}
+        category = payload.get("category", "")
+        url = (payload.get("url") or "").strip()
+        if category not in ("news", "blog"):
+            return jsonify({"ok": False, "message": "category must be 'news' or 'blog'."}), 400
+        removed = remove_feed(config.feeds_path, category, url)
+        if not removed:
+            abort(404)
+        return jsonify({"ok": True})
+
+    @app.get("/api/interests")
+    def api_interests():
+        return jsonify(load_interests(config.interests_path))
+
+    @app.post("/api/interests")
+    def api_save_interests():
+        payload = request.get_json(force=True) or {}
+        interests = payload.get("interests") or []
+        if not isinstance(interests, list):
+            return jsonify({"ok": False, "message": "'interests' must be a list of strings."}), 400
+        save_interests(interests, config.interests_path)
+        return jsonify({"ok": True, "interests": load_interests(config.interests_path)})
+
+    @app.get("/api/contacts")
+    def api_contacts():
+        contacts = load_contacts(config.contacts_path)
+        return jsonify(
+            [
+                {
+                    "index": i, "name": c.name, "emails": c.emails, "linkedin_url": c.linkedin_url,
+                    "workplaces": c.workplaces, "schools": c.schools,
+                    "relationship": c.relationship, "notes": c.notes,
+                }
+                for i, c in enumerate(contacts)
+            ]
+        )
+
+    def _parse_lines(text: str, key_a: str, key_b: str) -> list[dict]:
+        """One entry per non-blank line, "Value — Detail" (em dash, or a
+        plain hyphen) splitting into {key_a: Value, key_b: Detail} — the
+        detail half is optional (a line with no separator just gets an
+        empty key_b). Used for the Workplaces ("Company — Role") and
+        Schools ("School — Level") textareas."""
+        entries = []
+        for line in (text or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = re.split(r"\s*[—-]\s*", line, maxsplit=1)
+            value = parts[0].strip()
+            detail = parts[1].strip() if len(parts) > 1 else ""
+            if value:
+                entries.append({key_a: value, key_b: detail})
+        return entries
+
+    def _contact_from_payload(payload: dict) -> Contact | None:
+        name = (payload.get("name") or "").strip()
+        if not name:
+            return None
+        emails = [e.strip() for e in (payload.get("emails") or "").split(",") if e.strip()]
+        return Contact(
+            name=name,
+            emails=emails,
+            linkedin_url=(payload.get("linkedin_url") or "").strip(),
+            workplaces=_parse_lines(payload.get("workplaces", ""), "company", "role"),
+            schools=_parse_lines(payload.get("schools", ""), "name", "level"),
+            relationship=(payload.get("relationship") or "").strip(),
+            notes=(payload.get("notes") or "").strip(),
+        )
+
+    @app.post("/api/contacts")
+    def api_add_contact():
+        payload = request.get_json(silent=True) or {}
+        contact = _contact_from_payload(payload)
+        if not contact:
+            return jsonify({"ok": False, "message": "Name is required."}), 400
+        add_contact(config.contacts_path, contact)
+        return jsonify({"ok": True})
+
+    @app.put("/api/contacts/<int:index>")
+    def api_update_contact(index):
+        payload = request.get_json(silent=True) or {}
+        contact = _contact_from_payload(payload)
+        if not contact:
+            return jsonify({"ok": False, "message": "Name is required."}), 400
+        if not update_contact(config.contacts_path, index, contact):
+            abort(404)
+        return jsonify({"ok": True})
+
+    @app.delete("/api/contacts/<int:index>")
+    def api_remove_contact(index):
+        if not remove_contact(config.contacts_path, index):
+            abort(404)
+        return jsonify({"ok": True})
+
+    @app.post("/api/contacts/import-linkedin")
+    def api_import_linkedin():
+        # LinkedIn has no API for pulling your connections into a third-
+        # party app — this reads the CSV LinkedIn itself lets you export
+        # (Settings & Privacy -> Data privacy -> Get a copy of your data
+        # -> Connections). Not live sync, but a real bulk import.
+        uploaded = request.files.get("file")
+        if not uploaded:
+            return jsonify({"ok": False, "message": "No file uploaded."}), 400
+        try:
+            text = uploaded.read().decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return jsonify({"ok": False, "message": "Couldn't read that file as text — is it the CSV LinkedIn emailed you?"}), 400
+        # Your LinkedIn export is your whole network, not just neurotech —
+        # only import connections whose company/title look on-topic, using
+        # the same keyword list scrapers use to judge relevance.
+        added = import_linkedin_csv(config.contacts_path, text, keywords=config.keywords)
+        if added == 0:
+            return jsonify({
+                "ok": True, "added": 0,
+                "message": (
+                    "Found 0 new contacts — either everyone relevant is already added, this doesn't look "
+                    f"like a LinkedIn Connections.csv export, or nobody in it looks like {config.industry_name}."
+                ),
+            })
+        return jsonify({"ok": True, "added": added, "message": f"Added {added} new contact(s) working in {config.industry_name}."})
 
     @app.delete("/api/item/<item_id>")
     def api_delete_item(item_id):

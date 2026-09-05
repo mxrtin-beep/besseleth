@@ -2,15 +2,26 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>{{ industry }} — besseleth</title>
+<title>Besseleth — {{ industry }}</title>
 <link rel="icon" type="image/png" href="/static/favicon.png">
 <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.32.0/plotly.min.js"></script>
 <style>
-  :root { color-scheme: light dark; }
-  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; display: flex; height: 100vh; }
-  aside { width: 240px; border-right: 1px solid #8883; padding: 1rem; overflow-y: auto; flex-shrink: 0; }
+  /* Fixed light theme, deliberately: the tan background is hardcoded, so
+     color-scheme: light dark previously let a dark-mode OS pick white
+     text over it via default UA styling — unreadable. Forcing both here
+     keeps them paired regardless of system theme. */
+  :root { color-scheme: light; }
+  body { font-family: Helvetica, Arial, sans-serif; margin: 0; display: flex; height: 100vh;
+         background: #f6f2e8; color: #0d1b3e; }
+  aside { width: 240px; border-right: 1px solid #8883; padding: 1rem; overflow-y: auto; flex-shrink: 0; position: relative; }
+  aside.collapsed { display: none; }
+  aside .collapseBtn { position: absolute; top: .5rem; right: .5rem; border: none; background: none; cursor: pointer;
+               opacity: .5; font-size: .9rem; padding: .2rem .4rem; border-radius: 4px; }
+  aside .collapseBtn:hover { opacity: 1; background: #8882; }
+  #showSidebarBtn { display: none; position: fixed; top: .75rem; left: .75rem; z-index: 10; border: 1px solid #8886;
+               background: #f6f2e8; cursor: pointer; padding: .35rem .6rem; border-radius: 6px; font-size: .9rem; }
   main { flex: 1; overflow-y: auto; padding: 1.5rem 2rem; }
-  h1 { font-size: 1.3rem; margin: 0 0 1rem; }
+  h1 { font-size: 1.3rem; margin: 0 0 1rem; padding-right: 1.5rem; }
   nav .reportRow { display: flex; align-items: center; margin-bottom: .25rem; border-radius: 6px; }
   nav .reportRow:hover, nav .reportRow.active { background: #8882; }
   nav .reportRow button.reportBtn { flex: 1; text-align: left; padding: .5rem; border: none; background: none;
@@ -38,6 +49,11 @@
   table.datatable { border-collapse: collapse; width: 100%; margin-top: 1rem; font-size: .85rem; }
   table.datatable th, table.datatable td { border: 1px solid #8883; padding: .5rem .7rem; text-align: left; vertical-align: top; }
   table.datatable th { background: #8881; }
+  /* Fixed layout + explicit column widths (via <colgroup>) so a long
+     value in one column (e.g. a verbose location) can't squeeze another
+     (e.g. the job title) into a narrow, multi-line wrap. */
+  #jobsTable { table-layout: fixed; }
+  #jobsTable td { overflow-wrap: break-word; }
   .metric-tags { display: flex; flex-wrap: wrap; gap: .3rem; }
   .metric-tag { display: inline-block; border: 1px solid #4a90d966; background: #4a90d914; border-radius: 999px;
                 padding: .15rem .6rem; font-size: .78rem; white-space: nowrap; }
@@ -45,10 +61,6 @@
   a { color: #4a90d9; }
   #statusBar { display: flex; align-items: center; gap: .75rem; padding: .6rem 1rem; margin-bottom: 1rem;
                border: 1px solid #8883; border-radius: 8px; font-size: .82rem; flex-wrap: wrap; }
-  #statusBar .dot { width: 8px; height: 8px; border-radius: 50%; background: #adb5bd; flex-shrink: 0; }
-  #statusBar .dot.live { background: #2a9d8f; }
-  #statusBar .dot.busy { background: #e9c46a; animation: pulse 1s infinite; }
-  @keyframes pulse { 50% { opacity: .3; } }
   #statusBar .spacer { margin-left: auto; }
   #pasteResult { margin-top: .75rem; font-size: .88rem; }
   #pasteResult.ok { color: #2a9d8f; }
@@ -61,7 +73,8 @@
 </style>
 </head>
 <body>
-<aside>
+<aside id="sidebar">
+  <button class="collapseBtn" id="collapseSidebarBtn" title="Hide sidebar">&laquo;</button>
   <h1>{{ industry }}</h1>
   <p class="hint">Reports</p>
   <nav id="reportNav">
@@ -75,9 +88,9 @@
     {% endfor %}
   </nav>
 </aside>
+<button id="showSidebarBtn" title="Show sidebar">&raquo; Reports</button>
 <main>
   <div id="statusBar">
-    <span class="dot" id="statusDot"></span>
     <span id="statusText">Loading status…</span>
     <span class="spacer"></span>
     <label class="hint" for="backfillDate" style="margin:0">Backfill from</label>
@@ -88,22 +101,26 @@
 
   <div class="tabs">
     <button id="tabReport" class="active">Report</button>
-    <button id="tabPapers">Papers</button>
+    <button id="tabPapers">Sources</button>
+    <button id="tabOrgs">Orgs</button>
+    <button id="tabJobs">Jobs</button>
     <button id="tabMap">Map</button>
-    <button id="tabTrends">Trends explorer</button>
+    <button id="tabTrends">Trends</button>
     <button id="tabPaste">Paste</button>
+    <button id="tabContacts">Contacts</button>
   </div>
 
   <div id="reportPane"><p class="hint">Pick a report from the sidebar.</p></div>
 
   <div id="papersPane" style="display:none">
-    <p class="hint">Every arXiv/news/blog item besseleth has ever fetched, in one browsable, filterable table —
-      not just this week's. Org, modality, and therapeutic target are extracted by the local LLM after each fetch
-      (bounded per run — <code>besseleth.cli enrich --all</code> catches up a backlog); the novelty score rates
-      how surprising an item is compared to other recent items on the same topic.
-      <button class="btn" id="enrichNowBtn" style="margin-left:.5rem">Enrich now</button>
+    <p>
+      <button class="btn" id="enrichNowBtn">Enrich now</button>
+      <label style="margin-left:.8rem; font-size:.85rem; font-weight:normal;">
+        <input type="checkbox" id="enrichForce"> Re-check already-enriched items too
+      </label>
     </p>
     <p class="hint" id="enrichResult"></p>
+    <p class="hint" id="enrichStats"></p>
     <div class="controls">
       <div><label for="pfFrom">From</label><input type="date" id="pfFrom"></div>
       <div><label for="pfTo">To</label><input type="date" id="pfTo"></div>
@@ -124,11 +141,30 @@
     <table class="datatable" id="papersTable"></table>
   </div>
 
+  <div id="orgsPane" style="display:none">
+    <div class="controls">
+      <div><label for="ofOrgType">Org type</label><select id="ofOrgType"><option value="">All</option></select></div>
+      <div><label for="ofSource">Source</label><select id="ofSource"><option value="">All</option></select></div>
+    </div>
+    <p class="hint" id="orgsCount"></p>
+    <table class="datatable" id="orgsTable"></table>
+  </div>
+
+  <div id="jobsPane" style="display:none">
+    <div class="controls">
+      <div><label for="jfOrg">Org</label><select id="jfOrg"><option value="">All</option></select></div>
+      <div><label for="jfStatus">Status</label><select id="jfStatus">
+        <option value="active">Active only</option><option value="">All (incl. removed)</option>
+      </select></div>
+    </div>
+    <p class="hint" id="jobsCount"></p>
+    <table class="datatable" id="jobsTable"></table>
+  </div>
+
   <div id="mapPane" style="display:none">
-    <p class="hint">Where the companies/labs behind your papers and news are located — one marker per org, sized by
-      how much has been fetched about it. Locations are the local LLM's best guess from item text (only saved when
-      it's confident, not a guess), geocoded via <a href="https://www.openstreetmap.org/copyright" target="_blank"
-      rel="noopener">OpenStreetMap</a>. Click a marker to filter the Papers tab by that org.</p>
+    <label style="display:flex; align-items:center; gap:.4rem; font-size:.9rem; margin-bottom:.5rem;">
+      <input type="checkbox" id="mapShowFriends"> Show friends (from Contacts, at their current employer)
+    </label>
     <div id="mapChart"></div>
     <p class="hint" id="mapCount"></p>
     <table class="datatable" id="mapTable"></table>
@@ -137,35 +173,39 @@
   <div id="trendsPane" style="display:none">
     <div class="controls">
       <div class="dataset-toggle">
-        <button id="dsDevices" class="active">Devices</button><button id="dsCompanies">Companies</button>
+        <button id="dsDevices" class="active">Devices</button><button id="dsCompanies">Companies</button><button id="dsFdaTimeline">FDA timeline</button><button id="dsIpoTimeline">IPO timeline</button>
       </div>
-      <div>
-        <label for="xAxis">X axis</label>
-        <select id="xAxis"></select>
-      </div>
-      <div>
-        <label for="yAxis">Y axis</label>
-        <select id="yAxis"></select>
-      </div>
-      <div id="colorByWrap">
-        <label for="colorBy">Color by</label>
-        <select id="colorBy">
-          <option value="fda_status">FDA status</option>
-          <option value="org_type">Org type</option>
-          <option value="device_type">Device type</option>
-          <option value="material">Material</option>
-        </select>
+      <div id="axisControls">
+        <div>
+          <label for="xAxis">X axis</label>
+          <select id="xAxis"></select>
+        </div>
+        <div>
+          <label for="yAxis">Y axis</label>
+          <select id="yAxis"></select>
+        </div>
+        <div id="colorByWrap">
+          <label for="colorBy">Color by</label>
+          <select id="colorBy">
+            <option value="fda_status">FDA status</option>
+            <option value="org_type">Org type</option>
+            <option value="device_type">Device type</option>
+            <option value="material">Material</option>
+          </select>
+        </div>
       </div>
     </div>
     <div id="chart"></div>
-    <p class="hint">Hover a point for its details and source; click it to open the source link. This accumulates over time — every device/company you or device-suggest add stays here across every future report.</p>
+    <p class="hint" id="trendsHint">Hover a point for its details and source; click it to open the source link. This accumulates over time — every device/company you or device-suggest add stays here across every future report.</p>
+    <div id="possibleDupesBox" style="display:none; margin-bottom:1rem; padding:.75rem 1rem; border:1px solid #e0763666; border-radius:8px; background:#e0763611;">
+      <strong style="font-size:.9rem;">Possible duplicate companies</strong>
+      <p class="hint" style="margin:.3rem 0 .6rem;">Flagged by name similarity only — not merged automatically, since a similar name is just as often two real, different companies. Check both before merging.</p>
+      <div id="possibleDupesList"></div>
+    </div>
     <table class="datatable" id="dataTable"></table>
   </div>
 
   <div id="pastePane" style="display:none">
-    <p class="hint">One box for anything — a LinkedIn post, a Bluesky/X post, a Luma/Eventbrite page, a Substack
-      post, whatever. Paste the text (and its URL, if it's not already in the text) and besseleth figures out
-      which source it belongs to from the link.</p>
     <div class="controls" style="align-items:stretch">
       <div style="flex:1; min-width: 300px">
         <label for="pasteText">Paste content</label>
@@ -185,41 +225,156 @@
     <p class="hint">Deleting here removes it outright — unlike scraped items, a paste can't be re-fetched, so this
       is the way to take one back (wrong link, changed your mind, duplicate).</p>
     <table class="datatable" id="pastedTable"></table>
+
+    <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Add a feed</h3>
+    <p class="hint">Add an RSS/Atom feed URL for besseleth to check on every fetch, alongside the ones already in
+      config.yaml — for a news/trade-press site or a blog it's missing. No code editing required; takes effect on
+      the next fetch, no restart needed.</p>
+    <div class="controls" style="align-items:stretch">
+      <div><label for="feedCategory">Type</label><select id="feedCategory">
+        <option value="news">News</option><option value="blog">Blog</option>
+      </select></div>
+      <div style="flex:1; min-width:280px">
+        <label for="feedUrl">Feed URL</label>
+        <input type="text" id="feedUrl" style="width:100%; box-sizing:border-box" placeholder="https://example.com/feed">
+      </div>
+      <div style="flex:1; min-width:180px">
+        <label for="feedLabel">Label (optional)</label>
+        <input type="text" id="feedLabel" style="width:100%; box-sizing:border-box" placeholder="e.g. site name">
+      </div>
+      <div><button class="btn" id="addFeedBtn">Add</button></div>
+    </div>
+    <div id="feedResult"></div>
+
+    <h3 style="margin-top:2rem; font-size:1rem;">News feeds</h3>
+    <table class="datatable" id="newsFeedsTable"></table>
+    <h3 style="margin-top:1.5rem; font-size:1rem;">Blog feeds</h3>
+    <table class="datatable" id="blogFeedsTable"></table>
+  </div>
+
+  <div id="contactsPane" style="display:none">
+    <h3 style="margin-top:0; font-size:1rem;">Your interests</h3>
+    <p class="hint">Topics you personally care about, independent of any contact — an item mentioning one of these
+      shows up in "For you" the same way a mention of a contact's employer does (matched as a whole phrase,
+      case-insensitive). One per line.</p>
+    <div class="controls" style="align-items:stretch">
+      <div style="flex:1; min-width:300px">
+        <textarea id="interestsText" style="width:100%; box-sizing:border-box; min-height:80px" placeholder="speech decoding&#10;wireless power transfer"></textarea>
+      </div>
+      <div><button class="btn" id="saveInterestsBtn">Save</button></div>
+    </div>
+    <div id="interestsResult"></div>
+
+    <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Contacts</h3>
+    <div class="controls" style="align-items:stretch; flex-wrap:wrap">
+      <div><label for="contactName">Name *</label><input type="text" id="contactName" placeholder="Jane Doe"></div>
+      <div><label for="contactEmails">Email(s)</label><input type="text" id="contactEmails" placeholder="jane@example.com, jane@work.com"></div>
+      <div><label for="contactLinkedin">LinkedIn URL</label><input type="text" id="contactLinkedin" placeholder="https://linkedin.com/in/..."></div>
+      <div><label for="contactRelationship">Relationship</label><input type="text" id="contactRelationship" placeholder="college friend"></div>
+    </div>
+    <div class="controls" style="align-items:stretch; flex-wrap:wrap">
+      <div style="flex:1; min-width:260px">
+        <label for="contactWorkplaces">Workplaces (one per line, "Company — Role")</label>
+        <textarea id="contactWorkplaces" style="width:100%; box-sizing:border-box; min-height:64px" placeholder="Neuralink — Research Scientist&#10;Kernel — Software Engineer"></textarea>
+      </div>
+      <div style="flex:1; min-width:260px">
+        <label for="contactSchools">Schools (one per line, "School — Level")</label>
+        <textarea id="contactSchools" style="width:100%; box-sizing:border-box; min-height:64px" placeholder="Stanford — Undergrad&#10;MIT — PhD"></textarea>
+      </div>
+      <div style="flex:1; min-width:200px">
+        <label for="contactNotes">Notes</label>
+        <textarea id="contactNotes" style="width:100%; box-sizing:border-box; min-height:64px" placeholder="optional"></textarea>
+      </div>
+    </div>
+    <div class="controls">
+      <div><button class="btn" id="addContactBtn">Add contact</button></div>
+      <div><button class="btn" id="cancelEditContactBtn" style="display:none">Cancel edit</button></div>
+    </div>
+    <div id="contactResult"></div>
+    <table class="datatable" id="contactsTable" style="margin-top:1rem"></table>
+
+    <h3 style="margin-top:2rem; font-size:1rem;">Import from LinkedIn</h3>
+    <p class="hint">LinkedIn has no API for pulling your connections into a third-party app — there's no live sync
+      to offer here. What LinkedIn does let you do: export them yourself as a CSV (Settings &amp; Privacy → Data
+      privacy → "Get a copy of your data" → check <b>Connections</b> → request archive; LinkedIn emails a download
+      link, sometimes after a delay). Upload that CSV here for a one-time bulk import — name, email, LinkedIn URL,
+      and current company/title get filled in automatically (it has no education data, so schools still need
+      adding by hand). Safe to re-upload later; already-added contacts are skipped.</p>
+    <div class="controls" style="align-items:stretch">
+      <div><input type="file" id="linkedinCsvFile" accept=".csv"></div>
+      <div><button class="btn" id="importLinkedinBtn">Import</button></div>
+    </div>
+    <div id="linkedinImportResult"></div>
   </div>
 </main>
 
 <script>
+// --- Reports sidebar collapse (per-viewer, remembered across reloads) ---
+(() => {
+  const sidebar = document.getElementById('sidebar');
+  const collapseBtn = document.getElementById('collapseSidebarBtn');
+  const showBtn = document.getElementById('showSidebarBtn');
+  function setCollapsed(collapsed) {
+    sidebar.classList.toggle('collapsed', collapsed);
+    showBtn.style.display = collapsed ? 'block' : 'none';
+    try { localStorage.setItem('besseleth_sidebar_collapsed', collapsed ? '1' : '0'); } catch (e) { /* private browsing, etc. — just don't remember it */ }
+  }
+  collapseBtn.onclick = () => setCollapsed(true);
+  showBtn.onclick = () => setCollapsed(false);
+  let startCollapsed = false;
+  try { startCollapsed = localStorage.getItem('besseleth_sidebar_collapsed') === '1'; } catch (e) {}
+  setCollapsed(startCollapsed);
+})();
+
 const reportPane = document.getElementById('reportPane');
 const papersPane = document.getElementById('papersPane');
+const orgsPane = document.getElementById('orgsPane');
+const jobsPane = document.getElementById('jobsPane');
 const mapPane = document.getElementById('mapPane');
 const trendsPane = document.getElementById('trendsPane');
 const pastePane = document.getElementById('pastePane');
+const contactsPane = document.getElementById('contactsPane');
 const tabReport = document.getElementById('tabReport');
 const tabPapers = document.getElementById('tabPapers');
+const tabOrgs = document.getElementById('tabOrgs');
+const tabJobs = document.getElementById('tabJobs');
 const tabMap = document.getElementById('tabMap');
 const tabTrends = document.getElementById('tabTrends');
 const tabPaste = document.getElementById('tabPaste');
+const tabContacts = document.getElementById('tabContacts');
 
 function showTab(which) {
   reportPane.style.display = which === 'report' ? 'block' : 'none';
   papersPane.style.display = which === 'papers' ? 'block' : 'none';
+  orgsPane.style.display = which === 'orgs' ? 'block' : 'none';
+  jobsPane.style.display = which === 'jobs' ? 'block' : 'none';
   mapPane.style.display = which === 'map' ? 'block' : 'none';
   trendsPane.style.display = which === 'trends' ? 'block' : 'none';
   pastePane.style.display = which === 'paste' ? 'block' : 'none';
+  contactsPane.style.display = which === 'contacts' ? 'block' : 'none';
   tabReport.classList.toggle('active', which === 'report');
   tabPapers.classList.toggle('active', which === 'papers');
+  tabOrgs.classList.toggle('active', which === 'orgs');
+  tabJobs.classList.toggle('active', which === 'jobs');
   tabMap.classList.toggle('active', which === 'map');
   tabTrends.classList.toggle('active', which === 'trends');
   tabPaste.classList.toggle('active', which === 'paste');
+  tabContacts.classList.toggle('active', which === 'contacts');
   if (which === 'papers' && !papersLoaded) loadPapers();
+  if (which === 'orgs' && !orgsLoaded) loadOrgs();
+  if (which === 'jobs' && !jobsLoaded) loadJobs();
   if (which === 'map' && !mapLoaded) loadMap();
-  if (which === 'paste') loadPasted();
+  if (which === 'paste') { loadPasted(); loadFeeds(); }
+  if (which === 'contacts') { loadContacts(); loadInterests(); }
 }
 tabReport.onclick = () => showTab('report');
 tabPapers.onclick = () => showTab('papers');
+tabOrgs.onclick = () => showTab('orgs');
+tabJobs.onclick = () => showTab('jobs');
 tabMap.onclick = () => showTab('map');
 tabTrends.onclick = () => showTab('trends');
 tabPaste.onclick = () => showTab('paste');
+tabContacts.onclick = () => showTab('contacts');
 
 function wireReportNav() {
   document.querySelectorAll('.reportBtn').forEach(btn => {
@@ -230,6 +385,10 @@ function wireReportNav() {
       const res = await fetch(`/api/report/${btn.dataset.report}`);
       const data = await res.json();
       reportPane.innerHTML = data.html;
+      // The rendered-from-markdown report body doesn't set target itself
+      // (python-markdown has no option for it) — every citation link in
+      // it should still open in a new tab like the rest of the dashboard.
+      reportPane.querySelectorAll('a:not([target])').forEach(a => { a.target = '_blank'; a.rel = 'noopener'; });
     };
   });
   document.querySelectorAll('.delBtn').forEach(btn => {
@@ -238,7 +397,19 @@ function wireReportNav() {
       const rid = btn.dataset.del;
       if (!confirm(`Delete report ${rid}? This can't be undone.`)) return;
       await fetch(`/api/report/${rid}`, { method: 'DELETE' });
-      btn.closest('.reportRow').remove();
+      const row = btn.closest('.reportRow');
+      const wasActive = row.classList.contains('active');
+      row.remove();
+      // Deleting the report you're currently looking at removed its
+      // sidebar row, but left the already-rendered content sitting in
+      // the main pane — nothing told it to refresh. Load whatever's
+      // next in the list, or the empty-state placeholder if that was
+      // the last one.
+      if (wasActive) {
+        const next = document.querySelector('.reportBtn');
+        if (next) next.click();
+        else reportPane.innerHTML = '<p class="hint">Pick a report from the sidebar.</p>';
+      }
     };
   });
 }
@@ -248,7 +419,6 @@ document.querySelector('.reportBtn').click();
 {% endif %}
 
 // --- Status bar / scheduler control / backfill --------------------------
-const statusDot = document.getElementById('statusDot');
 const statusText = document.getElementById('statusText');
 const runNowBtn = document.getElementById('runNowBtn');
 const backfillBtn = document.getElementById('backfillBtn');
@@ -280,7 +450,6 @@ async function pollStatus() {
   try {
     const res = await fetch('/api/status');
     const s = await res.json();
-    statusDot.className = 'dot ' + (s.running_now ? 'busy' : (s.enabled ? 'live' : ''));
     runNowBtn.disabled = s.running_now;
     backfillBtn.disabled = s.running_now;
     runNowBtn.textContent = s.running_now ? 'Running…' : 'Run now';
@@ -290,8 +459,8 @@ async function pollStatus() {
     } else if (s.running_now) {
       statusText.textContent = 'Fetching/summarizing now…';
     } else {
-      const parts = [`Last fetch: ${fmtAgo(s.last_fetch_at)}`, `next ${fmtUntil(s.next_fetch_at)}`,
-                      `· Last report: ${fmtAgo(s.last_report_at)}`, `next ${fmtUntil(s.next_report_at)}`];
+      const parts = [`Last fetch: ${fmtAgo(s.last_fetch_at)}`, `— next ${fmtUntil(s.next_fetch_at)}`,
+                      `· Last report: ${fmtAgo(s.last_report_at)}`, `— next ${fmtUntil(s.next_report_at)}`];
       if (s.last_error) parts.push(`· ⚠ ${s.last_error}`);
       statusText.textContent = parts.join(' ');
     }
@@ -303,7 +472,6 @@ async function pollStatus() {
 runNowBtn.onclick = async () => {
   runNowBtn.disabled = true;
   runNowBtn.textContent = 'Running…';
-  statusDot.className = 'dot busy';
   statusText.textContent = 'Fetching/summarizing now…';
   try {
     await fetch('/api/run-now', { method: 'POST' });
@@ -398,18 +566,252 @@ async function loadPasted() {
   });
 }
 
+// --- Feeds ---------------------------------------------------------------
+
+document.getElementById('addFeedBtn').onclick = async () => {
+  const category = document.getElementById('feedCategory').value;
+  const url = document.getElementById('feedUrl').value.trim();
+  const label = document.getElementById('feedLabel').value.trim();
+  const result = document.getElementById('feedResult');
+  if (!url) { result.className = 'err'; result.textContent = 'Enter a feed URL first.'; return; }
+  result.className = ''; result.textContent = 'Adding…';
+  try {
+    const res = await fetch('/api/feeds', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ category, url, label }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      result.className = data.warning ? 'err' : 'ok';
+      result.textContent = data.warning || 'Added — it\'ll be checked on the next fetch.';
+      document.getElementById('feedUrl').value = '';
+      document.getElementById('feedLabel').value = '';
+      loadFeeds();
+    } else {
+      result.className = 'err';
+      result.textContent = data.message || 'Failed to add.';
+    }
+  } catch (e) {
+    result.className = 'err';
+    result.textContent = 'Failed to add — see server log.';
+  }
+};
+
+function renderFeedsTable(tableId, category, feedList) {
+  const table = document.getElementById(tableId);
+  if (!feedList.length) {
+    table.innerHTML = '<tbody><tr><td class="hint">None submitted yet.</td></tr></tbody>';
+    return;
+  }
+  table.innerHTML = `
+    <thead><tr><th>Feed</th><th>Label</th><th>Added</th><th></th></tr></thead>
+    <tbody>${feedList.map(f => `
+      <tr data-feed-row="${category}:${f.url}">
+        <td><a href="${f.url}" target="_blank" rel="noopener">${f.url}</a></td>
+        <td>${f.label || ''}</td>
+        <td>${(f.added_at || '').slice(0, 10)}</td>
+        <td><button class="delBtn" data-del-feed="${f.url}" data-del-category="${category}" title="Remove">🗑</button></td>
+      </tr>`).join('')}</tbody>`;
+  table.querySelectorAll('[data-del-feed]').forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm('Remove this feed?')) return;
+      await fetch('/api/feeds', {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category: btn.dataset.delCategory, url: btn.dataset.delFeed }),
+      });
+      document.querySelector(`[data-feed-row="${btn.dataset.delCategory}:${btn.dataset.delFeed}"]`)?.remove();
+    };
+  });
+}
+
+async function loadFeeds() {
+  const res = await fetch('/api/feeds');
+  const feeds = await res.json();
+  renderFeedsTable('newsFeedsTable', 'news', feeds.news || []);
+  renderFeedsTable('blogFeedsTable', 'blog', feeds.blog || []);
+}
+
+// --- Contacts ------------------------------------------------------------
+let contacts = [];
+let editingContactIndex = null;
+
+const contactSimpleFieldIds = {
+  name: 'contactName', linkedin_url: 'contactLinkedin', relationship: 'contactRelationship', notes: 'contactNotes',
+};
+
+// [{company/name, role/level}] -> "Company — Role" / "School — Level" lines,
+// for populating the edit form (the server parses the reverse direction
+// when a form is submitted — see app.py's _parse_lines).
+function entriesToLines(entries, keyA, keyB) {
+  return (entries || []).map(e => e[keyB] ? `${e[keyA]} — ${e[keyB]}` : e[keyA]).join('\n');
+}
+
+function readContactForm() {
+  const data = {};
+  for (const [field, id] of Object.entries(contactSimpleFieldIds)) {
+    data[field] = document.getElementById(id).value.trim();
+  }
+  data.emails = document.getElementById('contactEmails').value.trim();
+  data.workplaces = document.getElementById('contactWorkplaces').value;
+  data.schools = document.getElementById('contactSchools').value;
+  return data;
+}
+
+function clearContactForm() {
+  for (const id of Object.values(contactSimpleFieldIds)) document.getElementById(id).value = '';
+  document.getElementById('contactEmails').value = '';
+  document.getElementById('contactWorkplaces').value = '';
+  document.getElementById('contactSchools').value = '';
+}
+
+function startEditContact(index) {
+  const c = contacts.find(x => x.index === index);
+  if (!c) return;
+  for (const [field, id] of Object.entries(contactSimpleFieldIds)) document.getElementById(id).value = c[field] || '';
+  document.getElementById('contactEmails').value = (c.emails || []).join(', ');
+  document.getElementById('contactWorkplaces').value = entriesToLines(c.workplaces, 'company', 'role');
+  document.getElementById('contactSchools').value = entriesToLines(c.schools, 'name', 'level');
+  editingContactIndex = index;
+  document.getElementById('addContactBtn').textContent = 'Save changes';
+  document.getElementById('cancelEditContactBtn').style.display = '';
+  document.getElementById('contactName').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function cancelEditContact() {
+  editingContactIndex = null;
+  clearContactForm();
+  document.getElementById('addContactBtn').textContent = 'Add contact';
+  document.getElementById('cancelEditContactBtn').style.display = 'none';
+}
+document.getElementById('cancelEditContactBtn').onclick = cancelEditContact;
+
+document.getElementById('addContactBtn').onclick = async () => {
+  const data = readContactForm();
+  const result = document.getElementById('contactResult');
+  if (!data.name) { result.className = 'err'; result.textContent = 'Name is required.'; return; }
+  result.className = ''; result.textContent = editingContactIndex === null ? 'Adding…' : 'Saving…';
+  try {
+    const url = editingContactIndex === null ? '/api/contacts' : `/api/contacts/${editingContactIndex}`;
+    const method = editingContactIndex === null ? 'POST' : 'PUT';
+    const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+    const respData = await res.json();
+    if (respData.ok) {
+      result.className = 'ok';
+      result.textContent = editingContactIndex === null ? 'Added.' : 'Saved.';
+      cancelEditContact();
+      loadContacts();
+    } else {
+      result.className = 'err';
+      result.textContent = respData.message || 'Failed.';
+    }
+  } catch (e) {
+    result.className = 'err';
+    result.textContent = 'Failed — see server log.';
+  }
+};
+
+function renderContacts() {
+  const table = document.getElementById('contactsTable');
+  if (!contacts.length) {
+    table.innerHTML = '<tbody><tr><td class="hint">No contacts yet — add one above, or import from LinkedIn below.</td></tr></tbody>';
+    return;
+  }
+  table.innerHTML = `
+    <thead><tr><th>Name</th><th>Email(s)</th><th>Workplaces</th><th>Schools</th><th>Relationship</th><th>Notes</th><th></th></tr></thead>
+    <tbody>${contacts.map(c => `
+      <tr>
+        <td>${c.linkedin_url ? `<a href="${c.linkedin_url}" target="_blank" rel="noopener">${c.name}</a>` : c.name}</td>
+        <td>${(c.emails || []).join(', ')}</td>
+        <td>${(c.workplaces || []).map(w => w.role ? `${w.company} (${w.role})` : w.company).join(', ')}</td>
+        <td>${(c.schools || []).map(s => s.level ? `${s.name} (${s.level})` : s.name).join(', ')}</td>
+        <td>${c.relationship || ''}</td>
+        <td>${c.notes || ''}</td>
+        <td>
+          <button class="delBtn" data-edit-contact="${c.index}" title="Edit">✏️</button>
+          <button class="delBtn" data-del-contact="${c.index}" title="Delete">🗑</button>
+        </td>
+      </tr>`).join('')}</tbody>`;
+  table.querySelectorAll('[data-edit-contact]').forEach(btn => {
+    btn.onclick = () => startEditContact(parseInt(btn.dataset.editContact, 10));
+  });
+  table.querySelectorAll('[data-del-contact]').forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm('Delete this contact?')) return;
+      await fetch(`/api/contacts/${btn.dataset.delContact}`, { method: 'DELETE' });
+      loadContacts();
+    };
+  });
+}
+
+async function loadContacts() {
+  const res = await fetch('/api/contacts');
+  contacts = await res.json();
+  renderContacts();
+}
+
+async function loadInterests() {
+  const res = await fetch('/api/interests');
+  const interests = await res.json();
+  document.getElementById('interestsText').value = interests.join('\n');
+}
+
+document.getElementById('saveInterestsBtn').onclick = async () => {
+  const result = document.getElementById('interestsResult');
+  const interests = document.getElementById('interestsText').value.split('\n').map(s => s.trim()).filter(Boolean);
+  result.textContent = 'Saving…';
+  try {
+    const res = await fetch('/api/interests', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ interests }),
+    });
+    const data = await res.json();
+    result.textContent = data.ok ? `Saved ${data.interests.length} interest(s).` : (data.message || 'Failed to save.');
+  } catch (e) {
+    result.textContent = 'Request failed — see server log.';
+  }
+};
+
+document.getElementById('importLinkedinBtn').onclick = async () => {
+  const fileInput = document.getElementById('linkedinCsvFile');
+  const result = document.getElementById('linkedinImportResult');
+  const file = fileInput.files[0];
+  if (!file) { result.className = 'err'; result.textContent = 'Choose a CSV file first.'; return; }
+  result.className = ''; result.textContent = 'Importing…';
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch('/api/contacts/import-linkedin', { method: 'POST', body: formData });
+    const data = await res.json();
+    if (data.ok) {
+      result.className = data.added > 0 ? 'ok' : '';
+      result.textContent = data.message;
+      fileInput.value = '';
+      loadContacts();
+    } else {
+      result.className = 'err';
+      result.textContent = data.message || 'Import failed.';
+    }
+  } catch (e) {
+    result.className = 'err';
+    result.textContent = 'Import failed — see server log.';
+  }
+};
+
 // --- Map ---------------------------------------------------------------
 let mapLoaded = false;
 let mapLocations = [];
+let friendLocations = [];
 
 const ORG_TYPE_COLORS = { industry: '#4a90d9', academic: '#e9c46a', government: '#2a9d8f', nonprofit: '#f4a261', unknown: '#adb5bd' };
+const FRIEND_COLOR = '#e07a5f';
 
 async function loadMap() {
   mapLoaded = true;
-  const res = await fetch('/api/locations');
-  mapLocations = await res.json();
+  const [locRes, friendRes] = await Promise.all([fetch('/api/locations'), fetch('/api/contacts/locations')]);
+  mapLocations = await locRes.json();
+  friendLocations = await friendRes.json();
   renderMap();
 }
+document.getElementById('mapShowFriends').onchange = renderMap;
 
 function renderMap() {
   document.getElementById('mapCount').textContent = `${mapLocations.length} located org(s).`;
@@ -430,14 +832,16 @@ function renderMap() {
       '<p class="hint">Chart library failed to load from the CDN (no internet access?). The table below still works.</p>';
     return;
   }
-  if (!mapLocations.length) {
+  const showFriends = document.getElementById('mapShowFriends').checked;
+  if (!mapLocations.length && !(showFriends && friendLocations.length)) {
     document.getElementById('mapChart').innerHTML =
       '<p class="hint">No located orgs yet — run <code>besseleth.cli enrich --all</code> (needs Ollama running) to backfill locations for existing items, or wait for the next fetch.</p>';
     return;
   }
 
-  const trace = {
+  const orgTrace = {
     type: 'scattergeo',
+    name: 'Sources',
     lat: mapLocations.map(m => m.lat),
     lon: mapLocations.map(m => m.lon),
     text: mapLocations.map(m => `${m.org}<br>${m.location_text || ''}<br>${m.total} item(s)`),
@@ -450,20 +854,40 @@ function renderMap() {
       opacity: 0.85,
     },
   };
+  const traces = [orgTrace];
+  if (showFriends) {
+    traces.push({
+      type: 'scattergeo',
+      name: 'Friends',
+      lat: friendLocations.map(f => f.lat),
+      lon: friendLocations.map(f => f.lon),
+      text: friendLocations.map(f => `${f.name}<br>${f.role ? f.role + ' at ' : ''}${f.company}<br>${f.location_text || ''}`),
+      hoverinfo: 'text',
+      mode: 'markers',
+      marker: { size: 12, symbol: 'diamond', color: FRIEND_COLOR, line: { width: 1, color: '#ffffffaa' }, opacity: 0.95 },
+    });
+  }
   const layout = {
     geo: { projection: { type: 'natural earth' }, showland: true, landcolor: '#8882', showcountries: true, countrycolor: '#8886' },
     margin: { t: 10, b: 0, l: 0, r: 0 },
+    showlegend: showFriends,
+    legend: { x: 0, y: 1, bgcolor: 'rgba(0,0,0,0)' },
     hoverlabel: { bgcolor: '#1e1e1eee', bordercolor: '#4a90d9', font: { color: '#f5f5f5', size: 12 } },
   };
-  Plotly.newPlot('mapChart', [trace], layout, { responsive: true }).then(gd => {
+  Plotly.newPlot('mapChart', traces, layout, { responsive: true }).then(gd => {
     gd.removeAllListeners && gd.removeAllListeners('plotly_click');
     gd.on('plotly_click', (ev) => {
-      const org = mapLocations[ev.points[0].pointNumber].org;
-      showTab('papers');
-      loadPapers().then(() => {
-        document.getElementById('pfOrg').value = org;
-        renderPapers();
-      });
+      const point = ev.points[0];
+      if (point.curveNumber === 0) {
+        const org = mapLocations[point.pointNumber].org;
+        showTab('papers');
+        loadPapers().then(() => {
+          document.getElementById('pfOrg').value = org;
+          renderPapers();
+        });
+      } else {
+        showTab('contacts');
+      }
     });
   });
 }
@@ -497,6 +921,116 @@ async function loadPapers() {
   renderPapers();
 }
 
+// --- Orgs table --------------------------------------------------------
+let orgsLoaded = false;
+let orgs = [];
+
+function fmtUsd(n) {
+  if (n === null || n === undefined) return '';
+  if (n >= 1e9) return `$${(n / 1e9).toFixed(1)}B`;
+  if (n >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `$${(n / 1e3).toFixed(0)}K`;
+  return `$${n}`;
+}
+
+async function loadOrgs() {
+  orgsLoaded = true;
+  const res = await fetch('/api/orgs');
+  orgs = await res.json();
+  populateSelect('ofOrgType', uniqueSorted(orgs.map(o => o.org_type)));
+  populateSelect('ofSource', uniqueSorted(orgs.flatMap(o => o.sources)));
+  ['ofOrgType', 'ofSource'].forEach(id => document.getElementById(id).onchange = renderOrgs);
+  renderOrgs();
+}
+
+function renderOrgs() {
+  const orgType = document.getElementById('ofOrgType').value;
+  const source = document.getElementById('ofSource').value;
+
+  const rows = orgs.filter(o => {
+    if (orgType && o.org_type !== orgType) return false;
+    if (source && !o.sources.includes(source)) return false;
+    return true;
+  });
+
+  document.getElementById('orgsCount').textContent = `${rows.length} of ${orgs.length} org(s).`;
+
+  const table = document.getElementById('orgsTable');
+  table.innerHTML = `
+    <thead><tr><th>Org</th><th>Category</th><th>Type</th><th>Location</th><th>Items</th><th>Sources</th><th>Ticker</th><th>Funding</th><th>Source</th></tr></thead>
+    <tbody>${rows.map(o => `
+      <tr>
+        <td>${o.org}</td>
+        <td>${o.org_description || '<span class="hint">—</span>'}</td>
+        <td>${o.org_type || ''}</td>
+        <td>${o.location_text || (o.lat ? '' : '<span class="hint">not located</span>')}</td>
+        <td>${o.item_count}</td>
+        <td>${o.sources.join(', ')}</td>
+        <td>${o.stock_ticker || ''}</td>
+        <td>${fmtUsd(o.funding_total_usd)}${o.last_funding_round ? ` (${o.last_funding_round})` : ''}</td>
+        <td>${o.source_url ? `<a href="${o.source_url}" target="_blank" rel="noopener">link</a>` : '<span class="hint">—</span>'}</td>
+      </tr>`).join('')}</tbody>`;
+}
+
+// --- Jobs table ----------------------------------------------------------
+let jobsLoaded = false;
+let jobs = [];
+
+async function loadJobs() {
+  jobsLoaded = true;
+  const res = await fetch('/api/jobs');
+  jobs = await res.json();
+  populateSelect('jfOrg', uniqueSorted(jobs.map(j => j.org)));
+  ['jfOrg', 'jfStatus'].forEach(id => document.getElementById(id).onchange = renderJobs);
+  renderJobs();
+}
+
+function renderJobs() {
+  const org = document.getElementById('jfOrg').value;
+  const status = document.getElementById('jfStatus').value; // 'active' or ''
+
+  const rows = jobs.filter(j => {
+    if (org && j.org !== org) return false;
+    if (status === 'active' && j.removed_at) return false;
+    return true;
+  });
+
+  document.getElementById('jobsCount').textContent = `${rows.length} of ${jobs.length} posting(s).`;
+
+  const table = document.getElementById('jobsTable');
+  table.innerHTML = `
+    <colgroup>
+      <col style="width:16%"><col style="width:34%"><col style="width:20%">
+      <col style="width:12%"><col style="width:9%"><col style="width:9%">
+    </colgroup>
+    <thead><tr><th>Org</th><th>Title</th><th>Location</th><th>Platform</th><th>First seen</th><th>Status</th></tr></thead>
+    <tbody>${rows.map(j => `
+      <tr>
+        <td>${j.org}</td>
+        <td>${j.url ? `<a href="${j.url}" target="_blank" rel="noopener">${j.title}</a>` : j.title}</td>
+        <td>${j.location || ''}</td>
+        <td>${j.platform}</td>
+        <td>${(j.first_seen_at || '').slice(0, 10)}</td>
+        <td>${j.removed_at ? `<span class="hint">Removed ${j.removed_at.slice(0, 10)}</span>` : 'Active'}</td>
+      </tr>`).join('')}</tbody>`;
+}
+
+function renderEnrichStats(stats) {
+  const el = document.getElementById('enrichStats');
+  if (!stats || !stats.total_items) { el.textContent = ''; return; }
+  const avg = stats.total_seconds / stats.total_items;
+  let text = `Enriched ${stats.total_items} item(s) all-time (avg ${avg.toFixed(1)}s/item).`;
+  if (stats.last_run_items) {
+    text += ` Last run: ${stats.last_run_items} item(s) in ${stats.last_run_seconds.toFixed(1)}s.`;
+  }
+  el.textContent = text;
+}
+
+(async () => {
+  const res = await fetch('/api/enrich/stats');
+  renderEnrichStats(await res.json());
+})();
+
 document.getElementById('enrichNowBtn').onclick = async (ev) => {
   const btn = ev.target;
   const resultEl = document.getElementById('enrichResult');
@@ -504,12 +1038,16 @@ document.getElementById('enrichNowBtn').onclick = async (ev) => {
   btn.textContent = 'Enriching…';
   resultEl.textContent = '';
   try {
-    const res = await fetch('/api/enrich', { method: 'POST' });
+    const force = document.getElementById('enrichForce').checked;
+    const res = await fetch('/api/enrich', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force }),
+    });
     const data = await res.json();
     papersLoaded = false;
     await loadPapers();
     btn.textContent = `Enrich now (+${data.enriched})`;
     resultEl.textContent = data.message || '';
+    renderEnrichStats(data.stats);
   } catch (e) {
     btn.textContent = 'Enrich now (failed)';
     resultEl.textContent = 'Request failed — see server log.';
@@ -573,45 +1111,100 @@ function renderPapers() {
       </tr>`).join('')}</tbody>`;
 }
 
-// --- Trends explorer (devices + companies) -------------------------------
+// --- Trends explorer (devices + companies + FDA/IPO timelines) -----------
 let metricsData = { numeric: [], categorical: [], company_numeric: [] };
 let devices = [];
 let companies = [];
+let fdaStages = [];
 let currentDataset = 'devices';
 
+let possibleDupes = [];
+
 async function loadTrends() {
-  const [metricsRes, devicesRes, companiesRes] = await Promise.all([
-    fetch('/api/metrics'), fetch('/api/devices'), fetch('/api/companies'),
+  const [metricsRes, devicesRes, companiesRes, stagesRes, dupesRes] = await Promise.all([
+    fetch('/api/metrics'), fetch('/api/devices'), fetch('/api/companies'), fetch('/api/trends/fda-stages'),
+    fetch('/api/companies/possible-duplicates'),
   ]);
   metricsData = await metricsRes.json();
   devices = await devicesRes.json();
   companies = await companiesRes.json();
+  fdaStages = await stagesRes.json();
+  possibleDupes = await dupesRes.json();
 
   document.getElementById('dsDevices').onclick = () => switchDataset('devices');
   document.getElementById('dsCompanies').onclick = () => switchDataset('companies');
+  document.getElementById('dsFdaTimeline').onclick = () => switchDataset('fda_timeline');
+  document.getElementById('dsIpoTimeline').onclick = () => switchDataset('ipo_timeline');
   switchDataset('devices');
 }
+
+const TRENDS_HINTS = {
+  devices: 'Hover a point for its details and source; click it to open the source link. This accumulates over time — every device you or device-suggest add stays here across every future report.',
+  companies: 'Hover a point for its details and source; click it to open the source link. This accumulates over time.',
+  fda_timeline: 'Each line is one org’s devices, ordered by report date, plotted against the FDA stage ladder (see trends/fda_stages.py for what each rung means) — a rising line is regulatory progress; a flat one means no new dated report yet. Hover a point for the device and its exact fda_status text; click to open the source.',
+  ipo_timeline: 'One point per company that has gone public, plotted at its IPO date. Hover for the exchange/ticker; click to open the source that reported it.',
+};
 
 function switchDataset(which) {
   currentDataset = which;
   document.getElementById('dsDevices').classList.toggle('active', which === 'devices');
   document.getElementById('dsCompanies').classList.toggle('active', which === 'companies');
+  document.getElementById('dsFdaTimeline').classList.toggle('active', which === 'fda_timeline');
+  document.getElementById('dsIpoTimeline').classList.toggle('active', which === 'ipo_timeline');
+  document.getElementById('trendsHint').textContent = TRENDS_HINTS[which];
+
+  const isTimeline = which === 'fda_timeline' || which === 'ipo_timeline';
+  document.getElementById('axisControls').style.display = isTimeline ? 'none' : 'flex';
   document.getElementById('colorByWrap').style.display = which === 'devices' ? 'block' : 'none';
 
-  const xSel = document.getElementById('xAxis');
-  const ySel = document.getElementById('yAxis');
-  const numeric = which === 'devices' ? metricsData.numeric : metricsData.company_numeric;
-  const options = [metricsData.time_axis, ...numeric];
-  xSel.innerHTML = options.map(m => `<option value="${m.key}">${m.label}${m.unit ? ' (' + m.unit + ')' : ''}</option>`).join('');
-  ySel.innerHTML = numeric.map(m => `<option value="${m.key}">${m.label}${m.unit ? ' (' + m.unit + ')' : ''}</option>`).join('');
-  xSel.value = 'date_reported';
-  if (numeric.length) ySel.value = numeric[0].key;
-
-  xSel.onchange = renderChart;
-  ySel.onchange = renderChart;
-  document.getElementById('colorBy').onchange = renderChart;
+  if (!isTimeline) {
+    const xSel = document.getElementById('xAxis');
+    const ySel = document.getElementById('yAxis');
+    const numeric = which === 'devices' ? metricsData.numeric : metricsData.company_numeric;
+    const options = [metricsData.time_axis, ...numeric];
+    xSel.innerHTML = options.map(m => `<option value="${m.key}">${m.label}${m.unit ? ' (' + m.unit + ')' : ''}</option>`).join('');
+    ySel.innerHTML = numeric.map(m => `<option value="${m.key}">${m.label}${m.unit ? ' (' + m.unit + ')' : ''}</option>`).join('');
+    xSel.value = 'date_reported';
+    if (numeric.length) ySel.value = numeric[0].key;
+    xSel.onchange = renderChart;
+    ySel.onchange = renderChart;
+    document.getElementById('colorBy').onchange = renderChart;
+  }
+  document.getElementById('possibleDupesBox').style.display = which === 'companies' && possibleDupes.length ? 'block' : 'none';
+  if (which === 'companies') renderPossibleDupes();
   renderTable();
   renderChart();
+}
+
+function renderPossibleDupes() {
+  document.getElementById('possibleDupesList').innerHTML = possibleDupes.map((d, i) => `
+    <div style="display:flex; align-items:center; gap:.6rem; padding:.3rem 0; font-size:.9rem;">
+      <span>${d.a}</span><span class="hint">vs</span><span>${d.b}</span>
+      <span class="hint">(${Math.round(d.ratio * 100)}% similar)</span>
+      <button class="btn" style="padding:.2rem .6rem; font-size:.8rem;" data-i="${i}" data-keep="a">Keep "${d.a}"</button>
+      <button class="btn" style="padding:.2rem .6rem; font-size:.8rem;" data-i="${i}" data-keep="b">Keep "${d.b}"</button>
+      <button class="btn" style="padding:.2rem .6rem; font-size:.8rem; opacity:.6;" data-i="${i}" data-keep="neither">Not duplicates</button>
+    </div>`).join('');
+  document.querySelectorAll('#possibleDupesList button').forEach(btn => {
+    btn.onclick = async () => {
+      const dupe = possibleDupes[Number(btn.dataset.i)];
+      if (btn.dataset.keep !== 'neither') {
+        const keep = btn.dataset.keep === 'a' ? dupe.a : dupe.b;
+        const drop = btn.dataset.keep === 'a' ? dupe.b : dupe.a;
+        await fetch('/api/companies/merge', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ keep, drop }),
+        });
+        const companiesRes = await fetch('/api/companies');
+        companies = await companiesRes.json();
+      }
+      possibleDupes = possibleDupes.filter((_, i) => i !== Number(btn.dataset.i));
+      document.getElementById('possibleDupesBox').style.display = possibleDupes.length ? 'block' : 'none';
+      renderPossibleDupes();
+      renderTable();
+      renderChart();
+    };
+  });
 }
 
 function allMetricsMeta() {
@@ -640,6 +1233,9 @@ function renderChart() {
       'The table below still works. See README for how to vendor plotly.min.js locally.</p>';
     return;
   }
+  if (currentDataset === 'fda_timeline') return renderFdaTimeline();
+  if (currentDataset === 'ipo_timeline') return renderIpoTimeline();
+
   const xKey = document.getElementById('xAxis').value;
   const yKey = document.getElementById('yAxis').value;
   const colorBy = document.getElementById('colorBy').value;
@@ -650,7 +1246,7 @@ function renderChart() {
   rows.forEach(row => {
     const source = currentDataset === 'devices' ? row.metrics : row;
     const xVal = xKey === 'date_reported'
-      ? (currentDataset === 'devices' ? row.date_reported : row.stock_price_updated_at || row.last_funding_date)
+      ? (currentDataset === 'devices' ? row.date_reported : row.last_funding_date || row.ipo_date || row.stock_price_updated_at)
       : source[xKey];
     const yVal = source[yKey];
     if (xVal === undefined || xVal === null || xVal === '' || yVal === undefined || yVal === null) return;
@@ -693,14 +1289,126 @@ function renderChart() {
   });
 }
 
+function renderFdaTimeline() {
+  const dated = devices.filter(d => d.date_reported && d.fda_stage_rank > 0);
+  if (!dated.length) {
+    Plotly.purge('chart');
+    document.getElementById('chart').innerHTML =
+      '<p class="hint">No devices with a recognized FDA stage yet — devices need a date_reported and a specific ' +
+      'FDA-status mention (Breakthrough Designation, IDE, 510(k)/De Novo/PMA/HDE, or commercially available) to show up here.</p>';
+    return;
+  }
+  const byOrg = {};
+  dated.forEach(d => (byOrg[d.org] ||= []).push(d));
+  Object.values(byOrg).forEach(rows => rows.sort((a, b) => a.date_reported.localeCompare(b.date_reported)));
+
+  const traces = Object.entries(byOrg).map(([org, rows]) => ({
+    x: rows.map(d => d.date_reported),
+    y: rows.map(d => d.fda_stage_rank),
+    text: rows.map(d => `${d.name}<br>${d.fda_status}`),
+    customdata: rows.map(d => d.source_url || ''),
+    mode: 'markers+lines',
+    type: 'scatter',
+    name: org,
+    marker: { size: 12, symbol: rows[0].org_type === 'academic' ? 'triangle-up' : 'circle' },
+    line: { shape: 'hv' },
+    hovertemplate: '%{text}<br>%{x}<extra>' + org + '</extra>',
+  }));
+
+  const layout = {
+    xaxis: { title: 'Date reported', type: 'date' },
+    yaxis: {
+      title: 'FDA stage',
+      tickvals: fdaStages.map(s => s.rank),
+      ticktext: fdaStages.map(s => s.label),
+      range: [-0.5, Math.max(...fdaStages.map(s => s.rank)) + 0.5],
+    },
+    margin: { t: 20, l: 160 },
+    legend: { orientation: 'h' },
+    hovermode: 'closest',
+    hoverlabel: { bgcolor: '#1e1e1eee', bordercolor: '#4a90d9', font: { color: '#f5f5f5', size: 12 } },
+  };
+  Plotly.newPlot('chart', traces, layout, { responsive: true }).then(gd => {
+    gd.removeAllListeners && gd.removeAllListeners('plotly_click');
+    gd.on('plotly_click', (ev) => {
+      const url = ev.points[0].customdata;
+      if (url) window.open(url, '_blank');
+    });
+  });
+}
+
+function renderIpoTimeline() {
+  const ipoed = companies.filter(c => c.ipo_date).sort((a, b) => a.ipo_date.localeCompare(b.ipo_date));
+  if (!ipoed.length) {
+    Plotly.purge('chart');
+    document.getElementById('chart').innerHTML =
+      '<p class="hint">No IPOs tracked yet — set ipo_date on a company (via enrichment picking one up from a scraped ' +
+      'item, or by hand) to see it here.</p>';
+    return;
+  }
+  const trace = {
+    x: ipoed.map(c => c.ipo_date),
+    y: ipoed.map(c => c.name),
+    text: ipoed.map(c => `${c.name}${c.stock_exchange ? ' — ' + c.stock_exchange : ''}${c.stock_ticker ? ': ' + c.stock_ticker : ''}`),
+    customdata: ipoed.map(c => c.source_url || ''),
+    mode: 'markers',
+    type: 'scatter',
+    marker: { size: 14, color: '#4a90d9' },
+    hovertemplate: '%{text}<br>%{x}<extra></extra>',
+  };
+  const layout = {
+    xaxis: { title: 'IPO date', type: 'date' },
+    yaxis: { title: '', automargin: true },
+    margin: { t: 20, l: 160 },
+    hovermode: 'closest',
+    hoverlabel: { bgcolor: '#1e1e1eee', bordercolor: '#4a90d9', font: { color: '#f5f5f5', size: 12 } },
+  };
+  Plotly.newPlot('chart', [trace], layout, { responsive: true }).then(gd => {
+    gd.removeAllListeners && gd.removeAllListeners('plotly_click');
+    gd.on('plotly_click', (ev) => {
+      const url = ev.points[0].customdata;
+      if (url) window.open(url, '_blank');
+    });
+  });
+}
+
 function renderTable() {
   const table = document.getElementById('dataTable');
+  if (currentDataset === 'fda_timeline') {
+    const dated = devices.filter(d => d.date_reported && d.fda_stage_rank > 0).slice().sort((a, b) => b.date_reported.localeCompare(a.date_reported));
+    table.innerHTML = `
+      <thead><tr><th>Org</th><th>Device</th><th>Stage</th><th>FDA status (raw)</th><th>Reported</th><th>Source</th></tr></thead>
+      <tbody>${dated.map(d => `
+        <tr>
+          <td>${d.org}</td>
+          <td>${d.name}</td>
+          <td>${d.fda_stage_label}</td>
+          <td>${d.fda_status}</td>
+          <td>${d.date_reported}</td>
+          <td>${d.source_url ? `<a href="${d.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
+        </tr>`).join('')}</tbody>`;
+    return;
+  }
+  if (currentDataset === 'ipo_timeline') {
+    const ipoed = companies.filter(c => c.ipo_date).slice().sort((a, b) => b.ipo_date.localeCompare(a.ipo_date));
+    table.innerHTML = `
+      <thead><tr><th>Company</th><th>IPO date</th><th>Exchange</th><th>Ticker</th><th>Source</th></tr></thead>
+      <tbody>${ipoed.map(c => `
+        <tr>
+          <td>${c.name}</td>
+          <td>${c.ipo_date}</td>
+          <td>${c.stock_exchange || ''}</td>
+          <td>${c.stock_ticker || ''}</td>
+          <td>${c.source_url ? `<a href="${c.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
+        </tr>`).join('')}</tbody>`;
+    return;
+  }
   if (currentDataset === 'devices') {
     table.innerHTML = `
       <thead><tr><th>Device</th><th>Org</th><th>Type</th><th>FDA status</th><th>Metrics</th><th>Reported</th><th>Source</th></tr></thead>
       <tbody>${devices.map(d => `
         <tr>
-          <td>${d.name}${d.auto_extracted ? ' <span class="metric-tag" title="Auto-extracted by besseleth — verify before trusting">auto</span>' : ''}</td>
+          <td>${d.name}</td>
           <td>${d.org}</td>
           <td>${d.org_type}</td>
           <td>${d.fda_status || 'unknown'}</td>
@@ -713,7 +1421,7 @@ function renderTable() {
       <thead><tr><th>Company</th><th>Funding</th><th>Last round</th><th>Stock</th><th>Source</th><th>Notes</th></tr></thead>
       <tbody>${companies.map(c => `
         <tr>
-          <td>${c.name}${c.auto_extracted ? ' <span class="metric-tag" title="Auto-extracted by besseleth — verify before trusting">auto</span>' : ''}</td>
+          <td>${c.name}</td>
           <td>${c.funding_total_usd ? '$' + c.funding_total_usd.toLocaleString() : '—'}</td>
           <td>${c.last_funding_round ? `${c.last_funding_round} (${c.last_funding_date})` : '—'}</td>
           <td>${c.stock_price ? `${c.stock_ticker}: $${c.stock_price.toLocaleString()}` : (c.stock_ticker || '—')}</td>

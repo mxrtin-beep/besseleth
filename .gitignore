@@ -1,7 +1,6 @@
 .venv/
 __pycache__/
 *.pyc
-config.yaml
 data/
 reports/
 *.db
@@ -10,6 +9,10 @@ reports/
 linkedin_drops/
 devices.yaml
 companies.yaml
+job_boards.yaml
+feeds.yaml
+contacts.yaml
+interests.yaml
 event_drops/
 social_drops/
 .geocode_cache.json

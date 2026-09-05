@@ -38,15 +38,61 @@ class Config:
 
     @property
     def devices_path(self) -> Path:
-        return Path(self.raw.get("trends", {}).get("devices_path", "devices.yaml"))
+        """Devices/companies live in the main sqlite db now (see db.py) —
+        a few data points didn't need their own hand-copied YAML file,
+        and a sqlite table gets new columns via migration instead of
+        needing devices.example.yaml re-copied by hand. This still
+        returns the *db* path; legacy_devices_yaml_path below is the old
+        file, imported once (see trends/store.py) if you have one."""
+        return self.db_path
 
     @property
     def companies_path(self) -> Path:
+        return self.db_path
+
+    @property
+    def legacy_devices_yaml_path(self) -> Path:
+        return Path(self.raw.get("trends", {}).get("devices_path", "devices.yaml"))
+
+    @property
+    def legacy_companies_yaml_path(self) -> Path:
         return Path(self.raw.get("trends", {}).get("companies_path", "companies.yaml"))
 
     @property
+    def job_boards_path(self) -> Path:
+        return Path(self.raw.get("jobs", {}).get("manual_boards_path", "job_boards.yaml"))
+
+    @property
+    def feeds_path(self) -> Path:
+        return Path(self.raw.get("feeds_path", "feeds.yaml"))
+
+    @property
+    def contacts_path(self) -> Path:
+        return Path(self.raw.get("contacts_path", "contacts.yaml"))
+
+    @property
     def contacts(self) -> list[dict]:
-        return list(self.raw.get("contacts", []))
+        """config.yaml's own `contacts:` list (legacy — still honored)
+        plus contacts.yaml (the dashboard's Contacts tab writes only
+        here). Both are supported so migrating isn't required, but new
+        contacts should go through the tab."""
+        from dataclasses import asdict
+
+        from .contacts_store import load_contacts
+
+        merged = list(self.raw.get("contacts", []))
+        merged.extend(asdict(c) for c in load_contacts(self.contacts_path))
+        return merged
+
+    @property
+    def interests_path(self) -> Path:
+        return Path(self.raw.get("interests_path", "interests.yaml"))
+
+    @property
+    def interests(self) -> list[str]:
+        from .interests_store import load_interests
+
+        return load_interests(self.interests_path)
 
     def source(self, name: str) -> dict:
         return self.raw.get("sources", {}).get(name, {}) or {}

@@ -4,15 +4,16 @@ A weekly industry-briefing bot. Point it at an industry (e.g.
 *neurotechnology*), and it:
 
 - Pulls recent **arXiv** papers matching your keywords/categories (free, official API)
-- Pulls **news** from RSS feeds — including a free Google News search feed by default (optionally NewsAPI.org too)
-- Pulls **blogs** (company/lab blogs, researcher Substacks) from RSS — Substack needs no code, just its `/feed` URL
+- Pulls **news** from RSS feeds — including a free Google News search feed by default (optionally NewsAPI.org too); add more from the dashboard's **Feeds** tab, no config-file editing needed
+- Pulls **blogs** (company/lab blogs, researcher Substacks) from RSS — Substack needs no code, just its `/feed` URL; also addable from the Feeds tab
 - Tracks a curated **conferences** watchlist, plus optional **conference news** (CFPs, accepted talks) via each conference's own RSS feed
 - Finds **IRL events near you** — Luma calendars (iCal), Eventbrite organizers you follow, a curated local-meetup watchlist, and paste-in for anything else (see below — real geo-search APIs for events mostly don't exist for free, so paste-in is the reliable path)
 - Pulls **Bluesky** posts (free public search API) and **X/Twitter** (paid API if you have a token, otherwise paste-in)
 - Flags **LinkedIn** as a source with a compliant path (see below — no ToS-violating scraping)
-- **Personalizes**: if an item mentions a company one of your contacts works at (e.g. a job posting at your friend's company), it's pulled into its own "For you specifically" section
+- **Personalizes**: if an item mentions a company one of your contacts works at (e.g. a job posting at your friend's company), it's pulled into its own "For you" section
 - **Tracks industry trends**: a self-populating (auto-extracted, human-editable) dataset of devices/systems and their metrics — for neurotech: information transfer rate, implant longevity, electrode count, device type, material, and FDA status — plus a separate **companies** dataset for business metrics (funding, stock price — auto-refreshable for free for public tickers). Both accumulate forever, across every report; auto-added entries are tagged so they're distinct from ones you've verified.
-- **Maps** the companies/labs behind your papers by location — geocoded free via OpenStreetMap, extracted by the same enrichment pass, no separate step.
+- **Maps** the companies/labs behind your papers by location — geocoded free via OpenStreetMap, extracted by the same enrichment pass, no separate step; an org whose location was never mentioned in any item's own text gets a web-lookup fallback instead of staying unlocated forever (Wikidata first, then a general web search read by the local LLM for orgs too small/new to be on Wikidata).
+- **Tracks job postings** at the companies/labs it's already found (from their Greenhouse/Lever/Ashby job-board API, not scraped HTML) — kept in sync so a closed posting is marked removed, not left stale; auto-detects each org's board with a manual override file (`job_boards.yaml`) for the ones it can't guess.
 - **Summarizes** each section with a free local LLM via [Ollama](https://ollama.ai) — falls back to a plain extractive summary if Ollama isn't running, so it never blocks
 - Writes a Markdown report to `reports/` on a configurable cadence (daily/weekly/monthly/whatever), and can email it — old reports are deletable, individually, from the dashboard
 - Dedupes across runs in a local SQLite DB, so re-running never repeats old items; a **backfill** control lets you pull history further back than the usual lookback window
@@ -23,10 +24,12 @@ A weekly industry-briefing bot. Point it at an industry (e.g.
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp config.example.yaml config.yaml
-cp devices.example.yaml devices.yaml       # for the trends feature — optional
-cp companies.example.yaml companies.yaml   # for company/business tracking — optional
 # edit config.yaml: industry keywords, contacts, feeds, watchlists
 ```
+
+Devices and companies (the trends feature) live in the same sqlite db as
+everything else now — add entries via the dashboard's Trends tab, no
+file to copy.
 
 Optional — for local LLM summaries:
 
@@ -61,7 +64,8 @@ For a headless box (no browser), the same schedule runs without the web UI:
 
 **Keeping it running on a Mac** — `nohup` is fine for a quick session, but
 survives a terminal close, not a reboot or logout. For something that
-comes back on its own, use `launchd`:
+comes back on its own and stays out of the way while it does, use
+`launchd`:
 
 ```xml
 <!-- ~/Library/LaunchAgents/com.besseleth.serve.plist -->
@@ -77,6 +81,15 @@ comes back on its own, use `launchd`:
   <key>WorkingDirectory</key><string>/path/to/besseleth</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <!-- Keeps it out of the way: macOS schedules Background-class + niced
+       processes behind whatever you're actively using instead of
+       competing with it for CPU, and LowPriorityIO does the same for
+       disk. Combine with enrichment.pause_seconds and
+       summarizer.num_thread in config.yaml (see config.example.yaml) so
+       an enrich run is a trickle instead of a burst. -->
+  <key>ProcessType</key><string>Background</string>
+  <key>Nice</key><integer>10</integer>
+  <key>LowPriorityIO</key><true/>
   <key>StandardOutPath</key><string>/tmp/besseleth.log</string>
   <key>StandardErrorPath</key><string>/tmp/besseleth.log</string>
 </dict></plist>
@@ -86,6 +99,13 @@ comes back on its own, use `launchd`:
 launchctl load ~/Library/LaunchAgents/com.besseleth.serve.plist
 # stop it later with: launchctl unload ~/Library/LaunchAgents/com.besseleth.serve.plist
 ```
+
+With this loaded, you never run `python -m besseleth.web.app` by hand —
+launchd starts it at login and restarts it if it ever dies, so it's
+always just running quietly at `http://localhost:5050` (or whatever port
+you set) whenever you want to check the dashboard. Manually starting it
+again yourself in a terminal on top of that would run two instances
+against the same DB at once — don't do both.
 
 Prefer a one-shot, cron-triggered run instead of a standing process? That
 still works — set `schedule.enabled: false` in `config.yaml` and:
@@ -102,7 +122,10 @@ still works — set `schedule.enabled: false` in `config.yaml` and:
 
 ## Personalization
 
-Add contacts to `config.yaml`:
+Add contacts from the dashboard's **Contacts** tab (name, company, role,
+school, LinkedIn URL, relationship, notes) — stored in `contacts.yaml`,
+same pattern as devices.yaml/companies.yaml. `config.yaml`'s own legacy
+`contacts:` list (if you have one) still works too, merged in alongside:
 
 ```yaml
 contacts:
@@ -111,10 +134,13 @@ contacts:
     role: "Research Scientist"
 ```
 
-Any item — scraped or pasted, from any source — whose text mentions
-`Neuralink` gets flagged with `matched_contact: Jane Doe` and surfaced first
-in the report, with an LLM-written one-liner on why it might matter — this
-is how a job posting at a friend's company gets called out specifically.
+Any item — scraped or pasted, from any source — whose text mentions a
+contact's **company** gets flagged with `matched_contact: Jane Doe` and
+surfaced first in the report's "For you" section (this is how a job
+posting at a friend's company gets called out specifically); their
+**school** is checked too when company doesn't match — more
+serendipitous ("the place your friend studied just published
+something"), and tagged accordingly.
 
 ## On LinkedIn
 
@@ -142,7 +168,7 @@ We're hiring a research scientist for our neural interfaces team..." > linkedin_
 Either way it's picked up on the next `fetch`/`run`, matched against your
 `industry.keywords`, checked against your contacts' companies, and folded
 into the weekly report — a pasted job posting at a friend's company gets
-flagged in "For you specifically" exactly like a scraped one would.
+flagged in "For you" exactly like a scraped one would.
 Processed drop files move to `linkedin_drops/processed/` so re-running
 doesn't re-ingest them.
 
@@ -164,11 +190,26 @@ happening at company X". Add these to `sources.news.feeds` in
 # -> http://127.0.0.1:5050
 ```
 
-Local-only (no auth, don't expose it on the open internet as-is). Unlike
-the CLI, this doesn't need a `besseleth.cli run` first — starting it also
-starts the background schedule (see Usage above), so it fetches and
-reports on its own from here on; the status bar up top shows what it's
-doing and when. Tabs:
+No auth by default — fine as-is on your own Mac, or reached from your
+phone over Tailscale (a private network between just your own devices).
+Before putting it behind anything more exposed (a public tunnel like
+ngrok/Cloudflare Tunnel, a machine other people can reach), set:
+
+```bash
+export BESSELETH_AUTH_USER="you"
+export BESSELETH_AUTH_PASSWORD="something-only-you-know"
+```
+
+before starting the app — every route then requires that username/
+password (a plain browser login prompt, HTTP Basic Auth). Deliberately
+env vars, not a config.yaml setting: that file is tracked in git now, and
+a password has no business in version control. Leave both unset and
+nothing changes.
+
+Unlike the CLI, this doesn't need a `besseleth.cli run` first — starting
+it also starts the background schedule (see Usage above), so it fetches
+and reports on its own from here on; the status bar up top shows what
+it's doing and when. Tabs:
 
 - **Report** — the latest (or any past) report, rendered from Markdown;
   delete old ones from the sidebar.
@@ -180,7 +221,7 @@ doing and when. Tabs:
 - **Map** — the companies/labs behind those papers, plotted by location
   (free via OpenStreetMap), sized by how much has been fetched about
   each. See "Map" below.
-- **Trends explorer** — devices and companies as an interactive chart
+- **Trends** — devices and companies as an interactive chart
   (Plotly, client-side, no static PNGs) — a Devices/Companies toggle
   switches dataset. Pick any metric for the X axis — including **time**
   (`date_reported`), to see e.g. information transfer rate improving
@@ -374,7 +415,7 @@ Every `run` renders a scatter chart per pair of numeric metrics (colored
 by FDA status, shaped by industry vs. academic) plus an FDA-status bar
 chart, embeds them in the report, and lists every tracked device/company
 in a table with human-readable metric tags (not raw `key=value` pairs)
-and its cited source. The dashboard's **Trends explorer** tab is the
+and its cited source. The dashboard's **Trends** tab is the
 live, interactive version of the same two datasets — a Devices/Companies
 toggle, adjustable X/Y axes (including **time**, to watch a metric
 improve release over release), color by any categorical field, click a

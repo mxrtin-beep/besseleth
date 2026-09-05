@@ -5,12 +5,13 @@ from datetime import date, datetime, timezone
 
 from .config import Config
 from .db import DB, Item
-from .personalize import personalize_items
+from .personalize import flag_interests, personalize_items
 from .scrapers import (
     arxiv_scraper,
     blog_scraper,
     conference_scraper,
     events_scraper,
+    jobs_scraper,
     linkedin_scraper,
     news_scraper,
     social_scraper,
@@ -18,6 +19,7 @@ from .scrapers import (
 from . import report as report_mod
 from .dedupe import merge_near_duplicates
 from .enrich import enrich_items
+from .feeds_store import load_feeds
 from .trends import company_store
 from .trends import store as trend_store
 from .trends import plot as trend_plot
@@ -51,15 +53,22 @@ def fetch_all(config: Config, db: DB, since: date | None = None) -> dict[str, li
         )
         results["arxiv"] = _dedupe_and_store(items, db)
 
+    # User-submitted feeds (the dashboard's Feeds tab) are additional
+    # sources_.news/blogs feed URLs, merged in here rather than written
+    # into config.yaml itself — see feeds_store.py's docstring for why.
+    submitted = load_feeds(config.feeds_path)
+
     news_cfg = config.source("news")
     if news_cfg.get("enabled"):
         print("[pipeline] Fetching news...")
+        news_cfg = {**news_cfg, "feeds": [*news_cfg.get("feeds", []), *(f["url"] for f in submitted["news"])]}
         items = news_scraper.fetch(config, news_cfg, days_back=_days_back(news_cfg.get("days_back", 8), since))
         results["news"] = _dedupe_and_store(items, db)
 
     blog_cfg = config.source("blogs")
     if blog_cfg.get("enabled"):
         print("[pipeline] Fetching blogs...")
+        blog_cfg = {**blog_cfg, "feeds": [*blog_cfg.get("feeds", []), *(f["url"] for f in submitted["blog"])]}
         items = blog_scraper.fetch(config, blog_cfg, days_back=_days_back(blog_cfg.get("days_back", 8), since))
         results["blog"] = _dedupe_and_store(items, db)
 
@@ -94,6 +103,15 @@ def fetch_all(config: Config, db: DB, since: date | None = None) -> dict[str, li
 
     print("[pipeline] Enriching papers/news/blog items (org, modality, therapeutic target, novelty)...")
     enrich_items(config, db)
+
+    # Runs after enrichment, not before: it needs the orgs enrichment
+    # just extracted (db.orgs()) to know who to look up job boards for.
+    print("[pipeline] Syncing job postings for known orgs...")
+    jobs_result = jobs_scraper.fetch(config, db)
+    print(
+        f"[pipeline] Jobs: {jobs_result['orgs_with_board']}/{jobs_result['orgs_checked']} orgs have a known "
+        f"board, {jobs_result['active_postings']} posting(s) currently active."
+    )
 
     return results
 
@@ -142,13 +160,14 @@ def generate_weekly_report(config: Config, db: DB) -> str:
         items_by_source[src] = [i for i in items_by_source[src] if i.id not in dropped_ids]
 
     personalize_items(all_items, config.contacts)
-    personalized = [i for i in all_items if i.matched_contact]
+    flag_interests(all_items, config.interests)
+    personalized = [i for i in all_items if i.matched_contact or i.matched_reason == "interest"]
 
     # Persist personalization matches (and merged summaries) back to the DB.
     for i in all_items:
         db.conn.execute(
-            "UPDATE items SET matched_contact = ?, matched_company = ?, summary = ? WHERE id = ?",
-            (i.matched_contact, i.matched_company, i.summary, i.id),
+            "UPDATE items SET matched_contact = ?, matched_company = ?, matched_reason = ?, summary = ? WHERE id = ?",
+            (i.matched_contact, i.matched_company, i.matched_reason, i.summary, i.id),
         )
     db.conn.commit()
 
@@ -156,8 +175,8 @@ def generate_weekly_report(config: Config, db: DB) -> str:
     max_n = report_cfg.get("max_items_per_section", 12)
     days_back = config.source("news").get("days_back", 8)
 
-    trend_devices = trend_store.load_devices(config.devices_path)
-    trend_companies = company_store.load_companies(config.companies_path)
+    trend_devices = trend_store.load_devices(config.devices_path, config.legacy_devices_yaml_path)
+    trend_companies = company_store.load_companies(config.companies_path, config.legacy_companies_yaml_path)
     trend_charts: list = []
     if trend_devices:
         charts_dir = config.raw.get("trends", {}).get("charts_dir", "reports/trends")

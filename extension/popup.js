@@ -5,11 +5,19 @@ const urlEl = document.getElementById("url");
 const statusEl = document.getElementById("status");
 const serverUrlEl = document.getElementById("serverUrl");
 const perPostToggleEl = document.getElementById("perPostToggle");
+const perPostToggleStateEl = document.getElementById("perPostToggleState");
+
+function renderToggleState() {
+  const on = perPostToggleEl.checked;
+  perPostToggleStateEl.textContent = on ? "On" : "Off";
+  perPostToggleStateEl.className = "toggle-state " + (on ? "on" : "off");
+}
 
 async function init() {
   const { serverUrl, perPostButtonsEnabled } = await chrome.storage.local.get(["serverUrl", "perPostButtonsEnabled"]);
   serverUrlEl.value = serverUrl || DEFAULT_SERVER_URL;
   perPostToggleEl.checked = perPostButtonsEnabled !== false; // default on
+  renderToggleState();
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) return;
@@ -79,6 +87,9 @@ document.getElementById("saveBtn").onclick = async () => {
 };
 
 perPostToggleEl.onchange = async () => {
+  renderToggleState();
+  // content.js listens for this via chrome.storage.onChanged and applies
+  // it immediately in any open tab — no reload needed.
   await chrome.storage.local.set({ perPostButtonsEnabled: perPostToggleEl.checked });
 };
 

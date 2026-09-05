@@ -21,7 +21,7 @@ from __future__ import annotations
 import threading
 import traceback
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -57,10 +57,15 @@ def _run_fetch(config: Config, status: SchedulerStatus):
         db = DB(config.db_path)
         try:
             results = fetch_all(config, db)
+            fetch_finished_at = datetime.now(timezone.utc).isoformat()
+            # Persisted (unlike SchedulerStatus, which is in-memory only)
+            # so a restart can tell how recently this ran — see
+            # _initial_fetch_delay() below.
+            db.set_meta("last_fetch_at", fetch_finished_at)
         finally:
             db.close()
         with status._lock:
-            status.last_fetch_at = datetime.now(timezone.utc).isoformat()
+            status.last_fetch_at = fetch_finished_at
             status.last_fetch_counts = {k: len(v) for k, v in results.items()}
             status.last_error = None
     except Exception as e:
@@ -102,6 +107,29 @@ def run_now(config: Config, status: SchedulerStatus):
     _run_report(config, status)
 
 
+def _initial_fetch_delay(config: Config, fetch_hours: float) -> datetime:
+    """When to run the very first fetch after starting up. If the last
+    fetch (persisted in the DB, so it survives a restart) was recent
+    enough that it isn't due yet, waits until it would be instead of
+    always firing immediately — otherwise every close-and-reopen re-runs
+    a full fetch (and its enrichment burst) even seconds after the last
+    one, which is wasted network/CPU work, not fresher data."""
+    now = datetime.now(timezone.utc)
+    db = DB(config.db_path)
+    try:
+        last_fetch_at = db.get_meta("last_fetch_at")
+    finally:
+        db.close()
+    if not last_fetch_at:
+        return now  # never fetched — run right away
+    try:
+        last_dt = datetime.fromisoformat(last_fetch_at)
+    except ValueError:
+        return now
+    due_at = last_dt + timedelta(hours=fetch_hours)
+    return due_at if due_at > now else now
+
+
 def start_scheduler(config: Config) -> tuple[BackgroundScheduler | None, SchedulerStatus]:
     """Starts the background jobs per `schedule` in config.yaml. Returns
     (scheduler_or_None, status) — scheduler is None if schedule.enabled is
@@ -118,8 +146,9 @@ def start_scheduler(config: Config) -> tuple[BackgroundScheduler | None, Schedul
     report_cron = schedule_cfg.get("report_cron", "0 8 * * MON")
 
     scheduler = BackgroundScheduler(timezone="UTC")
+    first_fetch_at = _initial_fetch_delay(config, fetch_hours)
     fetch_job = scheduler.add_job(
-        _run_fetch, IntervalTrigger(hours=fetch_hours), args=[config, status], id="fetch", next_run_time=datetime.now()
+        _run_fetch, IntervalTrigger(hours=fetch_hours), args=[config, status], id="fetch", next_run_time=first_fetch_at
     )
     report_job = scheduler.add_job(
         _run_report, CronTrigger.from_crontab(report_cron), args=[config, status], id="report"
@@ -136,6 +165,6 @@ def start_scheduler(config: Config) -> tuple[BackgroundScheduler | None, Schedul
 
     print(
         f"[scheduler] Started: fetch every {fetch_hours}h, report on cron '{report_cron}' "
-        f"(next fetch immediately, next report {status.next_report_at})."
+        f"(next fetch {status.next_fetch_at}, next report {status.next_report_at})."
     )
     return scheduler, status

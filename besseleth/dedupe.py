@@ -35,6 +35,36 @@ def _similarity(a: str, b: str) -> float:
     return max(seq_ratio, jaccard)
 
 
+def group_near_duplicates(items: list[Item]) -> list[list[Item]]:
+    """Groups items by the same near-duplicate title similarity as
+    merge_near_duplicates(), but without picking a winner or dropping
+    anything — for a caller that wants to reconcile a field ACROSS a
+    group of rows it's keeping (e.g. syncing novelty_score so the same
+    story rated by two different feeds' rows shows the same score),
+    rather than collapsing the group into one row. Singletons come back
+    as their own one-item group."""
+    normalized = [(_normalize_title(i.title), i) for i in items]
+    groups: list[list[Item]] = []
+    consumed: set[str] = set()
+
+    for idx, (norm_a, item_a) in enumerate(normalized):
+        if item_a.id in consumed:
+            continue
+        group = [item_a]
+        consumed.add(item_a.id)
+        for norm_b, item_b in normalized[idx + 1 :]:
+            if item_b.id in consumed:
+                continue
+            if not norm_a or not norm_b:
+                continue
+            if _similarity(norm_a, norm_b) >= SIMILARITY_THRESHOLD:
+                group.append(item_b)
+                consumed.add(item_b.id)
+        groups.append(group)
+
+    return groups
+
+
 def merge_near_duplicates(items: list[Item]) -> tuple[list[Item], dict[str, list[str]]]:
     """Returns (deduped_items, {kept_item_id: [dropped_item_id, ...]}).
     The kept item is whichever has the longer summary (more detail);

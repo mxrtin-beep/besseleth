@@ -37,13 +37,19 @@ from __future__ import annotations
 
 import json
 import re
+import time
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import requests
 
+from . import web_lookup
 from .config import Config, env
 from .db import DB
+from .feeds_store import load_feeds
 from .geocode import geocode
-from .trends.company_store import auto_upsert_company
+from .trends import company_store
+from .trends.company_store import auto_mark_ipo, auto_upsert_company
 from .trends.store import auto_append_device
 from . import summarizer as summarizer_mod
 
@@ -90,7 +96,19 @@ def _build_prompt(row, config: Config, context: str) -> str:
     return (
         f"Read this {row['source']} item about {config.industry_name}. Extract structured metadata as JSON with "
         "exactly these keys (use null for anything not present or unclear — never invent a number):\n"
-        '  "org": the primary company, lab, or institution the item is about, or null\n'
+        f'  "org": the primary company, lab, or institution the item is about — a specific NAMED organization only, '
+        f'e.g. "Neuralink". For academic work, this means the specific LAB or research group — ideally named after '
+        f'its lead/PI (e.g. "Poon Lab", "the Shenoy Lab at Stanford", "Smith\'s lab") — NEVER the university alone '
+        f'("Stanford University", "MIT" by itself); if the text only names the university with no specific lab or '
+        f"lead identifiable, that's null, not the university's name. Use null for anything else too, INCLUDING: "
+        f'the general field/industry itself (never "{config.industry_name}" or a synonym for it); a vague group '
+        f'description like "Chinese scientists", "researchers", "a team at the university", or "the company"; and '
+        f'— a common mistake — the PUBLICATION or news outlet reporting the story (e.g. if the text says '
+        f'"according to TechCrunch..." or "36Kr reports that...", that outlet is NOT the org; keep looking for who '
+        f"the story is actually about). If the text doesn't name the specific organization, that's null, not your "
+        f"best guess at a description of one\n"
+        '  "org_description": at most 5 words on what that org is/does, e.g. "BCI implant company" or '
+        '"Academic neuroscience lab" — null if "org" is null\n'
         '  "org_type": one of "industry", "academic", "government", "nonprofit", or "unknown"\n'
         '  "modality": the technical approach/category, e.g. "EEG", "ECoG", "CNS implant", "PNS implant", "EMG", '
         '"fMRI", "fNIRS", or another short label if none fit; "unknown" if unclear\n'
@@ -101,15 +119,242 @@ def _build_prompt(row, config: Config, context: str) -> str:
         '  "novelty_rationale": one concise sentence justifying the novelty_score\n'
         '  "location": the city and country of the org\'s relevant site/HQ mentioned or clearly implied by the '
         'text, as "City, Country" (e.g. "San Francisco, USA") — null if not mentioned or you would be guessing\n'
+        '  "device_name": the specific product/device name this item is actually about, e.g. "Stentrode", "N1", '
+        '"UCSF speech decoder" — null if the item is about the org/company in general rather than one named '
+        "device or system (do NOT put the org's own name here as a stand-in — that's what \"org\" is for)\n"
         '  "device_metrics": an object with any of these keys the text reports concrete numbers/values for — '
-        f"{metric_keys}, {categorical_keys} — omit keys with no data, use {{}} if none reported\n"
+        f"{metric_keys}, {categorical_keys} — omit keys with no data, use {{}} if none reported. Only meaningful "
+        'if "device_name" is set\n'
         '  "company_funding": an object {"funding_total_usd": number or null, "last_funding_round": string or '
-        'null, "last_funding_date": "YYYY-MM-DD" or null} if this item reports a specific funding amount/round '
-        'for "org" — use {} if not a funding story\n\n'
+        'null, "last_funding_date": "YYYY-MM-DD" or null, "ipo_date": "YYYY-MM-DD" or null, "stock_exchange": '
+        'string or null} — funding_total_usd/last_funding_round/last_funding_date if this item reports a specific '
+        'funding amount/round for "org"; ipo_date/stock_exchange only if this item reports "org" actually going '
+        'public (an IPO that happened or a completed direct listing — e.g. "NASDAQ: XYZ" starts trading), NOT a '
+        'mere announcement/rumor of a planned future IPO — use {} if none of this applies\n\n'
         f"Item title: {row['title']}\nItem text: {(row['summary'] or '')[:1500]}\n\n"
         f"Other recent items on the same topic (for novelty comparison):\n{context}\n\n"
         "Respond with ONLY the JSON object, no other text."
     )
+
+
+_NON_ORG_EXACT = {
+    "unknown", "n/a", "na", "none", "various", "unspecified", "not specified", "not mentioned",
+    "not applicable", "researchers", "scientists", "the researchers", "the scientists", "authors",
+    "the authors", "the team", "the company", "the companies", "the university", "the lab", "the labs",
+    "investigators", "academics",
+}
+# "<Demonym/adjective> <generic role noun>" — e.g. "Chinese scientists",
+# "European researchers". Deliberately doesn't include "lab(s)"/"labs" or
+# "institute" etc. in the role-noun list: those are common LEGITIMATE org
+# name endings (e.g. "Merge Labs"), unlike "scientists"/"researchers"/
+# "team", which are never part of an actual org's name.
+_GENERIC_GROUP_RE = re.compile(
+    r"^(the\s+)?[A-Za-z]+\s+(scientists|researchers|engineers|team|teams|group|groups|authors|academics|"
+    r"investigators|physicians|doctors|clinicians|developers|students|professors)$",
+    re.IGNORECASE,
+)
+
+# A country is never itself the "specific named organization" an item is
+# about — but an LLM extraction sometimes latches onto a country/national
+# framing instead of the actual company buried in the text (e.g. a story
+# about "Adi Neuroscience" headlined around "India's $1B neurotech fund"
+# gets "org" extracted as "India" or "India's Neurotechnology Fund"
+# instead). Caught here as a defensive backstop, same idea as
+# _is_bare_university: a bare country name, or "<Country>'s ..." (almost
+# never how a real org's name starts), is rejected outright.
+_COUNTRIES = {
+    "afghanistan", "albania", "algeria", "argentina", "armenia", "australia", "austria", "azerbaijan",
+    "bahrain", "bangladesh", "belarus", "belgium", "bolivia", "bosnia", "brazil", "bulgaria", "cambodia",
+    "cameroon", "canada", "chile", "china", "colombia", "costa rica", "croatia", "cuba", "cyprus",
+    "czechia", "czech republic", "denmark", "ecuador", "egypt", "estonia", "ethiopia", "finland", "france",
+    "georgia", "germany", "ghana", "greece", "hungary", "iceland", "india", "indonesia", "iran", "iraq",
+    "ireland", "israel", "italy", "japan", "jordan", "kazakhstan", "kenya", "kuwait", "latvia", "lebanon",
+    "lithuania", "luxembourg", "malaysia", "mexico", "morocco", "myanmar", "nepal", "netherlands",
+    "new zealand", "nigeria", "north korea", "norway", "oman", "pakistan", "panama", "peru",
+    "philippines", "poland", "portugal", "qatar", "romania", "russia", "saudi arabia", "serbia",
+    "singapore", "slovakia", "slovenia", "south africa", "south korea", "spain", "sri lanka", "sweden",
+    "switzerland", "syria", "taiwan", "thailand", "tunisia", "turkey", "uae", "ukraine",
+    "united arab emirates", "united kingdom", "united states", "uk", "usa", "u.s.", "u.s.a.", "u.k.",
+    "uruguay", "venezuela", "vietnam",
+}
+_COUNTRY_POSSESSIVE_RE = re.compile(
+    r"^(" + "|".join(re.escape(c) for c in sorted(_COUNTRIES, key=len, reverse=True)) + r")'s\b",
+    re.IGNORECASE,
+)
+
+
+_NON_LOCATION_EXACT = {
+    "unknown", "n/a", "na", "none", "unspecified", "not specified", "not mentioned", "not applicable",
+    "remote", "global", "worldwide", "international", "online", "virtual", "earth", "various", "multiple",
+    "various locations", "multiple locations", "tbd", "n/a, n/a",
+}
+
+
+def _looks_like_a_real_location(location_text: str) -> bool:
+    """Same idea as _looks_like_a_named_org: rejects a vague/non-answer
+    the LLM handed back instead of null (e.g. "Remote", "Global") before
+    it ever reaches geocoding — this is what was landing orgs at
+    implausible points (an ocean, a country's random centroid) instead
+    of just staying unlocated."""
+    normalized = location_text.strip().lower().strip(",. ")
+    if not normalized or normalized in _NON_LOCATION_EXACT:
+        return False
+    # A real "City, Country" (or just a country/region) answer has some
+    # alphabetic content; a bare punctuation/number string isn't one.
+    if not any(c.isalpha() for c in normalized):
+        return False
+    return True
+
+
+def _hostname(url: str) -> str:
+    try:
+        host = urlparse(url).netloc.lower()
+    except ValueError:
+        return ""
+    return re.sub(r"^www\.", "", host).split(":")[0]
+
+
+def _squash(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def _known_publisher_names(config: Config) -> set[str]:
+    """Every configured NEWS feed's hostname (e.g. "bioengineer.org") and
+    squashed base name (e.g. "techtimes", from "techtimes.com" — so it
+    matches the human-written form "Tech Times" too), from both
+    config.yaml and anything submitted via the dashboard's Feeds tab.
+    News feeds are third-party outlets reporting ON companies, so this
+    is a safe list of "definitely not the org" — an LLM extraction
+    naming one means it picked up on "according to Tech Times..." and
+    named who's reporting the story instead of who it's about.
+
+    Deliberately excludes blog feeds: unlike news, a configured blog is
+    routinely a company's OWN blog (e.g. neuralink.com/blog/feed), where
+    the feed owner and the story's subject are legitimately the same
+    org — applying this exclusion there would wrongly null out a
+    correct extraction."""
+    names: set[str] = set()
+    for feed_url in config.source("news").get("feeds", []):
+        host = _hostname(feed_url)
+        if host:
+            names.add(host)
+            names.add(_squash(host.split(".")[0]))
+    try:
+        submitted = load_feeds(config.feeds_path)
+        for entry in submitted.get("news", []):
+            host = _hostname(entry.get("url", ""))
+            if host:
+                names.add(host)
+                names.add(_squash(host.split(".")[0]))
+    except Exception:
+        pass  # feeds.yaml missing/unreadable — just skip this signal, not fatal
+    return names
+
+
+# A bare institution name with no specific lab/center/group named — e.g.
+# "Stanford University", "University of Tokyo", "MIT", "Caltech". Not
+# rejected if it also names a specific unit (contains "Lab"/"Institute"/
+# "Center"/etc, or a possessive — "Poon Lab", "Wu Tsai Neurosciences
+# Institute", "Smith's lab at Stanford" all pass through fine).
+_BARE_UNIVERSITY_RE = re.compile(
+    r"^(the\s+)?[\w&,.\-' ]+?\s(university|college)$"
+    r"|^university of [\w&,.\-' ]+$"
+    r"|^(mit|caltech|ucla|ucsd|ucsf|ucb)$",
+    re.IGNORECASE,
+)
+_SPECIFIC_UNIT_RE = re.compile(
+    r"\b(lab|labs|laboratory|institute|center|centre|group|department|dept|program|initiative)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_bare_university(org: str) -> bool:
+    """True for a university/college name with nothing more specific
+    attached — the point isn't that the university is wrong, it's that
+    it's too coarse to be useful as "the org": besseleth should track
+    the specific lab or research group (ideally named after its PI/
+    lead) doing the actual work, the way it already does for a company.
+    Only fires when the string is JUST the institution — any of the
+    words above, or a possessive ('X's lab'), means a specific unit was
+    already named and this doesn't apply."""
+    stripped = org.strip()
+    if not _BARE_UNIVERSITY_RE.match(stripped):
+        return False
+    if _SPECIFIC_UNIT_RE.search(stripped) or "'s" in stripped:
+        return False
+    return True
+
+
+def _looks_like_a_named_org(org: str, config: Config) -> bool:
+    """False for anything that isn't naming a specific organization: the
+    industry name/a keyword verbatim, an explicit non-answer ('unknown',
+    'n/a', ...), a vague group description ('Chinese scientists', 'the
+    researchers'), one of besseleth's own configured news/blog feed
+    sources (e.g. "Tech Times", "36Kr", "bioengineer.org") — those are
+    who reported the story, not who it's about — or a bare university/
+    college name with no specific lab named (see _is_bare_university).
+    All prompted against directly too (see _build_prompt) — this is the
+    defensive backstop for when the LLM ignores that instruction
+    anyway."""
+    normalized = org.strip().lower()
+    if not normalized:
+        return False
+    non_orgs = _NON_ORG_EXACT | {config.industry_name.strip().lower()} | {k.strip().lower() for k in config.keywords}
+    if normalized in non_orgs:
+        return False
+    if _GENERIC_GROUP_RE.match(org.strip()):
+        return False
+    if normalized in _COUNTRIES or _COUNTRY_POSSESSIVE_RE.match(org.strip()):
+        return False
+    if _is_bare_university(org):
+        return False
+    publisher_names = _known_publisher_names(config)
+    if normalized in publisher_names or _squash(org) in publisher_names:
+        return False
+    return True
+
+
+def _canonicalize_new_org(org: str, db: DB) -> str:
+    """If an org that's letters/digits-equivalent to `org` (ignoring
+    case, spacing, punctuation) is already stored under different
+    casing/spacing, reuse that exact existing spelling instead of
+    adding a near-duplicate ("Ability Neurotech" vs "Ability NeuroTech"
+    from two separate LLM calls, which otherwise show up as two
+    different Orgs-table rows). Whichever spelling was seen first wins
+    and stays canonical going forward."""
+    target = _squash(org)
+    if not target:
+        return org
+    for existing in db.distinct_orgs():
+        if _squash(existing) == target:
+            return existing
+    return org
+
+
+def _canonicalize_existing_orgs(db: DB) -> int:
+    """Retroactive sweep: clusters every currently-stored org by the
+    same squash-equivalence as _canonicalize_new_org() and renames every
+    variant in a cluster to whichever spelling has the most items
+    (a tiebreak that's stable and doesn't need any judgment call).
+    Returns how many rows were renamed."""
+    counts = db.org_item_counts()
+    clusters: dict[str, list[str]] = {}
+    for org in counts:
+        clusters.setdefault(_squash(org), []).append(org)
+
+    renamed = 0
+    for variants in clusters.values():
+        if len(variants) < 2:
+            continue
+        # Prefer the most-used spelling, but always collapse its own
+        # whitespace to single spaces — a tie between "Ability Neurotech"
+        # and "Ability  NeuroTech" (double space) shouldn't crown the
+        # double-space one just because it happened to sort higher.
+        canonical = re.sub(r"\s+", " ", max(variants, key=lambda o: counts[o])).strip()
+        for variant in variants:
+            if variant != canonical:
+                renamed += db.rename_org(variant, canonical)
+    return renamed
 
 
 def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
@@ -122,7 +367,11 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
 
     prompt = _build_prompt(row, config, context)
     result = summarizer_mod._ollama_generate(
-        prompt, summarizer_cfg.get("ollama_url", "http://localhost:11434"), summarizer_cfg.get("model", "llama3.1"), timeout=60
+        prompt,
+        summarizer_cfg.get("ollama_url", "http://localhost:11434"),
+        summarizer_cfg.get("model", "llama3.1"),
+        timeout=60,
+        num_thread=summarizer_cfg.get("num_thread"),
     )
     if result is None:
         return False  # Ollama unreachable — retry next time
@@ -137,7 +386,20 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
         novelty = None
 
     org = data.get("org") or None
+    if org and not _looks_like_a_named_org(org, config):
+        org = None
+    if org:
+        org = _canonicalize_new_org(org, db)
+    org_description = (data.get("org_description") or "").strip() or None
+    if org_description and org:
+        words = org_description.split()
+        if len(words) > 5:
+            org_description = " ".join(words[:5])
+    elif not org:
+        org_description = None
     location_text = data.get("location") or None
+    if location_text and not _looks_like_a_real_location(location_text):
+        location_text = None
     lat = lon = None
     if location_text:
         coords = geocode(location_text)
@@ -155,15 +417,22 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
         location_text=location_text,
         lat=lat,
         lon=lon,
+        org_description=org_description,
     )
 
-    # Fold concrete numbers into devices.yaml/companies.yaml — additive
-    # only, never overwrites an existing entry (see module docstring).
+    # Fold concrete numbers into the devices/companies tables — additive
+    # only, never overwrites an existing entry (see trends/store.py's
+    # docstring). Requires an actual named device — "org" alone (e.g. the
+    # LLM defaulting to just the company name when it can't name a
+    # specific product) isn't a device, and used to silently create a
+    # device row with the org's own name, cluttering the FDA timeline
+    # with entries that were never really about a device.
+    device_name = (data.get("device_name") or "").strip()
     device_metrics = data.get("device_metrics") or {}
-    if org and device_metrics:
+    if org and device_name and device_name.lower() != org.lower():
         auto_append_device(
             config.devices_path,
-            name=device_metrics.get("device_type") and f"{org} {device_metrics['device_type']}" or org,
+            name=device_name,
             org=org,
             org_type=data.get("org_type") or "unknown",
             fda_status=device_metrics.get("fda_status", "unknown"),
@@ -179,20 +448,269 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
             name=org,
             funding_total_usd=funding.get("funding_total_usd"),
             last_funding_round=funding.get("last_funding_round") or "",
-            last_funding_date=funding.get("last_funding_date") or "",
+            # Fall back to the item's own published date when the LLM
+            # didn't pin an exact funding date — "reported around this
+            # date" beats leaving it blank, which used to mean a company
+            # with real funding data just never appeared on the Trends
+            # tab's date-axis chart (it had table entries but no point to
+            # plot).
+            last_funding_date=funding.get("last_funding_date") or (row["published_at"] or "")[:10],
             source_url=row["url"] or "",
+        )
+    if org and funding.get("ipo_date"):
+        auto_mark_ipo(
+            config.companies_path,
+            name=org,
+            ipo_date=funding["ipo_date"],
+            stock_exchange=funding.get("stock_exchange") or "",
         )
 
     return True
 
 
-def enrich_items_detailed(config: Config, db: DB) -> dict:
-    """Enriches up to `enrichment.max_items_per_run` unenriched items.
-    Returns {"processed": int, "message": str, "backend": str} — the
-    message always explains a 0, so 'nothing happened' is never silent:
+def _search_org_location(org: str, summarizer_cfg: dict) -> tuple[str, float, float] | None:
+    """Tier 2: a general web search (DuckDuckGo) plus the local LLM to
+    read the results, for an org Wikidata doesn't know about — covers
+    the small/early-stage companies tier 1 misses, at the cost of an
+    LLM call, so this only runs after that one comes back empty.
+    Requires Ollama; returns None on any failure at any step (no
+    results, Ollama unreachable, the model saying it can't tell, or a
+    location that fails the same validity check as the LLM's own item-
+    level extraction)."""
+    if summarizer_cfg.get("backend") != "ollama":
+        return None
+    snippets = web_lookup.duckduckgo_search(f"{org} headquarters location city")
+    if not snippets:
+        return None
+
+    prompt = (
+        f'Based on these web search result snippets, what city and country is "{org}"\'s headquarters or main '
+        f'office in? Respond with ONLY "City, Country" (e.g. "San Francisco, USA"), or exactly "unknown" if the '
+        f"snippets don't make it clear — never guess.\n\nSnippets:\n" + "\n".join(f"- {s}" for s in snippets)
+    )
+    result = summarizer_mod._ollama_generate(
+        prompt,
+        summarizer_cfg.get("ollama_url", "http://localhost:11434"),
+        summarizer_cfg.get("model", "llama3.1"),
+        timeout=30,
+        num_thread=summarizer_cfg.get("num_thread"),
+    )
+    if not result:
+        return None
+
+    location_text = result.strip().strip('"')
+    if not _looks_like_a_real_location(location_text):
+        return None
+    coords = geocode(location_text)
+    if not coords:
+        return None
+    return (location_text, *coords)
+
+
+def _backfill_org_locations(config: Config, db: DB) -> int:
+    """Fills in a missing location for orgs that have none, independent
+    of the LLM pass above (that one only ever knows what a given item's
+    own text says, so an org whose location was never mentioned in any
+    item stays unlocated forever without this): tries a free Wikidata/
+    Wikipedia lookup first, then a general web search read by the local
+    LLM if that comes back empty — see web_lookup.py's docstring for why
+    in that order. Bounded per run (enrichment.max_org_lookups_per_run,
+    shared across both tiers) and cached — found or not — so a miss
+    isn't re-queried every run; a cached hit is reapplied for free if a
+    newer item for the same org shows up without its own location.
+    Returns how many orgs got newly filled in."""
+    cfg = config.raw.get("enrichment", {}) or {}
+    max_lookups = cfg.get("max_org_lookups_per_run", 8)
+    recheck_days = cfg.get("location_recheck_days", 30)
+    if max_lookups <= 0:
+        return 0
+
+    filled = 0
+    attempted = 0
+    for org in db.orgs_missing_location():
+        cached = db.get_org_location_cache(org)
+        if cached and cached["found"]:
+            # Already know this one — reapply from cache, free (no web call,
+            # doesn't count against this run's lookup budget).
+            db.set_org_location(org, cached["location_text"], cached["lat"], cached["lon"])
+            filled += 1
+            continue
+        if cached and not cached["found"]:
+            checked_at = datetime.fromisoformat(cached["checked_at"])
+            if datetime.now(timezone.utc) - checked_at < timedelta(days=recheck_days):
+                continue  # checked recently, nothing found — don't re-probe yet
+
+        if attempted >= max_lookups:
+            continue
+        attempted += 1
+        result = web_lookup.lookup_org_location(org) or _search_org_location(org, config.summarizer)
+        if result:
+            label, lat, lon = result
+            db.set_org_location(org, label, lat, lon)
+            db.set_org_location_cache(org, found=True, location_text=label, lat=lat, lon=lon)
+            filled += 1
+        else:
+            db.set_org_location_cache(org, found=False)
+
+    return filled
+
+
+def _backfill_contact_locations(config: Config, db: DB) -> int:
+    """Same free Wikidata/Wikipedia (then web-search+LLM) lookup as
+    _backfill_org_locations, but for your contacts' current employers —
+    powers the Map tab's "friends" layer, which needs a location for a
+    company even if that company was never mentioned in any scraped item
+    (so db.orgs_missing_location() alone wouldn't ever surface it).
+    Shares the same org_location_cache table (and lookup budget) as org
+    backfill — a company that's both a contact's employer and a source
+    org only ever gets looked up once. Returns how many got newly filled."""
+    cfg = config.raw.get("enrichment", {}) or {}
+    max_lookups = cfg.get("max_org_lookups_per_run", 8)
+    if max_lookups <= 0:
+        return 0
+
+    # "Current" employer = the first workplace listed (see contacts_store's
+    # Contact docstring — order is up to you, current-first if it matters).
+    orgs = set()
+    for contact in config.contacts:
+        workplaces = contact.get("workplaces") or []
+        if workplaces and workplaces[0].get("company"):
+            orgs.add(workplaces[0]["company"])
+
+    filled = 0
+    attempted = 0
+    for org in orgs:
+        cached = db.get_org_location_cache(org)
+        if cached:
+            if cached["found"]:
+                filled += 1
+            continue  # already resolved (or already tried and came up empty) — cache handles recheck
+        if attempted >= max_lookups:
+            continue
+        attempted += 1
+        result = web_lookup.lookup_org_location(org) or _search_org_location(org, config.summarizer)
+        if result:
+            label, lat, lon = result
+            db.set_org_location_cache(org, found=True, location_text=label, lat=lat, lon=lon)
+            filled += 1
+        else:
+            db.set_org_location_cache(org, found=False)
+
+    return filled
+
+
+def _standardize_location_names(db: DB) -> int:
+    """Different items naming the same real-world place at different
+    levels of detail — "Mountain View", "Mountain View, CA", "Mountain
+    View, California, United States" — all geocode to the same (or a
+    near-identical) point, but stayed as different-looking rows/markers
+    since nothing reconciled the TEXT, only the coordinates came from
+    geocoding. Clusters items by lat/lon rounded to 2 decimal places
+    (~1km — same city, not just same country) and snaps every variant in
+    a cluster to whichever (text, lat, lon) is most common, the same
+    "most-used spelling wins" idiom _canonicalize_existing_orgs uses for
+    org names. lat/lon only ever gets replaced by another item's own
+    already-geocoded point within that ~1km cluster (never guessed), so
+    this stays safe to run unattended — worst case it nudges a marker by
+    under a kilometer to match its neighbors, never invents a location.
+    Returns how many items were changed. Runs BEFORE
+    _apply_location_consensus so that sweep isn't fooled into seeing
+    "one org, several disagreeing locations" when it's really "one
+    location, several spellings/jittered coordinates"."""
+    clusters: dict[tuple[float, float], list[sqlite3.Row]] = {}
+    for row in db.location_text_variants():
+        key = (round(row["lat"], 2), round(row["lon"], 2))
+        clusters.setdefault(key, []).append(row)
+
+    renamed = 0
+    for variants in clusters.values():
+        if len(variants) < 2:
+            continue
+        canonical = max(variants, key=lambda r: r["n"])
+        for v in variants:
+            if (v["location_text"], v["lat"], v["lon"]) == (canonical["location_text"], canonical["lat"], canonical["lon"]):
+                continue
+            renamed += db.standardize_location(
+                v["location_text"], v["lat"], v["lon"], canonical["location_text"], canonical["lat"], canonical["lon"]
+            )
+    return renamed
+
+
+def _apply_location_consensus(db: DB) -> int:
+    """Each item gets its location guessed independently (from its own
+    text, by whichever LLM call enriched it) — so one org's items can
+    end up disagreeing, e.g. 10 items correctly say San Francisco and 1
+    misreads something as Brazil. db.locations() (the Map tab's data
+    source) groups by (org, lat, lon), so disagreement literally means
+    that org gets plotted as two markers instead of one. This applies
+    the majority location to every item for an org whenever there IS a
+    clear majority — a tie is left alone rather than guessing which
+    side is right. Returns how many orgs were reconciled."""
+    reconciled = 0
+    for org in db.distinct_orgs():
+        votes = db.org_location_votes(org)
+        if len(votes) < 2:
+            continue  # already unanimous, or unlocated — nothing to reconcile
+        top, runner_up = votes[0], votes[1]
+        if top["n"] <= runner_up["n"]:
+            continue  # no strict majority — don't guess which is right
+        db.set_org_location_all(org, top["location_text"], top["lat"], top["lon"])
+        reconciled += 1
+    return reconciled
+
+
+def _sync_duplicate_novelty(config: Config, db: DB) -> int:
+    """Multiple rows for the same story are expected — the same news
+    inevitably reaches besseleth via more than one feed — and this
+    deliberately does NOT merge or drop any of them (that's a separate,
+    report-time-only concern — see dedupe.merge_near_duplicates(), used
+    when rendering the weekly report, not here). What's wrong is each
+    row getting independently novelty-scored: 'how surprising compared
+    to other recent items' depends on exactly which other items happened
+    to be in context at that moment, so two rows for one story can end
+    up with two different scores. This groups recent items by the same
+    near-duplicate title match, and — within a group — copies whichever
+    novelty_score/novelty_rationale is already set onto every other
+    member so they read the same, regardless of source. Returns how
+    many rows got a score synced onto them."""
+    from .dedupe import group_near_duplicates
+
+    cfg = config.raw.get("enrichment", {}) or {}
+    sources = cfg.get("sources", DEFAULT_SOURCES)
+    items = db.recent_items_for_dedupe(sources)
+    if len(items) < 2:
+        return 0
+
+    synced = 0
+    for group in group_near_duplicates(items):
+        if len(group) < 2:
+            continue
+        canonical = next((i for i in group if i.novelty_score is not None), None)
+        if canonical is None:
+            continue  # nobody in this group has been scored yet — nothing to sync
+        for item in group:
+            if item.id == canonical.id:
+                continue
+            if item.novelty_score != canonical.novelty_score or item.novelty_rationale != canonical.novelty_rationale:
+                db.sync_novelty(item.id, canonical.novelty_score, canonical.novelty_rationale)
+                synced += 1
+    return synced
+
+
+def enrich_items_detailed(config: Config, db: DB, force: bool = False) -> dict:
+    """Enriches up to `enrichment.max_items_per_run` items. Returns
+    {"processed": int, "message": str, "backend": str} — the message
+    always explains a 0, so 'nothing happened' is never silent:
     enrichment disabled in config, nothing left to enrich (already
     caught up), no LLM configured (marked unknown instead), or Ollama
-    unreachable (left pending — will retry once it's back)."""
+    unreachable (left pending — will retry once it's back).
+
+    force=True re-checks items that already have enrichment too (oldest-
+    checked first), instead of only ones that have never been enriched —
+    for catching up already-stored data after enrich.py's extraction
+    logic improves, without re-running the LLM on everything at once:
+    still capped by max_items_per_run, so a big backlog cycles through
+    over repeated runs rather than one long burst."""
     cfg = config.raw.get("enrichment", {}) or {}
     summarizer_cfg = config.summarizer
     backend = summarizer_cfg.get("backend", "none")
@@ -200,14 +718,85 @@ def enrich_items_detailed(config: Config, db: DB) -> dict:
     if not cfg.get("enabled", True):
         return {"processed": 0, "message": "enrichment.enabled is false in config.yaml — nothing to do.", "backend": backend}
 
+    # Rows for the same story across multiple feeds are expected and
+    # stay separate — this only makes sure they agree on novelty. See
+    # _sync_duplicate_novelty()'s docstring.
+    synced = _sync_duplicate_novelty(config, db)
+    if synced:
+        print(f"[enrich] Synced novelty score across {synced} duplicate item(s) of the same story.")
+
+    # Self-healing cleanup for items enriched before this guard existed
+    # (or before it covered vague-group phrasing like "Chinese scientists")
+    # — sweeps every org value currently stored against the same check a
+    # fresh enrichment applies. Cheap (one query for the distinct list,
+    # then an indexed exact-match update), safe to run every call.
+    invalid_orgs = [o for o in db.distinct_orgs() if not _looks_like_a_named_org(o, config)]
+    cleared = db.clear_org_matches(invalid_orgs)
+    if cleared:
+        print(f"[enrich] Cleared {cleared} item(s) whose 'org' was actually the industry name/a keyword.")
+
+    renamed = _canonicalize_existing_orgs(db)
+    if renamed:
+        print(f"[enrich] Merged {renamed} item(s) into an existing org's canonical spelling (casing/spacing variants).")
+
+    # A device row that's just the org's own name (an older bug — see
+    # _enrich_one's device_name gate) never belonged on the FDA timeline.
+    # Safe to auto-remove: unlike a company-name typo, "name == org" is
+    # unambiguous, no judgment call involved.
+    bogus_devices = db.delete_bogus_devices()
+    if bogus_devices:
+        print(f"[enrich] Removed {bogus_devices} device row(s) whose 'name' was just the org's own name.")
+
+    # NOT auto-merged, deliberately: two similar company names ("Precision
+    # Neuroscience" vs. "Precision Neurotech") are just as often two real
+    # companies as one typo'd twice, and a wrong auto-merge would silently
+    # fold one company's data into another's. This only flags candidates
+    # for a human to confirm — see find_possible_duplicate_companies's
+    # docstring — surfaced in the dashboard's Trends tab, never merged here.
+    possible_dupes = company_store.find_possible_duplicate_companies(config.companies_path)
+    if possible_dupes:
+        print(f"[enrich] {len(possible_dupes)} possible duplicate company pair(s) flagged for review in the dashboard.")
+
+    dated_companies = company_store.backfill_missing_funding_dates(config.companies_path)
+    if dated_companies:
+        print(f"[enrich] Backfilled a funding date for {dated_companies} compan(ies) that had funding data but no date.")
+
+    invalid_locations = [loc for loc in db.distinct_locations() if not _looks_like_a_real_location(loc)]
+    locations_cleared = db.clear_location_matches(invalid_locations)
+    if locations_cleared:
+        print(f"[enrich] Cleared {locations_cleared} item(s) with a vague location guess (e.g. 'Remote'/'Global').")
+
+    standardized_locations = _standardize_location_names(db)
+    if standardized_locations:
+        print(f"[enrich] Standardized {standardized_locations} item(s)' location label to match others at the same place.")
+
+    reconciled_locations = _apply_location_consensus(db)
+    if reconciled_locations:
+        print(f"[enrich] Reconciled {reconciled_locations} org(s) whose items disagreed on location to the majority guess.")
+
+    # Independent of the LLM pass below — a free web lookup (Wikidata)
+    # for orgs whose location was never mentioned in any item's own
+    # text, so those don't just stay unlocated forever.
+    locations_filled = _backfill_org_locations(config, db)
+    contact_locations_filled = _backfill_contact_locations(config, db)
+    location_note = (
+        f" Filled in a location for {locations_filled} org(s) via web lookup." if locations_filled else ""
+    )
+    if contact_locations_filled:
+        location_note += f" Filled in a location for {contact_locations_filled} contact employer(s)."
+
     sources = cfg.get("sources", DEFAULT_SOURCES)
     max_items = cfg.get("max_items_per_run", 20)
 
-    rows = db.unenriched_items(sources, max_items)
+    rows = db.items_to_reenrich(sources, max_items) if force else db.unenriched_items(sources, max_items)
     if not rows:
+        message = (
+            f"Nothing to re-enrich — enrichment.sources is empty.{location_note}" if force else
+            f"Nothing to enrich — every item in enrichment.sources is already tagged (or unknown).{location_note}"
+        )
         return {
             "processed": 0,
-            "message": "Nothing to enrich — every item in enrichment.sources is already tagged (or unknown).",
+            "message": message,
             "backend": backend,
         }
 
@@ -220,30 +809,49 @@ def enrich_items_detailed(config: Config, db: DB) -> dict:
         msg = (
             f"summarizer.backend is {backend!r}, not 'ollama' — marked {len(rows)} item(s) 'unknown' rather than "
             f"leaving them pending. Set summarizer.backend: \"ollama\" in config.yaml and have Ollama running to "
-            f"actually extract org/modality/location/etc."
+            f"actually extract org/modality/location/etc.{location_note}"
         )
         print(f"[enrich] {msg}")
         return {"processed": len(rows), "message": msg, "backend": backend}
 
     ok, status_msg = ollama_status(summarizer_cfg)
     if not ok:
+        status_msg += location_note
         print(f"[enrich] {status_msg}")
         return {"processed": 0, "message": status_msg, "backend": backend}
 
+    pause_seconds = cfg.get("pause_seconds", 0)
+
     processed = 0
-    for row in rows:
+    work_seconds = 0.0  # excludes the deliberate pause_seconds sleeps — this is actual enrich time, not throttling
+    for i, row in enumerate(rows):
+        item_start = time.time()
         try:
             if _enrich_one(row, db, config, summarizer_cfg):
                 processed += 1
         except Exception as e:
             print(f"[enrich] Failed on item {row['id']}: {e}")
+        work_seconds += time.time() - item_start
+        # Gives the CPU a breather between LLM calls instead of hammering
+        # it back-to-back for the whole batch — set enrichment.pause_seconds
+        # in config.yaml if enrich runs are making the machine unusable.
+        # Skipped after the last item so it doesn't delay returning.
+        if pause_seconds and i < len(rows) - 1:
+            time.sleep(pause_seconds)
+
+    if processed:
+        db.record_enrich_run(processed, work_seconds)
+    stats = db.get_enrich_stats()
 
     if processed < len(rows):
         message = f"Enriched {processed}/{len(rows)} — the rest failed mid-call and will retry next run (see server log)."
     else:
         message = f"Enriched {processed} item(s)."
+    if processed:
+        message += f" ({work_seconds:.1f}s, {work_seconds / processed:.1f}s/item)"
+    message += location_note
     print(f"[enrich] {message}")
-    return {"processed": processed, "message": message, "backend": backend}
+    return {"processed": processed, "message": message, "backend": backend, "elapsed_seconds": work_seconds, "stats": stats}
 
 
 def enrich_items(config: Config, db: DB) -> int:
