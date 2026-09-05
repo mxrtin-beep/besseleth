@@ -216,8 +216,8 @@ enrichment:
   #     items stay showing "pending" in the dashboard until their turn
   #     comes, which is expected, not stuck.
   enabled: true
-  max_items_per_run: 20
-  pause_seconds: 0     # e.g. 2 — sleep this long between items during a run
+  max_items_per_run: 10   # was 20 — smaller bursts, catches up over more fetches instead of one big spike
+  pause_seconds: 2        # sleep between items during a run — turns a CPU spike into a trickle
   sources: ["arxiv", "news", "blog"]
 
   # A separate pass, independent of the LLM extraction above: for orgs
@@ -242,7 +242,13 @@ summarizer:
   ollama_url: "http://localhost:11434"
   model: "llama3.1"
   max_items_per_summary_call: 8
-  # num_thread: 4            # cap CPU threads Ollama uses per call (unset = its default, usually all cores)
+  num_thread: 4              # cap CPU threads Ollama uses per call — was unset (its default, usually ALL cores),
+                              # which is the actual cause of "the whole computer slows to a crawl" during a
+                              # fetch: Ollama itself is a separate process doing the heavy lifting here, not
+                              # besseleth's own code, so this is the one setting besseleth can hand it to keep
+                              # some cores free for everything else you're running. 4 is a reasonable default for
+                              # most laptops; raise it if enrichment feels too slow and your machine can spare it,
+                              # lower it (e.g. 2) if it's still too disruptive.
 
 jobs:
   # Job postings for the orgs besseleth has extracted from items (see the
