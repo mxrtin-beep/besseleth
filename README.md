@@ -190,11 +190,26 @@ happening at company X". Add these to `sources.news.feeds` in
 # -> http://127.0.0.1:5050
 ```
 
-Local-only (no auth, don't expose it on the open internet as-is). Unlike
-the CLI, this doesn't need a `besseleth.cli run` first — starting it also
-starts the background schedule (see Usage above), so it fetches and
-reports on its own from here on; the status bar up top shows what it's
-doing and when. Tabs:
+No auth by default — fine as-is on your own Mac, or reached from your
+phone over Tailscale (a private network between just your own devices).
+Before putting it behind anything more exposed (a public tunnel like
+ngrok/Cloudflare Tunnel, a machine other people can reach), set:
+
+```bash
+export BESSELETH_AUTH_USER="you"
+export BESSELETH_AUTH_PASSWORD="something-only-you-know"
+```
+
+before starting the app — every route then requires that username/
+password (a plain browser login prompt, HTTP Basic Auth). Deliberately
+env vars, not a config.yaml setting: that file is tracked in git now, and
+a password has no business in version control. Leave both unset and
+nothing changes.
+
+Unlike the CLI, this doesn't need a `besseleth.cli run` first — starting
+it also starts the background schedule (see Usage above), so it fetches
+and reports on its own from here on; the status bar up top shows what
+it's doing and when. Tabs:
 
 - **Report** — the latest (or any past) report, rendered from Markdown;
   delete old ones from the sidebar.

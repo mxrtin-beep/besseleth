@@ -11,18 +11,23 @@ Run with:
 Everything here reads the same config.yaml / devices.yaml / companies.yaml
 / reports/ / data/besseleth.db that the CLI writes — this is a viewer
 (plus the scheduler and the paste box), not a second copy of the
-pipeline. It's meant for local/personal use (no auth); don't expose it on
-the open internet as-is.
+pipeline. Meant for local/personal use; no auth by default (fine on your
+own Mac, or over Tailscale to your phone), but set BESSELETH_AUTH_USER/
+BESSELETH_AUTH_PASSWORD (env vars, never config.yaml — that's tracked in
+git) before putting this behind a public tunnel (ngrok, Cloudflare
+Tunnel, etc.) — see _require_auth() below.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import secrets
 from datetime import date
 from pathlib import Path
 
 import markdown as md
-from flask import Flask, abort, jsonify, render_template, request, send_from_directory
+from flask import Flask, Response, abort, jsonify, render_template, request, send_from_directory
 
 from ..config import Config, load_config
 from ..contacts_store import Contact, add_contact, import_linkedin_csv, load_contacts, remove_contact, update_contact
@@ -37,10 +42,42 @@ from ..trends.fda_stages import FDA_STAGES, stage_for
 from ..trends.store import load_devices
 
 
+def _require_auth() -> "Response | None":
+    """HTTP Basic Auth, gated entirely on two env vars — unset either one
+    (the default) and this is a no-op, so a plain local/Tailscale setup
+    is unaffected. Set BOTH before exposing the dashboard any other way
+    (a public tunnel, a machine other people can reach):
+
+        export BESSELETH_AUTH_USER="you"
+        export BESSELETH_AUTH_PASSWORD="something-only-you-know"
+
+    Deliberately not a config.yaml setting — that file is tracked in
+    git now (see an earlier commit), and a password has no business in
+    version control. secrets.compare_digest avoids leaking the correct
+    password one character at a time via response-time differences.
+    Returning a Response (rather than calling abort()) from a
+    before_request hook is what tells Flask to use it as the reply and
+    skip the view entirely — returning None proceeds as normal."""
+    user = os.environ.get("BESSELETH_AUTH_USER")
+    password = os.environ.get("BESSELETH_AUTH_PASSWORD")
+    if not user or not password:
+        return None
+    auth = request.authorization
+    valid = (
+        auth is not None
+        and secrets.compare_digest(auth.username, user)
+        and secrets.compare_digest(auth.password, password)
+    )
+    if valid:
+        return None
+    return Response("Authentication required.", 401, {"WWW-Authenticate": 'Basic realm="besseleth"'})
+
+
 def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
     app = Flask(__name__)
     app.config["BESSELETH_CONFIG"] = config
     app.config["BESSELETH_STATUS"] = status or SchedulerStatus(enabled=False)
+    app.before_request(_require_auth)
 
     reports_dir = Path(config.report.get("output_dir", "reports"))
 
