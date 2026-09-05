@@ -92,7 +92,11 @@ def _run_report(config: Config, status: SchedulerStatus):
             db.close()
         with status._lock:
             status.last_report_at = datetime.now(timezone.utc).isoformat()
-            status.last_report_path = path
+            # generate_weekly_report returns "" when there was nothing new
+            # to report — keep showing whatever report last actually ran
+            # rather than blanking that out.
+            if path:
+                status.last_report_path = path
             status.last_error = None
     except Exception as e:
         print(f"[scheduler] report job failed: {e}")

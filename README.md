@@ -509,11 +509,23 @@ schedule:
   timezone: "America/Los_Angeles"  # optional; defaults to the host's local tz
 ```
 
-Reports accumulate in `reports/` — each is its own dated file, never
-overwritten. Delete one you don't need from the dashboard sidebar (🗑 next
-to its date) or `besseleth.cli report-delete <report-id>`. To prune
+Reports accumulate in `reports/` — each is its own timestamped file
+(`report-2026-09-05-140322.md`), never overwritten, even by a same-day
+re-run. Delete one you don't need from the dashboard sidebar (🗑 next
+to it) or `besseleth.cli report-delete <report-id>`. To prune
 automatically instead, set `reports.keep_last: N` in config.yaml to keep
 only the N most recent (0/omitted = keep everything).
+
+Every report is generated fresh, independent of any before it — it only
+ever pulls items not yet included in a past report, so nothing carries
+over between runs. Re-running with nothing new since the last report (no
+fresh scrape results, nothing pasted) produces no new file at all; there's
+one only when there's something to say. The report's closing **🧠 Big
+picture** section is the exception to "independent": it's the one place
+that looks back across everything besseleth has ever accumulated (item
+counts, most-active organizations, how far back its knowledge goes) to
+say what this run's new items mean in that larger context — a trend
+continuing, a quiet org suddenly active again, or something genuinely new.
 
 ## Project layout
 

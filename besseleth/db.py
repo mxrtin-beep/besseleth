@@ -404,6 +404,25 @@ class DB:
         rows = self.conn.execute("SELECT DISTINCT org FROM items WHERE org IS NOT NULL AND org != ''").fetchall()
         return [r[0] for r in rows]
 
+    def accumulated_knowledge_stats(self) -> dict:
+        """A snapshot of everything besseleth has accumulated across all
+        runs, ever — not just this week's items. Used to give the report's
+        closing 'big picture' section something to place new items
+        against (an org that's been quiet suddenly active again, a trend
+        that's been building for months, etc.)."""
+        total_items = self.conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        earliest = self.conn.execute(
+            "SELECT MIN(published_at) FROM items WHERE published_at IS NOT NULL AND published_at != ''"
+        ).fetchone()[0]
+        org_counts = self.org_item_counts()
+        top_orgs = sorted(org_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        return {
+            "total_items": total_items,
+            "total_orgs": len(org_counts),
+            "top_orgs": top_orgs,
+            "earliest_date": (earliest or "")[:10],
+        }
+
     def org_item_counts(self) -> dict[str, int]:
         """{org: item count} for every distinct org — used to pick which
         spelling/casing variant of a near-duplicate org name is the most-

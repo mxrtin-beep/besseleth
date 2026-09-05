@@ -124,7 +124,15 @@ def _dedupe_and_store(items: list[Item], db: DB) -> list[Item]:
 
 def generate_weekly_report(config: Config, db: DB) -> str:
     """Pulls all unreported items from the DB, personalizes, summarizes,
-    renders, saves (and optionally emails) the report. Returns the file path."""
+    renders, saves (and optionally emails) the report. Returns the file
+    path (or the path of the most recent existing report, unchanged, if
+    there's nothing new to report — see the early-return below).
+
+    Every call is a fresh, independent report: it only ever looks at
+    items not yet included in any past report (nothing here depends on
+    a previous report's content), and gets its own timestamped file, so
+    running it again — because something new was scraped or pasted — can
+    never clobber an earlier one."""
     all_unreported = db.unreported_items()
     items_by_source: dict[str, list[Item]] = {s: [] for s in SOURCES}
     for row in all_unreported:
@@ -146,20 +154,18 @@ def generate_weekly_report(config: Config, db: DB) -> str:
 
     all_items_raw = [i for src in SOURCES for i in items_by_source[src]]
 
-    # Report ids are per-day ("report-2026-09-05.md"), so a second run on
-    # the same day (e.g. hitting "Run now" twice, or a manual `cli run`
-    # after the scheduled one) would otherwise silently overwrite that
-    # day's real report with an empty one — everything unreported was
-    # already consumed and marked reported by the first run. Bail out
-    # instead of clobbering it.
+    # Each report is generated fresh from whatever's unreported right
+    # now — nothing carries over from a previous report, and report ids
+    # are timestamped (not just dated) so a re-run never overwrites an
+    # earlier one. The only reason to re-run at all is something new
+    # having shown up since the last report, so if nothing has, skip
+    # generating an empty one rather than piling up near-duplicate files.
     if not all_items_raw:
-        existing = Path(config.report.get("output_dir", "reports")) / f"report-{date.today().isoformat()}.md"
-        if existing.exists():
-            print(
-                f"[pipeline] No unreported items and {existing} already exists for today; "
-                "skipping report generation so it isn't overwritten with an empty one."
-            )
-            return str(existing)
+        reports_dir = Path(config.report.get("output_dir", "reports"))
+        existing = sorted(reports_dir.glob("report-*.md"), reverse=True)
+        latest = str(existing[0]) if existing else ""
+        print("[pipeline] Nothing new since the last report; skipping generation." + (f" Latest is {latest}." if latest else ""))
+        return latest
 
     # Collapse near-duplicates across sources (e.g. a pasted LinkedIn post
     # about the same story as a scraped news article) into one item, so
@@ -202,6 +208,7 @@ def generate_weekly_report(config: Config, db: DB) -> str:
         clip_items=items_by_source["clip"][:max_n],
         personalized_items=personalized,
         summarizer_cfg=config.summarizer,
+        history=db.accumulated_knowledge_stats(),
     )
 
     path = report_mod.save_report(markdown, report_id, report_cfg.get("output_dir", "reports"))
