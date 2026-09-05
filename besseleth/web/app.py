@@ -354,7 +354,21 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             result = enrich_items_detailed(config, db)
         finally:
             db.close()
-        return jsonify({"ok": True, "enriched": result["processed"], "message": result["message"], "backend": result["backend"]})
+        return jsonify({
+            "ok": True, "enriched": result["processed"], "message": result["message"], "backend": result["backend"],
+            "stats": result.get("stats"),
+        })
+
+    @app.get("/api/enrich/stats")
+    def api_enrich_stats():
+        # Read-only — for the dashboard to show "enriched N items so far,
+        # avg Xs/item" on page load, without triggering a run.
+        db = DB(config.db_path)
+        try:
+            stats = db.get_enrich_stats()
+        finally:
+            db.close()
+        return jsonify(stats)
 
     @app.post("/api/backfill")
     def api_backfill():

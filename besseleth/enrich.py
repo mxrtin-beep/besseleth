@@ -812,12 +812,15 @@ def enrich_items_detailed(config: Config, db: DB) -> dict:
     pause_seconds = cfg.get("pause_seconds", 0)
 
     processed = 0
+    work_seconds = 0.0  # excludes the deliberate pause_seconds sleeps — this is actual enrich time, not throttling
     for i, row in enumerate(rows):
+        item_start = time.time()
         try:
             if _enrich_one(row, db, config, summarizer_cfg):
                 processed += 1
         except Exception as e:
             print(f"[enrich] Failed on item {row['id']}: {e}")
+        work_seconds += time.time() - item_start
         # Gives the CPU a breather between LLM calls instead of hammering
         # it back-to-back for the whole batch — set enrichment.pause_seconds
         # in config.yaml if enrich runs are making the machine unusable.
@@ -825,13 +828,19 @@ def enrich_items_detailed(config: Config, db: DB) -> dict:
         if pause_seconds and i < len(rows) - 1:
             time.sleep(pause_seconds)
 
+    if processed:
+        db.record_enrich_run(processed, work_seconds)
+    stats = db.get_enrich_stats()
+
     if processed < len(rows):
         message = f"Enriched {processed}/{len(rows)} — the rest failed mid-call and will retry next run (see server log)."
     else:
         message = f"Enriched {processed} item(s)."
+    if processed:
+        message += f" ({work_seconds:.1f}s, {work_seconds / processed:.1f}s/item)"
     message += location_note
     print(f"[enrich] {message}")
-    return {"processed": processed, "message": message, "backend": backend}
+    return {"processed": processed, "message": message, "backend": backend, "elapsed_seconds": work_seconds, "stats": stats}
 
 
 def enrich_items(config: Config, db: DB) -> int:

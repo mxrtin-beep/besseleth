@@ -208,6 +208,29 @@ class DB:
         )
         self.conn.commit()
 
+    def record_enrich_run(self, items: int, seconds: float) -> None:
+        """Accumulates all-time enrich stats in `meta`, alongside the
+        most recent run's own numbers — powers the dashboard's "enriched
+        N items, avg Xs/item" display. Only called for a run that
+        actually processed something (see enrich.py), so a no-op run
+        doesn't dilute the all-time average with a bunch of zeros."""
+        total_items = int(self.get_meta("enrich_total_items") or 0) + items
+        total_seconds = float(self.get_meta("enrich_total_seconds") or 0) + seconds
+        self.set_meta("enrich_total_items", str(total_items))
+        self.set_meta("enrich_total_seconds", str(total_seconds))
+        self.set_meta("enrich_last_run_items", str(items))
+        self.set_meta("enrich_last_run_seconds", str(seconds))
+        self.set_meta("enrich_last_run_at", datetime.now(timezone.utc).isoformat())
+
+    def get_enrich_stats(self) -> dict:
+        return {
+            "total_items": int(self.get_meta("enrich_total_items") or 0),
+            "total_seconds": float(self.get_meta("enrich_total_seconds") or 0),
+            "last_run_items": int(self.get_meta("enrich_last_run_items") or 0),
+            "last_run_seconds": float(self.get_meta("enrich_last_run_seconds") or 0),
+            "last_run_at": self.get_meta("enrich_last_run_at"),
+        }
+
     def upsert_item(self, item: Item) -> bool:
         """Insert if new. Returns True if it was newly inserted."""
         cur = self.conn.execute("SELECT 1 FROM items WHERE id = ?", (item.id,))

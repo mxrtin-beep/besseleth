@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>{{ industry }} — besseleth</title>
+<title>Besseleth — {{ industry }}</title>
 <link rel="icon" type="image/png" href="/static/favicon.png">
 <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.32.0/plotly.min.js"></script>
 <style>
@@ -107,6 +107,7 @@
   <div id="papersPane" style="display:none">
     <p><button class="btn" id="enrichNowBtn">Enrich now</button></p>
     <p class="hint" id="enrichResult"></p>
+    <p class="hint" id="enrichStats"></p>
     <div class="controls">
       <div><label for="pfFrom">From</label><input type="date" id="pfFrom"></div>
       <div><label for="pfTo">To</label><input type="date" id="pfTo"></div>
@@ -938,6 +939,22 @@ function renderJobs() {
       </tr>`).join('')}</tbody>`;
 }
 
+function renderEnrichStats(stats) {
+  const el = document.getElementById('enrichStats');
+  if (!stats || !stats.total_items) { el.textContent = ''; return; }
+  const avg = stats.total_seconds / stats.total_items;
+  let text = `Enriched ${stats.total_items} item(s) all-time (avg ${avg.toFixed(1)}s/item).`;
+  if (stats.last_run_items) {
+    text += ` Last run: ${stats.last_run_items} item(s) in ${stats.last_run_seconds.toFixed(1)}s.`;
+  }
+  el.textContent = text;
+}
+
+(async () => {
+  const res = await fetch('/api/enrich/stats');
+  renderEnrichStats(await res.json());
+})();
+
 document.getElementById('enrichNowBtn').onclick = async (ev) => {
   const btn = ev.target;
   const resultEl = document.getElementById('enrichResult');
@@ -951,6 +968,7 @@ document.getElementById('enrichNowBtn').onclick = async (ev) => {
     await loadPapers();
     btn.textContent = `Enrich now (+${data.enriched})`;
     resultEl.textContent = data.message || '';
+    renderEnrichStats(data.stats);
   } catch (e) {
     btn.textContent = 'Enrich now (failed)';
     resultEl.textContent = 'Request failed — see server log.';
