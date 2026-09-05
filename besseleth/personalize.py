@@ -21,11 +21,23 @@ JOB_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A social platform's generic page title ("Neuralink (@neuralink) / X"),
+# not any actual post content — happens when a paste or clip only
+# captured the page's <title> tag rather than the post text (X's own
+# markup for this is a common source). Naming the org in the title alone
+# is enough to trip a company-mention match, so this is excluded
+# up front rather than surfacing a link with nothing behind it.
+_SOCIAL_PROFILE_TITLE_RE = re.compile(r"\(@[\w.]+\)\s*/\s*(x|twitter)\s*$", re.IGNORECASE)
+
 
 def _mentioned(text: str, phrase: str) -> bool:
     if not phrase:
         return False
     return re.search(rf"\b{re.escape(phrase)}\b", text, re.IGNORECASE) is not None
+
+
+def _is_real_content(item: Item) -> bool:
+    return not _SOCIAL_PROFILE_TITLE_RE.search(item.title or "")
 
 
 def _workplace_names(contact: dict) -> list[str]:
@@ -57,6 +69,8 @@ def personalize_items(items: list[Item], contacts: list[dict]) -> list[Item]:
     is the point; narrowing it down is a judgment call for the reader,
     not something to guess at silently)."""
     for item in items:
+        if not _is_real_content(item):
+            continue
         text = f"{item.title} {item.summary}"
         for contact in contacts:
             matched_workplace = next((c for c in _workplace_names(contact) if _mentioned(text, c)), None)
@@ -81,7 +95,7 @@ def flag_interests(items: list[Item], interests: list[str]) -> list[Item]:
     already claimed (a contact match is more specific/actionable, so it
     takes priority when both would apply)."""
     for item in items:
-        if item.matched_contact or item.matched_reason:
+        if item.matched_contact or item.matched_reason or not _is_real_content(item):
             continue
         text = f"{item.title} {item.summary}"
         matched = next((phrase for phrase in interests if _mentioned(text, phrase)), None)

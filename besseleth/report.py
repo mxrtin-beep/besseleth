@@ -139,8 +139,12 @@ def build_report(
     report_id = now.strftime("%Y-%m-%d")
     date_range = f"{(now).strftime('%b %d, %Y')} (last {days_back} days)"
 
-    arxiv_summary = summarizer.summarize_section(arxiv_items, "arXiv research", industry_name, summarizer_cfg, cite_style="per_item")
-    news_summary = summarizer.summarize_section(news_items, "News", industry_name, summarizer_cfg)
+    # Bulleted, one sentence + a numbered citation per item — assigned in
+    # code from the item's position, never trusted to an LLM citing many
+    # items in one combined call (which is what was dropping links
+    # entirely for some items). See summarize_items_numbered's docstring.
+    arxiv_summary = summarizer.summarize_items_numbered(arxiv_items, industry_name, summarizer_cfg)
+    news_summary = summarizer.summarize_items_numbered(news_items, industry_name, summarizer_cfg)
     blog_summary = summarizer.summarize_section(blog_items, "Blogs", industry_name, summarizer_cfg)
 
     def _relevance_tag(item: Item) -> str:
@@ -154,8 +158,8 @@ def build_report(
         return f"_Relevant because **{item.matched_contact}** works at **{item.matched_company}**._"
 
     personalized_lines = "\n".join(
-        f"- **{item.title}**" + (f" ([link]({item.url}))" if item.url else "") + f"\n  {_relevance_tag(item)}"
-        for item in personalized_items
+        f"- **{item.title}**" + (f" [{i}]({item.url})" if item.url else "") + f"\n  {_relevance_tag(item)}"
+        for i, item in enumerate(personalized_items, start=1)
     )
 
     conference_lines = "\n".join(

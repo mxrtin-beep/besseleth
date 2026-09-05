@@ -109,6 +109,46 @@ def summarize_section(items: list[Item], section_name: str, industry_name: str, 
     return result
 
 
+def _one_sentence(item: Item, industry_name: str, cfg: dict) -> str:
+    """One concise sentence stating this item's key point — no title
+    repeated verbatim, no preamble. Used to build a numbered bullet list
+    where each item gets its own LLM call rather than one combined call
+    asked to cite N items correctly in one shot; a combined call over
+    several items is exactly what was silently dropping citations (or
+    the whole link) for some of them — asking per item, then attaching
+    the number/link ourselves in code, can't drop one."""
+    backend = cfg.get("backend", "none")
+    if backend != "ollama":
+        return (" ".join(item.summary.split())[:200] or item.title).rstrip(".")
+
+    model = cfg.get("model", "llama3.1")
+    ollama_url = cfg.get("ollama_url", "http://localhost:11434")
+    prompt = (
+        f"In one concise sentence, state the key point of this {industry_name} item — "
+        f"don't repeat the title verbatim, no preamble like 'This article...':\n"
+        f"Title: {item.title}\nText: {item.summary[:600]}\n\nSentence:"
+    )
+    result = _ollama_generate(prompt, ollama_url, model, timeout=60, num_thread=cfg.get("num_thread"))
+    return (result or item.summary[:200] or item.title).strip().rstrip(".")
+
+
+def summarize_items_numbered(items: list[Item], industry_name: str, cfg: dict) -> str:
+    """Renders items as a bullet list, one sentence per item, each ending
+    in a numbered, linked citation — "- Some finding here [1]." — instead
+    of an inline markdown link buried mid-sentence. The number is
+    assigned in code from the item's position, not asked of the LLM, so
+    a link can never go missing or land on the wrong item."""
+    if not items:
+        return ""
+    max_items = cfg.get("max_items_per_summary_call", 8)
+    lines = []
+    for i, item in enumerate(items[:max_items], start=1):
+        sentence = _one_sentence(item, industry_name, cfg)
+        cite = f" [{i}]({item.url})" if item.url else f" [{i}]"
+        lines.append(f"- {sentence}.{cite}")
+    return "\n".join(lines)
+
+
 def summarize_item(item: Item, cfg: dict) -> str:
     """One-line 'why it matters' for a single high-priority item (e.g. a
     personalized match). Falls back to the raw summary if unavailable."""
