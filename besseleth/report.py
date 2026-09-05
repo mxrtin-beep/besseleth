@@ -147,6 +147,8 @@ def build_report(
         # matched_contact/matched_company always come straight from your
         # own contacts.yaml/config.yaml entry, never a placeholder — so
         # this already renders whoever you actually added.
+        if item.matched_reason == "interest":
+            return f"_Matches your interest in **{item.matched_company}**._"
         if item.matched_reason == "school":
             return f"_Relevant because **{item.matched_contact}** went to **{item.matched_company}**._"
         return f"_Relevant because **{item.matched_contact}** works at **{item.matched_company}**._"

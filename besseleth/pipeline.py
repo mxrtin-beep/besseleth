@@ -5,7 +5,7 @@ from datetime import date, datetime, timezone
 
 from .config import Config
 from .db import DB, Item
-from .personalize import personalize_items
+from .personalize import flag_interests, personalize_items
 from .scrapers import (
     arxiv_scraper,
     blog_scraper,
@@ -160,7 +160,8 @@ def generate_weekly_report(config: Config, db: DB) -> str:
         items_by_source[src] = [i for i in items_by_source[src] if i.id not in dropped_ids]
 
     personalize_items(all_items, config.contacts)
-    personalized = [i for i in all_items if i.matched_contact]
+    flag_interests(all_items, config.interests)
+    personalized = [i for i in all_items if i.matched_contact or i.matched_reason == "interest"]
 
     # Persist personalization matches (and merged summaries) back to the DB.
     for i in all_items:

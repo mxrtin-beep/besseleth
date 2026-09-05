@@ -245,6 +245,19 @@
   </div>
 
   <div id="contactsPane" style="display:none">
+    <h3 style="margin-top:0; font-size:1rem;">Your interests</h3>
+    <p class="hint">Topics you personally care about, independent of any contact — an item mentioning one of these
+      shows up in "For you" the same way a mention of a contact's employer does (matched as a whole phrase,
+      case-insensitive). One per line.</p>
+    <div class="controls" style="align-items:stretch">
+      <div style="flex:1; min-width:300px">
+        <textarea id="interestsText" style="width:100%; box-sizing:border-box; min-height:80px" placeholder="speech decoding&#10;wireless power transfer"></textarea>
+      </div>
+      <div><button class="btn" id="saveInterestsBtn">Save</button></div>
+    </div>
+    <div id="interestsResult"></div>
+
+    <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Contacts</h3>
     <div class="controls" style="align-items:stretch; flex-wrap:wrap">
       <div><label for="contactName">Name *</label><input type="text" id="contactName" placeholder="Jane Doe"></div>
       <div><label for="contactEmails">Email(s)</label><input type="text" id="contactEmails" placeholder="jane@example.com, jane@work.com"></div>
@@ -327,7 +340,7 @@ function showTab(which) {
   if (which === 'jobs' && !jobsLoaded) loadJobs();
   if (which === 'map' && !mapLoaded) loadMap();
   if (which === 'paste') { loadPasted(); loadFeeds(); }
-  if (which === 'contacts') loadContacts();
+  if (which === 'contacts') { loadContacts(); loadInterests(); }
 }
 tabReport.onclick = () => showTab('report');
 tabPapers.onclick = () => showTab('papers');
@@ -698,6 +711,27 @@ async function loadContacts() {
   contacts = await res.json();
   renderContacts();
 }
+
+async function loadInterests() {
+  const res = await fetch('/api/interests');
+  const interests = await res.json();
+  document.getElementById('interestsText').value = interests.join('\n');
+}
+
+document.getElementById('saveInterestsBtn').onclick = async () => {
+  const result = document.getElementById('interestsResult');
+  const interests = document.getElementById('interestsText').value.split('\n').map(s => s.trim()).filter(Boolean);
+  result.textContent = 'Saving…';
+  try {
+    const res = await fetch('/api/interests', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ interests }),
+    });
+    const data = await res.json();
+    result.textContent = data.ok ? `Saved ${data.interests.length} interest(s).` : (data.message || 'Failed to save.');
+  } catch (e) {
+    result.textContent = 'Request failed — see server log.';
+  }
+};
 
 document.getElementById('importLinkedinBtn').onclick = async () => {
   const fileInput = document.getElementById('linkedinCsvFile');

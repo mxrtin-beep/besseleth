@@ -4,6 +4,10 @@ something newsworthy (e.g. a paper out of their alma mater). Powers the
 report's "For you" section; contacts come from contacts_store.py (the
 dashboard's Contacts tab) plus config.yaml's legacy `contacts:` list —
 see config.contacts.
+
+flag_interests() below adds a second, independent way into "For you":
+a personal topic (see interests_store.py) that isn't tied to any
+contact — checked only for items a contact match didn't already claim.
 """
 from __future__ import annotations
 
@@ -67,6 +71,23 @@ def personalize_items(items: list[Item], contacts: list[dict]) -> list[Item]:
                 item.matched_company = matched_school
                 item.matched_reason = "school"
                 break
+    return items
+
+
+def flag_interests(items: list[Item], interests: list[str]) -> list[Item]:
+    """Flags items matching a personal interest phrase — same whole-
+    phrase, case-insensitive mention check as a contact's workplace, but
+    not tied to any person. Only checked for an item nothing else has
+    already claimed (a contact match is more specific/actionable, so it
+    takes priority when both would apply)."""
+    for item in items:
+        if item.matched_contact or item.matched_reason:
+            continue
+        text = f"{item.title} {item.summary}"
+        matched = next((phrase for phrase in interests if _mentioned(text, phrase)), None)
+        if matched:
+            item.matched_company = matched
+            item.matched_reason = "interest"
     return items
 
 

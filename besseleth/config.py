@@ -84,6 +84,16 @@ class Config:
         merged.extend(asdict(c) for c in load_contacts(self.contacts_path))
         return merged
 
+    @property
+    def interests_path(self) -> Path:
+        return Path(self.raw.get("interests_path", "interests.yaml"))
+
+    @property
+    def interests(self) -> list[str]:
+        from .interests_store import load_interests
+
+        return load_interests(self.interests_path)
+
     def source(self, name: str) -> dict:
         return self.raw.get("sources", {}).get(name, {}) or {}
 

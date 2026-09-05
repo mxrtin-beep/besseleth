@@ -28,6 +28,7 @@ from ..config import Config, load_config
 from ..contacts_store import Contact, add_contact, import_linkedin_csv, load_contacts, remove_contact, update_contact
 from ..db import DB
 from ..feeds_store import add_feed, load_feeds, remove_feed
+from ..interests_store import load_interests, save_interests
 from ..pipeline import fetch_all
 from ..scheduler import SchedulerStatus, run_now, start_scheduler
 from ..scrapers.manual_drop import add_smart_item
@@ -480,6 +481,19 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         if not removed:
             abort(404)
         return jsonify({"ok": True})
+
+    @app.get("/api/interests")
+    def api_interests():
+        return jsonify(load_interests(config.interests_path))
+
+    @app.post("/api/interests")
+    def api_save_interests():
+        payload = request.get_json(force=True) or {}
+        interests = payload.get("interests") or []
+        if not isinstance(interests, list):
+            return jsonify({"ok": False, "message": "'interests' must be a list of strings."}), 400
+        save_interests(interests, config.interests_path)
+        return jsonify({"ok": True, "interests": load_interests(config.interests_path)})
 
     @app.get("/api/contacts")
     def api_contacts():
