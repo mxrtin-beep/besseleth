@@ -516,16 +516,17 @@ to it) or `besseleth.cli report-delete <report-id>`. To prune
 automatically instead, set `reports.keep_last: N` in config.yaml to keep
 only the N most recent (0/omitted = keep everything).
 
-Every report is generated fresh, independent of any before it — it only
-ever pulls items not yet included in a past report, so nothing carries
-over between runs. Re-running with nothing new since the last report (no
-fresh scrape results, nothing pasted) produces no new file at all; there's
-one only when there's something to say. The report's closing **🧠 Big
-picture** section is the exception to "independent": it's the one place
-that looks back across everything besseleth has ever accumulated (item
-counts, most-active organizations, how far back its knowledge goes) to
-say what this run's new items mean in that larger context — a trend
-continuing, a quiet org suddenly active again, or something genuinely new.
+Every report is built fresh from scratch: it pulls everything in the last
+`news.days_back` days (default 8) at the moment it runs, with no memory of
+what a previous report already showed. Re-running — while developing, or
+because something new got scraped or pasted — always reflects the current
+window exactly as if no report had ever run before; it never skips an
+item just because an earlier report already included it. The report's
+closing **🧠 Big picture** section is the one place that does look back
+further, across everything besseleth has ever accumulated (item counts,
+most-active organizations, how far back its knowledge goes) to say what
+this run's items mean in that larger context — a trend continuing, a
+quiet org suddenly active again, or something genuinely new.
 
 ## Project layout
 

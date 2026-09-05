@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -273,10 +273,20 @@ class DB:
         q = f"SELECT * FROM items WHERE source IN ({placeholders}) ORDER BY fetched_at DESC LIMIT ?"
         return list(self.conn.execute(q, [*sources, limit]).fetchall())
 
-    def unreported_items(self, source: Optional[str] = None) -> list[sqlite3.Row]:
+    def items_in_window(self, days_back: int, source: Optional[str] = None) -> list[sqlite3.Row]:
+        """Every item published (or fetched, if it has no published date)
+        within the last `days_back` days — regardless of whether it's
+        already appeared in a past report. This is what the report is
+        built from: a fresh snapshot of "what's in the last N days" every
+        time it's generated, not a one-time consumable delta since the
+        last run — so re-running (e.g. while developing, or after
+        pasting something new) always reflects the current window as if
+        no report had ever run before, rather than skipping items an
+        earlier run already claimed."""
         self.conn.row_factory = sqlite3.Row
-        q = "SELECT * FROM items WHERE included_in_report IS NULL"
-        params: list[Any] = []
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).isoformat()
+        q = "SELECT * FROM items WHERE COALESCE(NULLIF(published_at, ''), fetched_at) >= ?"
+        params: list[Any] = [cutoff]
         if source:
             q += " AND source = ?"
             params.append(source)

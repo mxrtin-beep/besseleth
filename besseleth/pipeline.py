@@ -123,19 +123,19 @@ def _dedupe_and_store(items: list[Item], db: DB) -> list[Item]:
 
 
 def generate_weekly_report(config: Config, db: DB) -> str:
-    """Pulls all unreported items from the DB, personalizes, summarizes,
-    renders, saves (and optionally emails) the report. Returns the file
-    path (or the path of the most recent existing report, unchanged, if
-    there's nothing new to report — see the early-return below).
-
-    Every call is a fresh, independent report: it only ever looks at
-    items not yet included in any past report (nothing here depends on
-    a previous report's content), and gets its own timestamped file, so
-    running it again — because something new was scraped or pasted — can
-    never clobber an earlier one."""
-    all_unreported = db.unreported_items()
+    """Builds the report from every item in the last `days_back` days
+    (config: `news.days_back`, default 8) — a fresh snapshot of "what's in
+    this window right now," recomputed from scratch every time. It does
+    NOT track or check what a previous report already included: re-running
+    (while developing, after pasting something new, whatever the reason)
+    always looks exactly as if no report had ever run before, and never
+    skips an item just because an earlier run already showed it. Each run
+    still gets its own timestamped file, so re-running never overwrites an
+    earlier report. Returns the saved file path."""
+    days_back = config.source("news").get("days_back", 8)
+    window_rows = db.items_in_window(days_back)
     items_by_source: dict[str, list[Item]] = {s: [] for s in SOURCES}
-    for row in all_unreported:
+    for row in window_rows:
         if row["source"] not in items_by_source:
             continue
         items_by_source[row["source"]].append(
@@ -153,19 +153,6 @@ def generate_weekly_report(config: Config, db: DB) -> str:
         )
 
     all_items_raw = [i for src in SOURCES for i in items_by_source[src]]
-
-    # Each report is generated fresh from whatever's unreported right
-    # now — nothing carries over from a previous report, and report ids
-    # are timestamped (not just dated) so a re-run never overwrites an
-    # earlier one. The only reason to re-run at all is something new
-    # having shown up since the last report, so if nothing has, skip
-    # generating an empty one rather than piling up near-duplicate files.
-    if not all_items_raw:
-        reports_dir = Path(config.report.get("output_dir", "reports"))
-        existing = sorted(reports_dir.glob("report-*.md"), reverse=True)
-        latest = str(existing[0]) if existing else ""
-        print("[pipeline] Nothing new since the last report; skipping generation." + (f" Latest is {latest}." if latest else ""))
-        return latest
 
     # Collapse near-duplicates across sources (e.g. a pasted LinkedIn post
     # about the same story as a scraped news article) into one item, so
@@ -192,7 +179,6 @@ def generate_weekly_report(config: Config, db: DB) -> str:
 
     report_cfg = config.report
     max_n = report_cfg.get("max_items_per_section", 12)
-    days_back = config.source("news").get("days_back", 8)
 
     report_id, markdown = report_mod.build_report(
         industry_name=config.industry_name,
@@ -215,9 +201,9 @@ def generate_weekly_report(config: Config, db: DB) -> str:
     report_mod.email_report(markdown, report_id, config.industry_name, report_cfg.get("email", {}))
     _prune_old_reports(config)
 
-    # Mark kept items AND the duplicates merged into them as reported —
-    # a dropped duplicate's content is now folded into its winner, so it
-    # shouldn't linger "unreported" and get re-considered every future run.
+    # Purely informational (the dashboard shows which report an item last
+    # appeared in) — selection above is windowed by date, not gated on
+    # this, so it doesn't affect what future reports include.
     all_ids = [i.id for i in all_items] + list(dropped_ids)
     db.mark_reported(all_ids, report_id)
 
