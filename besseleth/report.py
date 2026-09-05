@@ -67,6 +67,15 @@ def _snippet_lines(items: list[Item], max_chars: int = 200) -> str:
     ) or "_None this week._"
 
 
+def _linkedin_lines(items: list[Item], summarizer_cfg: dict) -> str:
+    """Just the basics (role, company, location) per pasted post, not the
+    raw pasted text — see summarizer.summarize_linkedin_item's docstring."""
+    return "\n".join(
+        f"- **{summarizer.summarize_linkedin_item(i, summarizer_cfg)}**" + (f" ([link]({i.url}))" if i.url else "")
+        for i in items
+    ) or "_None this week._"
+
+
 def _render_markdown(context: dict) -> str:
     from jinja2 import Template
 
@@ -157,7 +166,7 @@ def build_report(
         "conference_news_lines": _snippet_lines(conference_news_items) if conference_news_items else "",
         "event_lines": _snippet_lines(event_items),
         "social_lines": _snippet_lines(social_items),
-        "linkedin_lines": _snippet_lines(linkedin_items)
+        "linkedin_lines": _linkedin_lines(linkedin_items, summarizer_cfg)
         if linkedin_items
         else "_Nothing pasted this week. Use the dashboard's Paste tab, or `linkedin-add`._",
         "clip_lines": _snippet_lines(clip_items) if clip_items else "",

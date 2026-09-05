@@ -194,6 +194,54 @@ def summarize_context(new_items: list[Item], history: dict, industry_name: str, 
     return result or fallback
 
 
+_JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def summarize_linkedin_item(item: Item, cfg: dict) -> str:
+    """LinkedIn pastes are almost always a hiring post, and the pasted
+    text is the raw post — long, sometimes cut off mid-sentence by
+    whatever copied it, and headed by a useless generic page title
+    ("Feed | LinkedIn") rather than anything specific. The report just
+    wants the basics: role, company, location — not that raw text
+    truncated. Falls back to a short plain snippet (not the useless
+    title) if the LLM backend is off/unreachable or extraction fails."""
+    text = " ".join(item.summary.split())
+    fallback = (text[:150].rsplit(" ", 1)[0] + "…") if len(text) > 150 else text
+    fallback = fallback or item.title
+
+    backend = cfg.get("backend", "none")
+    if backend != "ollama":
+        return fallback
+
+    model = cfg.get("model", "llama3.1")
+    ollama_url = cfg.get("ollama_url", "http://localhost:11434")
+    prompt = (
+        "The following is a pasted LinkedIn post, almost always a hiring announcement. "
+        'Extract just the basics as JSON: {"role": "...", "company": "...", "location": "..."} '
+        "— use null for any field not clearly stated, don't guess. Output ONLY the JSON, no "
+        f"other text.\n\nPost:\n{item.summary[:800]}\n\nJSON:"
+    )
+    result = _ollama_generate(prompt, ollama_url, model, timeout=60, num_thread=cfg.get("num_thread"))
+    match = _JSON_BLOCK_RE.search(result or "")
+    try:
+        data = json.loads(match.group(0)) if match else {}
+    except json.JSONDecodeError:
+        data = {}
+
+    role = (data.get("role") or "").strip()
+    company = (data.get("company") or "").strip()
+    location = (data.get("location") or "").strip()
+    if not role and not company:
+        return fallback
+
+    line = role or "Opportunity"
+    if company:
+        line += f" at {company}"
+    if location:
+        line += f" ({location})"
+    return line
+
+
 def summarize_item(item: Item, cfg: dict) -> str:
     """One-line 'why it matters' for a single high-priority item (e.g. a
     personalized match). Falls back to the raw summary if unavailable."""
