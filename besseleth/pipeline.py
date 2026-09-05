@@ -20,9 +20,6 @@ from . import report as report_mod
 from .dedupe import merge_near_duplicates
 from .enrich import enrich_items
 from .feeds_store import load_feeds
-from .trends import company_store
-from .trends import store as trend_store
-from .trends import plot as trend_plot
 
 SOURCES = ["arxiv", "news", "blog", "conference", "conference_news", "event", "social", "linkedin", "clip"]
 
@@ -175,13 +172,6 @@ def generate_weekly_report(config: Config, db: DB) -> str:
     max_n = report_cfg.get("max_items_per_section", 12)
     days_back = config.source("news").get("days_back", 8)
 
-    trend_devices = trend_store.load_devices(config.devices_path, config.legacy_devices_yaml_path)
-    trend_companies = company_store.load_companies(config.companies_path, config.legacy_companies_yaml_path)
-    trend_charts: list = []
-    if trend_devices:
-        charts_dir = config.raw.get("trends", {}).get("charts_dir", "reports/trends")
-        trend_charts = trend_plot.generate_trend_charts(trend_devices, config.trend_metrics, charts_dir)
-
     report_id, markdown = report_mod.build_report(
         industry_name=config.industry_name,
         days_back=days_back,
@@ -196,10 +186,6 @@ def generate_weekly_report(config: Config, db: DB) -> str:
         clip_items=items_by_source["clip"][:max_n],
         personalized_items=personalized,
         summarizer_cfg=config.summarizer,
-        trend_devices=trend_devices,
-        trend_metrics=config.trend_metrics,
-        trend_chart_paths=trend_charts,
-        trend_companies=trend_companies,
     )
 
     path = report_mod.save_report(markdown, report_id, report_cfg.get("output_dir", "reports"))
