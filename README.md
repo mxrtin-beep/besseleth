@@ -426,6 +426,14 @@ point to open its source.
 
 ## Papers table (filter by date, org, modality, therapeutic target, novelty)
 
+Each row has a 🗑 to delete that item outright (a confirm prompt first)
+— for a stray false-positive you don't want counted (e.g. a keyword
+that's since been narrowed matched something unrelated in the past;
+config changes don't retroactively re-check items already stored). An
+**Export CSV** button above the table exports exactly what's currently
+filtered/sorted, not the whole table — narrow it down first if you only
+want a subset.
+
 Unlike the weekly report (a rolling snapshot of what's new), the
 dashboard's **Papers** tab is a standing index of every papers/news/blog
 item besseleth has ever fetched, filterable and sortable. `papers`

@@ -143,6 +143,7 @@
       </select></div>
     </div>
     <p class="hint" id="papersCount"></p>
+    <p><button class="btn" id="exportPapersBtn">Export CSV</button></p>
     <table class="datatable" id="papersTable"></table>
   </div>
 
@@ -1100,6 +1101,8 @@ function novelBadge(score) {
   return `<span class="metric-tag" style="background:${colors[score] || '#8886'}">${score}/5</span>`;
 }
 
+let currentPapersRows = [];
+
 function renderPapers() {
   const from = document.getElementById('pfFrom').value;
   const to = document.getElementById('pfTo').value;
@@ -1131,15 +1134,17 @@ function renderPapers() {
     return (b.published_at || '').localeCompare(a.published_at || '');
   });
 
+  currentPapersRows = rows;
+
   document.getElementById('papersCount').textContent =
     `${rows.length} of ${papers.length} items` + (papers.some(p => !p.enriched) ? ' (some not yet enriched)' : '');
 
   const table = document.getElementById('papersTable');
   table.innerHTML = `
     <thead><tr><th>Date</th><th>Title</th><th>Source</th><th>Authors</th><th>Citations</th><th>Org</th>
-      <th>Org type</th><th>Modality</th><th>Target</th><th>Novelty</th></tr></thead>
+      <th>Org type</th><th>Modality</th><th>Target</th><th>Novelty</th><th></th></tr></thead>
     <tbody>${rows.map(p => `
-      <tr>
+      <tr data-paper-row="${p.id}">
         <td>${(p.published_at || '').slice(0, 10)}</td>
         <td>${p.title}</td>
         <td>${p.url ? `<a href="${p.url}" target="_blank" rel="noopener">${p.source}</a>` : p.source}</td>
@@ -1150,8 +1155,39 @@ function renderPapers() {
         <td>${p.modality || ''}</td>
         <td>${p.therapeutic_target || ''}</td>
         <td title="${p.novelty_rationale || ''}">${novelBadge(p.novelty_score)}</td>
+        <td><button class="delBtn" data-del-paper="${p.id}" title="Delete">🗑</button></td>
       </tr>`).join('')}</tbody>`;
+
+  table.querySelectorAll('[data-del-paper]').forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm('Delete this item outright? This can\'t be undone.')) return;
+      await fetch(`/api/item/${btn.dataset.delPaper}`, { method: 'DELETE' });
+      papers = papers.filter(p => p.id !== btn.dataset.delPaper);
+      renderPapers();
+    };
+  });
 }
+
+function csvEscape(value) {
+  const s = String(value ?? '');
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+document.getElementById('exportPapersBtn').onclick = () => {
+  const columns = [
+    'published_at', 'title', 'source', 'url', 'authors', 'citation_count', 'org', 'org_type',
+    'modality', 'therapeutic_target', 'novelty_score',
+  ];
+  const csv = [columns.join(',')]
+    .concat(currentPapersRows.map(p => columns.map(c => csvEscape(p[c])).join(',')))
+    .join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = `besseleth-papers-${new Date().toISOString().slice(0, 10)}.csv`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+};
 
 // --- Enrich log (troubleshooting) ---------------------------------------
 async function loadEnrichLog() {
