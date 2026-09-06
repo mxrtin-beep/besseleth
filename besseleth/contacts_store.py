@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -196,37 +197,84 @@ def parse_linkedin_connections_csv(csv_text: str) -> list[Contact]:
     return contacts
 
 
+_ORG_SUFFIX_RE = re.compile(r"\b(inc|incorporated|llc|ltd|corp|corporation|co|company|the)\b\.?", re.IGNORECASE)
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _normalize_org(name: str) -> str:
+    """"Neuralink, Inc." / "neuralink" / "NEURALINK" -> "neuralink" — for
+    an exact-identity comparison that still tolerates the usual case/
+    punctuation/suffix noise between a LinkedIn CSV's free-text company
+    field and however an org got spelled when besseleth extracted it."""
+    return _NON_ALNUM_RE.sub("", _ORG_SUFFIX_RE.sub("", name.lower()))
+
+
+def _stem_matches(text: str, keywords: list[str], min_len: int = 5) -> bool:
+    """A looser companion to text_matches_keywords, for a company/title
+    field specifically rather than full article text: matches on a
+    shared word STEM (e.g. "neuro") rather than requiring one of your
+    full keyword phrases verbatim. Without this, a real neurotech title
+    like "Neuroengineer" or a company like "Axo Neurotech" gets missed
+    just because "neurotechnology"/"neural implant"/etc. never appear
+    verbatim — keywords are written as full phrases for article-body
+    matching (where false positives from a single common root are a real
+    risk across a whole paragraph), but a job title/company name is
+    short and dense enough that a shared 5+ letter root ("neuro...") is
+    already a meaningful, low-noise signal on its own."""
+    words = re.findall(r"[a-z]+", text.lower())
+    kw_words = {w for kw in keywords for w in re.findall(r"[a-z]+", kw.lower()) if len(w) >= min_len}
+    for w in words:
+        if len(w) < min_len:
+            continue
+        for kw_w in kw_words:
+            if _common_prefix_len(w, kw_w) >= min_len:
+                return True
+    return False
+
+
+def _common_prefix_len(a: str, b: str) -> int:
+    n = 0
+    for ca, cb in zip(a, b):
+        if ca != cb:
+            break
+        n += 1
+    return n
+
+
 def _is_relevant(contact: Contact, keywords: list[str], known_orgs: list[str]) -> bool:
     """A LinkedIn export is your whole network, not just the neurotech
-    corner of it — only import connections who look on-topic. Two
-    independent checks, either one is enough:
+    corner of it — only import connections who look on-topic. Three
+    independent checks, any one is enough:
 
-      - `keywords` (the same industry.keywords list scrapers use) matched
-        against their company+title text — catches a title like "EEG
-        Research Scientist" even at a company whose name says nothing
-        about neurotech.
-      - `known_orgs` (every org name besseleth has already seen and
-        enriched from your actual feeds — news/papers/etc.) matched
-        against their company name — catches a company like "Neuralink"
-        or "Blackrock Neurotech" whose name never literally contains one
-        of your industry keyword phrases (keywords are topic phrases like
-        "brain-computer interface", not a company gazetteer, so relying
-        on them alone silently drops exactly the contacts you'd most want
-        imported: people at the industry's own companies).
+      - `keywords` matched against their company+title text, same as an
+        article body (see text_matches_keywords) — catches a title like
+        "EEG Research Scientist" even at a company whose name says
+        nothing about neurotech.
+      - A shared word stem with `keywords` (see _stem_matches) — catches
+        "Neuroengineer" / "Axo Neurotech", which the phrase-level check
+        above misses (neither literally contains a full keyword phrase).
+      - `known_orgs` (every org name besseleth has extracted from your
+        actual feeds, plus your Trends company list) matched by NORMALIZED
+        EXACT identity (not substring containment — see _normalize_org)
+        against their company name. Exact identity only, deliberately:
+        `known_orgs` isn't a clean allowlist, it's whatever enrich.py has
+        extracted (occasionally wrong — see the Jobs tab's "reject org"
+        button), and a loose substring check against that list is how a
+        law firm ends up imported just because its name happens to
+        contain a short/generic fragment of some unrelated bad org value.
 
     No keywords AND no known_orgs -> don't filter (an empty allowlist
     would silently import nobody and look like a bug)."""
     if not keywords and not known_orgs:
         return True
     text = " ".join(f"{w.get('company', '')} {w.get('role', '')}" for w in contact.workplaces)
-    if keywords and text_matches_keywords(text, keywords):
+    if keywords and (text_matches_keywords(text, keywords) or _stem_matches(text, keywords)):
         return True
     if known_orgs:
-        companies = [w.get("company", "").strip().lower() for w in contact.workplaces if w.get("company")]
-        orgs_lower = [o.strip().lower() for o in known_orgs if o]
-        for company in companies:
-            if any(company == org or company in org or org in company for org in orgs_lower):
-                return True
+        companies = {_normalize_org(w.get("company", "")) for w in contact.workplaces if w.get("company")}
+        orgs_normalized = {_normalize_org(o) for o in known_orgs if o}
+        if companies & orgs_normalized:
+            return True
     return False
 
 

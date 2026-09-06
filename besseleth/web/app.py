@@ -188,6 +188,31 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         merge_company_pair(config.companies_path, keep_name=keep, drop_name=drop)
         return jsonify({"ok": True})
 
+    @app.post("/api/jobs/reject-org")
+    def api_jobs_reject_org():
+        # For an org that got extracted wrong (a mentioned-in-passing
+        # investor/analyst/cited institution, not who the item was
+        # actually about) and slipped past enrich.py's automatic hygiene
+        # checks — those catch known media outlets, self-referential
+        # publishers, vague group descriptions, etc., but can't know
+        # "AQR Capital Management is a hedge fund, not a neurotech org"
+        # without a maintained allowlist, which is deliberately not how
+        # this works (see labs.yaml's own docstring). This is the manual
+        # backstop: nulls "org" on every item currently attributed to it
+        # (so it stops showing up anywhere — Orgs/Map/Trends too, not
+        # just Jobs) and removes its job postings/board cache outright.
+        payload = request.get_json(silent=True) or {}
+        org = (payload.get("org") or "").strip()
+        if not org:
+            return jsonify({"ok": False, "message": "Missing 'org'."}), 400
+        db = DB(config.db_path)
+        try:
+            cleared = db.clear_org_matches([org])
+            removed = db.delete_jobs_for_org(org)
+        finally:
+            db.close()
+        return jsonify({"ok": True, "cleared_items": cleared, "removed_postings": removed})
+
     @app.get("/api/jobs")
     def api_jobs():
         db = DB(config.db_path)

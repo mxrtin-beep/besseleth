@@ -211,6 +211,19 @@ def fetch(config, db: DB) -> dict:
 
     orgs = {row["org"] for row in db.orgs()} | set(manual.keys())
 
+    # Self-healing cleanup: an org that used to be in scope (org names are
+    # extracted per-item and enrich.py's own hygiene sweep — or a future
+    # fix, or you rejecting one from the dashboard — can null one out
+    # after the fact) but no longer is would otherwise leave its job
+    # postings and job-board cache entry sitting here forever, since
+    # nothing else re-visits an org once it drops off this list. Prunes
+    # any org with leftover rows that isn't in `orgs` right now.
+    stale_orgs = {row["org"] for row in db.job_postings()} - orgs
+    for stale in stale_orgs:
+        db.delete_jobs_for_org(stale)
+    if stale_orgs:
+        print(f"[jobs] Removed job postings for {len(stale_orgs)} org(s) no longer in scope: {', '.join(sorted(stale_orgs))}")
+
     orgs_with_board = 0
     active_postings = 0
     new_probes = 0

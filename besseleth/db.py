@@ -765,6 +765,20 @@ class DB:
         self.conn.commit()
         return cur.rowcount
 
+    def delete_jobs_for_org(self, org: str) -> int:
+        """Removes every job posting AND the job-board cache entry for
+        `org` outright — for an org whose 'org' extraction turns out to
+        have been wrong (a bad LLM extraction cleared via
+        clear_org_matches, or the user rejecting one from the dashboard):
+        once `org` is gone from db.orgs(), its postings would otherwise
+        just sit here forever, since nothing else ever re-syncs or prunes
+        them for an org no longer in scope. Returns how many postings
+        were removed."""
+        cur = self.conn.execute("DELETE FROM job_postings WHERE org = ?", (org,))
+        self.conn.execute("DELETE FROM job_board_cache WHERE org = ?", (org,))
+        self.conn.commit()
+        return cur.rowcount
+
     def job_postings(self, active_only: bool = False) -> list[sqlite3.Row]:
         self.conn.row_factory = sqlite3.Row
         q = "SELECT * FROM job_postings"

@@ -646,6 +646,7 @@ async function loadPasted() {
     table.innerHTML = '<tbody><tr><td class="hint">Nothing pasted yet.</td></tr></tbody>';
     return;
   }
+  table.className = 'datatable resizable';
   table.innerHTML = `
     <thead><tr><th>Added</th><th>Source</th><th>Title / snippet</th><th>Report</th><th></th></tr></thead>
     <tbody>${items.map(it => `
@@ -657,6 +658,7 @@ async function loadPasted() {
         <td>${it.included_in_report ? it.included_in_report : '<span class="hint">not yet</span>'}</td>
         <td><button class="delBtn" data-del-item="${it.id}" title="Delete">🗑</button></td>
       </tr>`).join('')}</tbody>`;
+  makeTableResizable(table, 'pastedTable', { 2: 340 });
   table.querySelectorAll('[data-del-item]').forEach(btn => {
     btn.onclick = async () => {
       if (!confirm('Delete this pasted item? This removes it outright.')) return;
@@ -703,6 +705,7 @@ function renderFeedsTable(tableId, category, feedList) {
     table.innerHTML = '<tbody><tr><td class="hint">None submitted yet.</td></tr></tbody>';
     return;
   }
+  table.className = 'datatable resizable';
   table.innerHTML = `
     <thead><tr><th>Feed</th><th>Label</th><th>Added</th><th></th></tr></thead>
     <tbody>${feedList.map(f => `
@@ -712,6 +715,7 @@ function renderFeedsTable(tableId, category, feedList) {
         <td>${(f.added_at || '').slice(0, 10)}</td>
         <td><button class="delBtn" data-del-feed="${f.url}" data-del-category="${category}" title="Remove">🗑</button></td>
       </tr>`).join('')}</tbody>`;
+  makeTableResizable(table, tableId, { 0: 340 });
   table.querySelectorAll('[data-del-feed]').forEach(btn => {
     btn.onclick = async () => {
       if (!confirm('Remove this feed?')) return;
@@ -816,6 +820,7 @@ function renderContacts() {
     table.innerHTML = '<tbody><tr><td class="hint">No contacts yet — add one above, or import from LinkedIn below.</td></tr></tbody>';
     return;
   }
+  table.className = 'datatable resizable';
   table.innerHTML = `
     <thead><tr><th>Name</th><th>Email(s)</th><th>Company</th><th>Job title</th><th>Schools</th><th>Relationship</th><th>Notes</th><th></th></tr></thead>
     <tbody>${contacts.map(c => `
@@ -832,6 +837,7 @@ function renderContacts() {
           <button class="delBtn" data-del-contact="${c.index}" title="Delete">🗑</button>
         </td>
       </tr>`).join('')}</tbody>`;
+  makeTableResizable(table, 'contactsTable');
   table.querySelectorAll('[data-edit-contact]').forEach(btn => {
     btn.onclick = () => startEditContact(parseInt(btn.dataset.editContact, 10));
   });
@@ -918,6 +924,7 @@ function renderMap() {
   document.getElementById('mapCount').textContent = `${mapLocations.length} located org(s).`;
 
   const table = document.getElementById('mapTable');
+  table.className = 'datatable resizable';
   table.innerHTML = `
     <thead><tr><th>Org</th><th>Location</th><th>Org type</th><th>Items</th></tr></thead>
     <tbody>${mapLocations.slice().sort((a, b) => b.total - a.total).map(m => `
@@ -927,6 +934,7 @@ function renderMap() {
         <td>${m.org_type || ''}</td>
         <td>${m.total} (${Object.entries(m.by_source).map(([s, n]) => `${s}: ${n}`).join(', ')})</td>
       </tr>`).join('')}</tbody>`;
+  makeTableResizable(table, 'mapTable');
 
   if (typeof Plotly === 'undefined') {
     document.getElementById('mapChart').innerHTML =
@@ -1093,6 +1101,7 @@ function renderOrgs() {
   document.getElementById('orgsCount').textContent = `${rows.length} of ${orgs.length} org(s).`;
 
   const table = document.getElementById('orgsTable');
+  table.className = 'datatable resizable';
   table.innerHTML = `
     <thead><tr><th>Org</th><th>Category</th><th>Type</th><th>Location</th><th>Items</th><th>Sources</th><th>Ticker</th><th>Funding</th><th>Source</th></tr></thead>
     <tbody>${rows.map(o => `
@@ -1107,6 +1116,7 @@ function renderOrgs() {
         <td>${fmtUsd(o.funding_total_usd)}${o.last_funding_round ? ` (${o.last_funding_round})` : ''}</td>
         <td>${o.source_url ? `<a href="${o.source_url}" target="_blank" rel="noopener">link</a>` : '<span class="hint">—</span>'}</td>
       </tr>`).join('')}</tbody>`;
+  makeTableResizable(table, 'orgsTable', { 0: 200 });
 }
 
 // --- Jobs table ----------------------------------------------------------
@@ -1135,12 +1145,9 @@ function renderJobs() {
   document.getElementById('jobsCount').textContent = `${rows.length} of ${jobs.length} posting(s).`;
 
   const table = document.getElementById('jobsTable');
+  table.className = 'datatable resizable';
   table.innerHTML = `
-    <colgroup>
-      <col style="width:16%"><col style="width:34%"><col style="width:20%">
-      <col style="width:12%"><col style="width:9%"><col style="width:9%">
-    </colgroup>
-    <thead><tr><th>Org</th><th>Title</th><th>Location</th><th>Platform</th><th>First seen</th><th>Status</th></tr></thead>
+    <thead><tr><th>Org</th><th>Title</th><th>Location</th><th>Platform</th><th>First seen</th><th>Status</th><th></th></tr></thead>
     <tbody>${rows.map(j => `
       <tr>
         <td>${j.org}</td>
@@ -1149,7 +1156,26 @@ function renderJobs() {
         <td>${j.platform}</td>
         <td>${(j.first_seen_at || '').slice(0, 10)}</td>
         <td>${j.removed_at ? `<span class="hint">Removed ${j.removed_at.slice(0, 10)}</span>` : 'Active'}</td>
+        <td><button class="delBtn" data-reject-org="${j.org}" title="Not actually a relevant org — clear it everywhere (Orgs/Map/Trends/Jobs), not just here">🗑 Org</button></td>
       </tr>`).join('')}</tbody>`;
+  makeTableResizable(table, 'jobsTable');
+
+  table.querySelectorAll('[data-reject-org]').forEach(btn => {
+    btn.onclick = async () => {
+      const org = btn.dataset.rejectOrg;
+      if (!confirm(`"${org}" isn't actually a relevant org? This clears it from every item (Orgs/Map/Trends/Jobs), and removes its job postings. Can't be undone.`)) return;
+      const res = await fetch('/api/jobs/reject-org', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ org }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        jobs = jobs.filter(j => j.org !== org);
+        renderJobs();
+      } else {
+        alert(data.message || 'Failed — see server log.');
+      }
+    };
+  });
 }
 
 function renderEnrichStats(stats) {
@@ -1213,36 +1239,43 @@ function novelBadge(score) {
 // <col data-col="..."> and persisted to localStorage under `tableId` so
 // they survive a reload — per-viewer/per-browser only, same as any other
 // localStorage use here, nothing shared or sent anywhere.
-function makeTableResizable(table, tableId) {
-  const cols = table.querySelectorAll('colgroup col');
+// Drag-to-resize columns for any rendered datatable — works directly off
+// the header row's cells (table-layout:fixed takes its column widths from
+// the first row), no <colgroup> needed, so this drops onto any table's
+// render function as a one-line call after its innerHTML is (re)built.
+// Widths are keyed by column index and persisted per-viewer in
+// localStorage under `tableId`, so they survive a reload; `defaults` (an
+// optional {index: px} map) sets an initial width — before any manual
+// resize has been saved — for a column that looks cramped otherwise
+// (e.g. Title, which is usually the one thing worth reading in full).
+function makeTableResizable(table, tableId, defaults) {
+  table.style.tableLayout = 'fixed';
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem(`colwidths:${tableId}`) || '{}'); } catch (e) {}
-  cols.forEach(col => {
-    const w = saved[col.dataset.col];
-    if (w) col.style.width = `${w}px`;
-  });
 
   const ths = table.querySelectorAll('thead th');
   ths.forEach((th, i) => {
-    if (i === ths.length - 1) return; // no handle on the trailing (delete) column
+    const w = saved[i] ?? (defaults || {})[i];
+    if (w) th.style.width = `${w}px`;
+    if (!th.textContent.trim() && i === ths.length - 1) return; // no handle on a trailing action/delete column
+    th.style.position = 'relative';
     const handle = document.createElement('div');
     handle.className = 'col-resizer';
     th.appendChild(handle);
     handle.addEventListener('mousedown', (ev) => {
       ev.preventDefault();
-      const col = cols[i];
       const startX = ev.clientX;
       const startWidth = th.getBoundingClientRect().width;
       handle.classList.add('resizing');
       function onMove(e) {
         const newWidth = Math.max(40, startWidth + (e.clientX - startX));
-        col.style.width = `${newWidth}px`;
+        th.style.width = `${newWidth}px`;
       }
       function onUp() {
         handle.classList.remove('resizing');
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
-        saved[col.dataset.col] = parseInt(col.style.width, 10);
+        saved[i] = parseInt(th.style.width, 10);
         try { localStorage.setItem(`colwidths:${tableId}`, JSON.stringify(saved)); } catch (e) {}
       }
       document.addEventListener('mousemove', onMove);
@@ -1303,11 +1336,9 @@ function renderPapers() {
     return `<span class="author-cell" data-author="${names[0]}" title="${names.join(', ')}" style="cursor:pointer; text-decoration:underline dotted;">${shown}</span>`;
   }
 
-  const cols = ['date', 'title', 'source', 'authors', 'citations', 'org', 'org_type', 'modality', 'target', 'novelty', 'del'];
   const table = document.getElementById('papersTable');
   table.className = 'datatable resizable';
   table.innerHTML = `
-    <colgroup>${cols.map(c => `<col data-col="${c}">`).join('')}</colgroup>
     <thead><tr><th>Date</th><th>Title</th><th>Source</th><th>Authors</th><th>Citations</th><th>Org</th>
       <th>Org type</th><th>Modality</th><th>Target</th><th>Novelty</th><th></th></tr></thead>
     <tbody>${rows.map(p => `
@@ -1341,7 +1372,10 @@ function renderPapers() {
     };
   });
 
-  makeTableResizable(table, 'papersTable');
+  // Title is usually the one thing worth reading in full — give it a
+  // wider default than an even fixed-layout split would (only applies
+  // until you've manually resized it once, after which your own width wins).
+  makeTableResizable(table, 'papersTable', { 1: 340 });
 }
 
 function csvEscape(value) {
@@ -1392,6 +1426,7 @@ async function loadEnrichLog() {
     `Last ${data.items.length} enriched item(s), newest first.`;
 
   const table = document.getElementById('enrichLogTable');
+  table.className = 'datatable resizable';
   table.innerHTML = `
     <thead><tr><th>Enriched</th><th>Title</th><th>Source</th><th>Org</th><th>Org type</th>
       <th>Modality</th><th>Target</th><th>Novelty</th><th>Location</th></tr></thead>
@@ -1407,6 +1442,7 @@ async function loadEnrichLog() {
         <td title="${i.novelty_rationale || ''}">${novelBadge(i.novelty_score)}</td>
         <td>${i.location_text || ''}</td>
       </tr>`).join('')}</tbody>`;
+  makeTableResizable(table, 'enrichLogTable', { 1: 300 });
 }
 
 // --- Trends explorer (devices + companies + FDA/IPO timelines) -----------
@@ -1672,6 +1708,7 @@ function renderIpoTimeline() {
 
 function renderTable() {
   const table = document.getElementById('dataTable');
+  table.className = 'datatable resizable';
   if (currentDataset === 'fda_timeline') {
     const dated = devices.filter(d => d.date_reported && d.fda_stage_rank > 0).slice().sort((a, b) => b.date_reported.localeCompare(a.date_reported));
     table.innerHTML = `
@@ -1685,6 +1722,7 @@ function renderTable() {
           <td>${d.date_reported}</td>
           <td>${d.source_url ? `<a href="${d.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
         </tr>`).join('')}</tbody>`;
+    makeTableResizable(table, 'dataTable:fda_timeline');
     return;
   }
   if (currentDataset === 'ipo_timeline') {
@@ -1699,6 +1737,7 @@ function renderTable() {
           <td>${c.stock_ticker || ''}</td>
           <td>${c.source_url ? `<a href="${c.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
         </tr>`).join('')}</tbody>`;
+    makeTableResizable(table, 'dataTable:ipo_timeline');
     return;
   }
   if (currentDataset === 'devices') {
@@ -1714,6 +1753,7 @@ function renderTable() {
           <td>${d.date_reported || ''}</td>
           <td>${d.source_url ? `<a href="${d.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
         </tr>`).join('')}</tbody>`;
+    makeTableResizable(table, 'dataTable:devices');
   } else {
     table.innerHTML = `
       <thead><tr><th>Company</th><th>Funding</th><th>Last round</th><th>Stock</th><th>Source</th><th>Notes</th></tr></thead>
@@ -1726,6 +1766,7 @@ function renderTable() {
           <td>${c.source_url ? `<a href="${c.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
           <td class="hint">${c.notes || ''}</td>
         </tr>`).join('')}</tbody>`;
+    makeTableResizable(table, 'dataTable:companies');
   }
 }
 
