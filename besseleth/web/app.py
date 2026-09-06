@@ -778,16 +778,18 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         # doesn't literally contain a keyword phrase like "neurotechnology").
         from ..trends.company_store import load_companies
 
-        db = DB(config.db_path)
-        try:
-            known_orgs = db.distinct_orgs()
-        finally:
-            db.close()
-        # Also fold in the Trends tab's curated company list (companies
-        # you're tracking funding/stock for) — a flagship name like
-        # "Neuralink" or "Blackrock Neurotech" is very likely already
-        # there even if no scraped item happens to have mentioned it yet.
-        known_orgs += [c.name for c in load_companies(config.db_path, config.companies_path)]
+        # Deliberately NOT db.distinct_orgs() (every org enrich.py has
+        # ever extracted, including a big pharma/health system mentioned
+        # once, incidentally, in an article actually about someone else —
+        # that's how e.g. Amgen/Siemens/UCLA Health ended up treating
+        # every one of their employees as "relevant"). Only companies you
+        # (or a "device suggest") have actually vetted onto the Trends
+        # tab count as a real known org — auto_extracted ones are
+        # excluded too, since those are exactly as unverified as
+        # distinct_orgs() and carry their own "verify before trusting"
+        # notice for the same reason.
+        companies = load_companies(config.db_path, config.companies_path)
+        known_orgs = [c.name for c in companies if not c.auto_extracted]
         added = import_linkedin_csv(config.contacts_path, text, keywords=config.keywords, known_orgs=known_orgs)
         if added == 0:
             return jsonify({

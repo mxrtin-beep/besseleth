@@ -253,15 +253,18 @@ def _is_relevant(contact: Contact, keywords: list[str], known_orgs: list[str]) -
       - A shared word stem with `keywords` (see _stem_matches) — catches
         "Neuroengineer" / "Axo Neurotech", which the phrase-level check
         above misses (neither literally contains a full keyword phrase).
-      - `known_orgs` (every org name besseleth has extracted from your
-        actual feeds, plus your Trends company list) matched by NORMALIZED
-        EXACT identity (not substring containment — see _normalize_org)
-        against their company name. Exact identity only, deliberately:
-        `known_orgs` isn't a clean allowlist, it's whatever enrich.py has
-        extracted (occasionally wrong — see the Jobs tab's "reject org"
-        button), and a loose substring check against that list is how a
-        law firm ends up imported just because its name happens to
-        contain a short/generic fragment of some unrelated bad org value.
+      - `known_orgs` matched by NORMALIZED EXACT identity (not substring
+        containment — see _normalize_org) against their company name.
+        Deliberately scoped by the caller to only your manually-vetted
+        Trends company list (not auto-extracted entries, and NOT every
+        org enrich.py has ever extracted from an item) — a big
+        multi-division company (Amgen, Siemens, UCLA Health) mentioned
+        once, incidentally, in an article actually about something else
+        would otherwise mark every one of its employees "relevant",
+        which is exactly how that used to happen. And exact identity
+        only, never substring: a loose containment check against ANY
+        known-org list is how a law firm ends up imported just because
+        its name happens to share a short/generic fragment with one.
 
     No keywords AND no known_orgs -> don't filter (an empty allowlist
     would silently import nobody and look like a bug)."""

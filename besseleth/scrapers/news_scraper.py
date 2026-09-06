@@ -51,7 +51,9 @@ def _date_chunks(start: date, end: date, chunk_days: int = HISTORICAL_CHUNK_DAYS
     return chunks
 
 
-def _parse_feed_entries(feed_url: str, config, cutoff: datetime, source: str = "news") -> list[Item]:
+def _parse_feed_entries(
+    feed_url: str, config, cutoff: datetime, source: str = "news", require_keyword_match: bool = True
+) -> list[Item]:
     items = []
     try:
         parsed = feedparser.parse(feed_url)
@@ -63,7 +65,17 @@ def _parse_feed_entries(feed_url: str, config, cutoff: datetime, source: str = "
         title = entry.get("title", "").strip()
         summary = strip_html(entry.get("summary", "") or entry.get("description", ""))
         hits = text_matches_keywords(f"{title} {summary}", config.keywords)
-        if not hits:
+        # A news feed is typically broad (a wire feed, a topic-level RSS
+        # covering way more than this industry) so the keyword filter is
+        # essential noise-cutting there. A blog feed is the opposite: you
+        # picked that specific feed BECAUSE it's a neurotech company/lab/
+        # researcher's blog, so most of its posts (a hiring update, a
+        # culture post, a release note) won't happen to contain one of
+        # your keyword phrases even though the whole feed is exactly what
+        # you meant to follow — requiring a match there was silently
+        # dropping nearly everything from every blog you added. See
+        # blog_scraper.fetch, which passes require_keyword_match=False.
+        if require_keyword_match and not hits:
             continue
 
         url = entry.get("link", "")
@@ -131,7 +143,9 @@ def _fetch_newsapi(config, cutoff: datetime) -> list[Item]:
     return items
 
 
-def fetch_feeds(config, feeds: list[str], days_back: int, source: str = "news") -> list[Item]:
+def fetch_feeds(
+    config, feeds: list[str], days_back: int, source: str = "news", require_keyword_match: bool = True
+) -> list[Item]:
     """Generic RSS/Atom fetch usable for news, blogs, or any other
     feed-based source — just pass a different `source` label.
 
@@ -146,7 +160,7 @@ def fetch_feeds(config, feeds: list[str], days_back: int, source: str = "news") 
     seen_ids: set[str] = set()
 
     def _collect(url: str):
-        for it in _parse_feed_entries(url, config, cutoff, source=source):
+        for it in _parse_feed_entries(url, config, cutoff, source=source, require_keyword_match=require_keyword_match):
             if it.id not in seen_ids:
                 items.append(it)
                 seen_ids.add(it.id)
