@@ -102,6 +102,7 @@
   <div class="tabs">
     <button id="tabReport" class="active">Report</button>
     <button id="tabPapers">Sources</button>
+    <button id="tabEnrichLog">Enrich log</button>
     <button id="tabOrgs">Orgs</button>
     <button id="tabJobs">Jobs</button>
     <button id="tabMap">Map</button>
@@ -142,6 +143,17 @@
     </div>
     <p class="hint" id="papersCount"></p>
     <table class="datatable" id="papersTable"></table>
+  </div>
+
+  <div id="enrichLogPane" style="display:none">
+    <p class="hint">
+      Troubleshooting view: your live summarizer config, whether Ollama is actually reachable
+      right now, and exactly what the most recent enrichment runs extracted per item — no run
+      triggered by opening this tab.
+    </p>
+    <div id="enrichLogStatus"></div>
+    <p class="hint" id="enrichLogCount"></p>
+    <table class="datatable" id="enrichLogTable"></table>
   </div>
 
   <div id="orgsPane" style="display:none">
@@ -331,6 +343,7 @@
 
 const reportPane = document.getElementById('reportPane');
 const papersPane = document.getElementById('papersPane');
+const enrichLogPane = document.getElementById('enrichLogPane');
 const orgsPane = document.getElementById('orgsPane');
 const jobsPane = document.getElementById('jobsPane');
 const mapPane = document.getElementById('mapPane');
@@ -339,6 +352,7 @@ const pastePane = document.getElementById('pastePane');
 const contactsPane = document.getElementById('contactsPane');
 const tabReport = document.getElementById('tabReport');
 const tabPapers = document.getElementById('tabPapers');
+const tabEnrichLog = document.getElementById('tabEnrichLog');
 const tabOrgs = document.getElementById('tabOrgs');
 const tabJobs = document.getElementById('tabJobs');
 const tabMap = document.getElementById('tabMap');
@@ -349,6 +363,7 @@ const tabContacts = document.getElementById('tabContacts');
 function showTab(which) {
   reportPane.style.display = which === 'report' ? 'block' : 'none';
   papersPane.style.display = which === 'papers' ? 'block' : 'none';
+  enrichLogPane.style.display = which === 'enrichlog' ? 'block' : 'none';
   orgsPane.style.display = which === 'orgs' ? 'block' : 'none';
   jobsPane.style.display = which === 'jobs' ? 'block' : 'none';
   mapPane.style.display = which === 'map' ? 'block' : 'none';
@@ -357,6 +372,7 @@ function showTab(which) {
   contactsPane.style.display = which === 'contacts' ? 'block' : 'none';
   tabReport.classList.toggle('active', which === 'report');
   tabPapers.classList.toggle('active', which === 'papers');
+  tabEnrichLog.classList.toggle('active', which === 'enrichlog');
   tabOrgs.classList.toggle('active', which === 'orgs');
   tabJobs.classList.toggle('active', which === 'jobs');
   tabMap.classList.toggle('active', which === 'map');
@@ -364,6 +380,7 @@ function showTab(which) {
   tabPaste.classList.toggle('active', which === 'paste');
   tabContacts.classList.toggle('active', which === 'contacts');
   if (which === 'papers' && !papersLoaded) loadPapers();
+  if (which === 'enrichlog') loadEnrichLog();
   if (which === 'orgs' && !orgsLoaded) loadOrgs();
   if (which === 'jobs' && !jobsLoaded) loadJobs();
   if (which === 'map' && !mapLoaded) loadMap();
@@ -372,6 +389,7 @@ function showTab(which) {
 }
 tabReport.onclick = () => showTab('report');
 tabPapers.onclick = () => showTab('papers');
+tabEnrichLog.onclick = () => showTab('enrichlog');
 tabOrgs.onclick = () => showTab('orgs');
 tabJobs.onclick = () => showTab('jobs');
 tabMap.onclick = () => showTab('map');
@@ -1127,6 +1145,50 @@ function renderPapers() {
         <td>${p.modality || ''}</td>
         <td>${p.therapeutic_target || ''}</td>
         <td title="${p.novelty_rationale || ''}">${novelBadge(p.novelty_score)}</td>
+      </tr>`).join('')}</tbody>`;
+}
+
+// --- Enrich log (troubleshooting) ---------------------------------------
+async function loadEnrichLog() {
+  const res = await fetch('/api/enrich/log');
+  const data = await res.json();
+
+  const statusEl = document.getElementById('enrichLogStatus');
+  let statusHtml = `<p><strong>backend:</strong> ${data.backend} &nbsp; <strong>model:</strong> ${data.model} `
+    + `&nbsp; <strong>ollama_url:</strong> ${data.ollama_url}</p>`;
+  if (data.backend !== 'ollama') {
+    statusHtml += `<p style="color:#c0392b">summarizer.backend is "${data.backend}", not "ollama" — every item `
+      + `gets marked "unknown" rather than actually extracted. Set <code>summarizer.backend: "ollama"</code> in `
+      + `config.yaml and restart besseleth.</p>`;
+  } else if (data.ollama_ok) {
+    statusHtml += `<p style="color:#2a7d2a">✓ ${data.ollama_message}</p>`;
+  } else {
+    statusHtml += `<p style="color:#c0392b">✗ ${data.ollama_message}</p>`;
+  }
+  if (data.stats && data.stats.total_items) {
+    const avg = data.stats.total_seconds / data.stats.total_items;
+    statusHtml += `<p class="hint">Enriched ${data.stats.total_items} item(s) all-time (avg ${avg.toFixed(1)}s/item).</p>`;
+  }
+  statusEl.innerHTML = statusHtml;
+
+  document.getElementById('enrichLogCount').textContent =
+    `Last ${data.items.length} enriched item(s), newest first.`;
+
+  const table = document.getElementById('enrichLogTable');
+  table.innerHTML = `
+    <thead><tr><th>Enriched</th><th>Title</th><th>Source</th><th>Org</th><th>Org type</th>
+      <th>Modality</th><th>Target</th><th>Novelty</th><th>Location</th></tr></thead>
+    <tbody>${data.items.map(i => `
+      <tr>
+        <td>${fmtAgo(i.enriched_at)}</td>
+        <td>${i.url ? `<a href="${i.url}" target="_blank" rel="noopener">${i.title}</a>` : i.title}</td>
+        <td>${i.source}</td>
+        <td>${i.org || '<span class="hint">null</span>'}</td>
+        <td>${i.org_type || ''}</td>
+        <td>${i.modality || ''}</td>
+        <td>${i.therapeutic_target || ''}</td>
+        <td title="${i.novelty_rationale || ''}">${novelBadge(i.novelty_score)}</td>
+        <td>${i.location_text || ''}</td>
       </tr>`).join('')}</tbody>`;
 }
 

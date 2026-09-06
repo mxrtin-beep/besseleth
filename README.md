@@ -498,6 +498,19 @@ without an LLM. The vocab above is a *suggestion* in the prompt, not a
 hard enum, so an unusual paper isn't forced into the wrong bucket — the
 filter dropdowns are populated from whatever values actually show up.
 
+### Enrich log tab (troubleshooting)
+
+If org/modality/location keep coming back null/unknown and you're not
+sure why, check the **Enrich log** tab next to Papers — no run
+triggered, just a live look at what's actually going on: your current
+`summarizer.backend`/`model`/`ollama_url`, whether Ollama is actually
+reachable right now (a green check, or the specific reason it isn't —
+unreachable, model not pulled, backend not "ollama" at all), and exactly
+what got extracted for the last 50 enriched items. If everything in that
+list is null/unknown, the status line above the table will say why
+(usually `summarizer.backend` isn't `"ollama"`, or Ollama isn't running)
+rather than leaving you to guess from the Papers table alone.
+
 ## Map
 
 The same enrichment pass also asks for a **location** — "City, Country"

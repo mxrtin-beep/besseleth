@@ -415,6 +415,55 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             db.close()
         return jsonify(stats)
 
+    @app.get("/api/enrich/log")
+    def api_enrich_log():
+        # Troubleshooting view: the most recently enriched items with
+        # exactly what got extracted, plus the live config/backend status
+        # — so "why is everything null/unknown" is answerable by looking
+        # at this tab instead of reading server logs or config.yaml by
+        # hand. Read-only, no run triggered.
+        from ..enrich import ollama_status
+
+        summarizer_cfg = config.summarizer
+        backend = summarizer_cfg.get("backend", "none")
+        if backend == "ollama":
+            ok, ollama_message = ollama_status(summarizer_cfg)
+        else:
+            ok, ollama_message = False, ""
+
+        db = DB(config.db_path)
+        try:
+            rows = db.recently_enriched(limit=50)
+            stats = db.get_enrich_stats()
+        finally:
+            db.close()
+
+        return jsonify({
+            "backend": backend,
+            "model": summarizer_cfg.get("model", "llama3.1"),
+            "ollama_url": summarizer_cfg.get("ollama_url", "http://localhost:11434"),
+            "ollama_ok": ok,
+            "ollama_message": ollama_message,
+            "stats": stats,
+            "items": [
+                {
+                    "id": r["id"],
+                    "title": r["title"],
+                    "source": r["source"],
+                    "url": r["url"],
+                    "enriched_at": r["enriched_at"],
+                    "org": r["org"],
+                    "org_type": r["org_type"],
+                    "modality": r["modality"],
+                    "therapeutic_target": r["therapeutic_target"],
+                    "novelty_score": r["novelty_score"],
+                    "novelty_rationale": r["novelty_rationale"],
+                    "location_text": r["location_text"],
+                }
+                for r in rows
+            ],
+        })
+
     @app.post("/api/backfill")
     def api_backfill():
         status = app.config["BESSELETH_STATUS"]

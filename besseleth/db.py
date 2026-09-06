@@ -703,6 +703,17 @@ class DB:
         q += " ORDER BY first_seen_at DESC"
         return list(self.conn.execute(q).fetchall())
 
+    def recently_enriched(self, limit: int = 50) -> list[sqlite3.Row]:
+        """The most recently enriched items, newest-enriched first —
+        powers the dashboard's Enrich log tab (troubleshooting: what
+        actually happened on the last enrich run, not just a count)."""
+        self.conn.row_factory = sqlite3.Row
+        return list(
+            self.conn.execute(
+                "SELECT * FROM items WHERE enriched_at IS NOT NULL ORDER BY enriched_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        )
+
     def papers(self, sources: list[str]) -> list[sqlite3.Row]:
         """All items in the given sources, enriched or not — the papers
         table's data source. Not filtered by report status: this is a
