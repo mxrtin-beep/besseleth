@@ -4,6 +4,7 @@ A weekly industry-briefing bot. Point it at an industry (e.g.
 *neurotechnology*), and it:
 
 - Pulls recent **arXiv** papers matching your keywords/categories (free, official API)
+- Pulls recent **published papers not on arXiv** — journal/conference articles, via [OpenAlex](https://openalex.org) (free, keyless) — with real authors and a citation count for ranking by impact, something arXiv itself has no concept of; the report's papers section is sorted by citations, highest first
 - Pulls **news** from RSS feeds — including a free Google News search feed by default (optionally NewsAPI.org too); add more from the dashboard's **Feeds** tab, no config-file editing needed
 - Pulls **blogs** (company/lab blogs, researcher Substacks) from RSS — Substack needs no code, just its `/feed` URL; also addable from the Feeds tab
 - Tracks a curated **conferences** watchlist, plus optional **conference news** (CFPs, accepted talks) via each conference's own RSS feed
@@ -426,9 +427,13 @@ point to open its source.
 ## Papers table (filter by date, org, modality, therapeutic target, novelty)
 
 Unlike the weekly report (a rolling snapshot of what's new), the
-dashboard's **Papers** tab is a standing index of every arXiv/news/blog
-item besseleth has ever fetched, filterable and sortable. After each
-fetch, besseleth asks the local LLM to tag every new item with:
+dashboard's **Papers** tab is a standing index of every arXiv/papers/
+news/blog item besseleth has ever fetched, filterable and sortable. A
+`papers`-sourced item (published, non-arXiv) also carries **Authors**
+and **Citations** columns straight from OpenAlex — not LLM-derived, so
+they're exact — and "Citations (highest)" is a Sort by option, for
+ranking by actual impact rather than recency. After each fetch,
+besseleth asks the local LLM to tag every new item with:
 
 - **org** — the company/lab/institution the item is about. For an arXiv
   item, besseleth also looks up its authors' real institutional

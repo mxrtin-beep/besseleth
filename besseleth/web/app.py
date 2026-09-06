@@ -221,7 +221,9 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         db = DB(config.db_path)
         try:
             rows = db.papers(
-                config.raw.get("enrichment", {}).get("sources", ["arxiv", "news", "blog", "linkedin", "social", "event", "clip"])
+                config.raw.get("enrichment", {}).get(
+                    "sources", ["arxiv", "papers", "news", "blog", "linkedin", "social", "event", "clip"]
+                )
             )
         finally:
             db.close()
@@ -240,6 +242,8 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
                     "therapeutic_target": r["therapeutic_target"],
                     "novelty_score": r["novelty_score"],
                     "novelty_rationale": r["novelty_rationale"],
+                    "authors": r["authors"],
+                    "citation_count": r["citation_count"],
                     "enriched": r["enriched_at"] is not None,
                 }
                 for r in rows

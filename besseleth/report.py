@@ -22,6 +22,9 @@ _{{ date_range }}_
 ## 📄 arXiv research
 {{ arxiv_summary }}
 
+## 📚 Published papers (non-arXiv, ranked by citations)
+{{ paper_lines }}
+
 ## 📰 News
 {{ news_summary }}
 
@@ -67,6 +70,22 @@ def _snippet_lines(items: list[Item], max_chars: int = 200) -> str:
     ) or "_None this week._"
 
 
+def _paper_lines(items: list[Item]) -> str:
+    """Already sorted by citation_count (highest first) by the caller —
+    see pipeline.py. Shows the count and authors directly rather than
+    running these through an LLM summary the way arXiv items are: a
+    citation count and author list are already-final facts, not
+    something to paraphrase, and OpenAlex's abstract is the paper's own
+    text (nothing left to extract beyond what the link+citation count
+    already convey at a glance)."""
+    lines = []
+    for i in items:
+        cite = f"{i.citation_count} citation{'s' if i.citation_count != 1 else ''}" if i.citation_count is not None else "citations unknown"
+        authors = f" — {i.authors}" if i.authors else ""
+        lines.append(f"- **{i.title}** ({cite}){authors}" + (f" ([link]({i.url}))" if i.url else ""))
+    return "\n".join(lines) or "_None this week._"
+
+
 def _linkedin_lines(items: list[Item], summarizer_cfg: dict) -> str:
     """Just the basics (role, company, location) per pasted post, not the
     raw pasted text — see summarizer.summarize_linkedin_item's docstring."""
@@ -86,6 +105,7 @@ def build_report(
     industry_name: str,
     days_back: int,
     arxiv_items: list[Item],
+    papers_items: list[Item],
     news_items: list[Item],
     blog_items: list[Item],
     conference_items: list[Item],
@@ -144,6 +164,7 @@ def build_report(
 
     all_new_items = [
         *arxiv_items,
+        *papers_items,
         *news_items,
         *blog_items,
         *conference_items,
@@ -160,6 +181,7 @@ def build_report(
         "date_range": date_range,
         "personalized_lines": personalized_lines,
         "arxiv_summary": arxiv_summary or "No new arXiv papers matched this week.",
+        "paper_lines": _paper_lines(papers_items),
         "news_summary": news_summary or "No notable news this week.",
         "blog_summary": blog_summary or "No notable blog posts this week.",
         "conference_lines": conference_lines,

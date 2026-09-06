@@ -68,6 +68,17 @@ sources:
     max_results_per_keyword: 15
     days_back: 8
 
+  papers:
+    # Published journal/conference papers (i.e. NOT arXiv preprints),
+    # via OpenAlex (openalex.org — free, keyless, comprehensive scholarly
+    # index). Complements arxiv: most invasive-BCI and clinical work
+    # publishes in a journal and never touches arXiv at all. Comes with
+    # a citation count arXiv itself has no concept of — the report ranks
+    # this section by citations (highest first), not recency.
+    enabled: true
+    max_results_per_keyword: 15
+    days_back: 8
+
   news:
     enabled: true
     days_back: 8
@@ -221,7 +232,7 @@ enrichment:
                            # days back, uncapped — not max_items_per_run, which only bounds the automatic
                            # per-fetch run and `enrich --all`/"Enrich everything" (the whole backlog, any age)
   pause_seconds: 2        # sleep between items during a run — turns a CPU spike into a trickle
-  sources: ["arxiv", "news", "blog"]
+  sources: ["arxiv", "papers", "news", "blog"]
 
   # A separate pass, independent of the LLM extraction above: for orgs
   # that have no location at all (never mentioned in any item's text),

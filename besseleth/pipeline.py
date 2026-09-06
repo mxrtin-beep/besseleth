@@ -15,6 +15,7 @@ from .scrapers import (
     jobs_scraper,
     linkedin_scraper,
     news_scraper,
+    openalex_scraper,
     social_scraper,
 )
 from . import report as report_mod
@@ -22,7 +23,9 @@ from .dedupe import merge_near_duplicates
 from .enrich import enrich_items
 from .feeds_store import load_feeds
 
-SOURCES = ["arxiv", "news", "blog", "conference", "conference_news", "event", "social", "linkedin", "clip"]
+SOURCES = [
+    "arxiv", "papers", "news", "blog", "conference", "conference_news", "event", "social", "linkedin", "clip",
+]
 
 
 def _days_back(configured: int, since: date | None) -> int:
@@ -50,6 +53,16 @@ def fetch_all(config: Config, db: DB, since: date | None = None) -> dict[str, li
             max_results_per_keyword=arxiv_cfg.get("max_results_per_keyword", 15),
         )
         results["arxiv"] = _dedupe_and_store(items, db)
+
+    papers_cfg = config.source("papers")
+    if papers_cfg.get("enabled"):
+        print("[pipeline] Fetching published papers (OpenAlex, non-arXiv)...")
+        items = openalex_scraper.fetch(
+            config,
+            days_back=_days_back(papers_cfg.get("days_back", 8), since),
+            max_results_per_keyword=papers_cfg.get("max_results_per_keyword", 15),
+        )
+        results["papers"] = _dedupe_and_store(items, db)
 
     # User-submitted feeds (the dashboard's Feeds tab) are additional
     # sources_.news/blogs feed URLs, merged in here rather than written
@@ -148,6 +161,8 @@ def generate_weekly_report(config: Config, db: DB) -> str:
                 published_at=row["published_at"] or "",
                 matched_keywords=(row["matched_keywords"] or "").split(",") if row["matched_keywords"] else [],
                 org=row["org"],  # already-enriched org, if any — used only by the report's "Big picture" section
+                authors=row["authors"],
+                citation_count=row["citation_count"],
                 # Deliberately NOT carried over from the row: matched_contact/
                 # matched_company/matched_reason get recomputed fresh below,
                 # every run, against the *current* contacts/interests config.
@@ -188,10 +203,18 @@ def generate_weekly_report(config: Config, db: DB) -> str:
     report_cfg = config.report
     max_n = report_cfg.get("max_items_per_section", 12)
 
+    # Ranked by citation_count (highest first) rather than recency, same
+    # as arXiv/news/etc. are — a paper with real citations is more worth
+    # surfacing than a newer, uncited one; ties (including all-None, for
+    # a paper OpenAlex hasn't indexed citations for yet) keep published_at
+    # order via the stable sort.
+    papers_items = sorted(items_by_source["papers"], key=lambda i: i.citation_count or 0, reverse=True)[:max_n]
+
     report_id, markdown = report_mod.build_report(
         industry_name=config.industry_name,
         days_back=days_back,
         arxiv_items=items_by_source["arxiv"][:max_n],
+        papers_items=papers_items,
         news_items=items_by_source["news"][:max_n],
         blog_items=items_by_source["blog"][:max_n],
         conference_items=items_by_source["conference"],

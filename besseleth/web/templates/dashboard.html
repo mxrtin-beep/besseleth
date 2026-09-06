@@ -139,6 +139,7 @@
       </select></div>
       <div><label for="pfSort">Sort by</label><select id="pfSort">
         <option value="date">Date (newest)</option><option value="novelty">Novelty (highest)</option>
+        <option value="citations">Citations (highest)</option>
       </select></div>
     </div>
     <p class="hint" id="papersCount"></p>
@@ -1126,6 +1127,7 @@ function renderPapers() {
 
   rows = rows.slice().sort((a, b) => {
     if (sortBy === 'novelty') return (b.novelty_score || 0) - (a.novelty_score || 0);
+    if (sortBy === 'citations') return (b.citation_count || 0) - (a.citation_count || 0);
     return (b.published_at || '').localeCompare(a.published_at || '');
   });
 
@@ -1134,12 +1136,15 @@ function renderPapers() {
 
   const table = document.getElementById('papersTable');
   table.innerHTML = `
-    <thead><tr><th>Date</th><th>Title</th><th>Source</th><th>Org</th><th>Org type</th><th>Modality</th><th>Target</th><th>Novelty</th></tr></thead>
+    <thead><tr><th>Date</th><th>Title</th><th>Source</th><th>Authors</th><th>Citations</th><th>Org</th>
+      <th>Org type</th><th>Modality</th><th>Target</th><th>Novelty</th></tr></thead>
     <tbody>${rows.map(p => `
       <tr>
         <td>${(p.published_at || '').slice(0, 10)}</td>
         <td>${p.title}</td>
         <td>${p.url ? `<a href="${p.url}" target="_blank" rel="noopener">${p.source}</a>` : p.source}</td>
+        <td>${p.authors || ''}</td>
+        <td>${p.citation_count ?? ''}</td>
         <td>${p.org || (p.enriched ? '—' : '<span class="hint">pending</span>')}</td>
         <td>${p.org_type || ''}</td>
         <td>${p.modality || ''}</td>

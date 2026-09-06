@@ -145,6 +145,8 @@ ENRICHMENT_COLUMNS = {
     "lon": "REAL",
     "enriched_at": "TEXT",             # ISO8601 once enrichment has run for this item (even if it found nothing)
     "matched_reason": "TEXT",          # "company" | "school" — why matched_contact matched (see personalize.py)
+    "authors": "TEXT",                 # comma-separated author names, scraped directly (papers.py/openalex_scraper.py) — not LLM-derived
+    "citation_count": "INTEGER",       # from OpenAlex, for ranking non-arXiv papers by impact — NULL for sources OpenAlex doesn't cover
 }
 
 
@@ -169,6 +171,8 @@ class Item:
     location_text: Optional[str] = None
     lat: Optional[float] = None
     lon: Optional[float] = None
+    authors: Optional[str] = None
+    citation_count: Optional[int] = None
 
 
 class DB:
@@ -239,8 +243,9 @@ class DB:
         self.conn.execute(
             """INSERT INTO items
                (id, source, title, url, summary, published_at, fetched_at,
-                matched_keywords, matched_contact, matched_company, included_in_report)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+                matched_keywords, matched_contact, matched_company, included_in_report,
+                authors, citation_count)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)""",
             (
                 item.id,
                 item.source,
@@ -252,6 +257,8 @@ class DB:
                 ",".join(item.matched_keywords),
                 item.matched_contact,
                 item.matched_company,
+                item.authors,
+                item.citation_count,
             ),
         )
         self.conn.commit()
