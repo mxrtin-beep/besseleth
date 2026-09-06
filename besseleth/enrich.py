@@ -314,14 +314,47 @@ def _looks_like_a_named_org(org: str, config: Config) -> bool:
     return True
 
 
+_LAB_NAME_RE = re.compile(
+    r"^(?:the\s+)?(?P<pi>[A-Za-z][\w-]*)(?:'s)?\s+lab(?:oratory)?"
+    r"(?:\s+(?:at|@)\s+(?P<inst>.+))?$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_lab_name(org: str) -> str:
+    """Collapses the handful of ways a PI-named lab gets phrased — "the
+    Shenoy Lab at Stanford", "Shenoy's lab at Stanford", "Shenoy Lab",
+    "the Shenoy Laboratory" — into one consistent "<PI> Lab[ at
+    <institution>]" form, so the same lab doesn't fork into multiple
+    Orgs-table rows just because the LLM (or the source text) phrased it
+    differently from one item to the next. A no-op (returns `org`
+    unchanged) for anything that doesn't match this specific shape —
+    never guesses at a name it isn't confident is a PI-named lab."""
+    match = _LAB_NAME_RE.match(org.strip())
+    if not match:
+        return org
+    pi = match.group("pi").strip()
+    if pi.islower() or pi.isupper():
+        pi = pi.capitalize()  # leaves mixed-case names ("McCarthy") alone
+    inst = re.sub(r"\s+", " ", (match.group("inst") or "").strip()).rstrip(".")
+    canonical = f"{pi} Lab"
+    if inst:
+        canonical += f" at {inst}"
+    return canonical
+
+
 def _canonicalize_new_org(org: str, db: DB) -> str:
-    """If an org that's letters/digits-equivalent to `org` (ignoring
+    """Normalizes lab-name phrasing first (see _normalize_lab_name), then:
+    if an org that's letters/digits-equivalent to the result (ignoring
     case, spacing, punctuation) is already stored under different
-    casing/spacing, reuse that exact existing spelling instead of
+    casing/spacing, reuses that exact existing spelling instead of
     adding a near-duplicate ("Ability Neurotech" vs "Ability NeuroTech"
     from two separate LLM calls, which otherwise show up as two
     different Orgs-table rows). Whichever spelling was seen first wins
-    and stays canonical going forward."""
+    and stays canonical going forward; a genuinely new lab is stored
+    already in its normalized form rather than however this one mention
+    happened to phrase it."""
+    org = _normalize_lab_name(org)
     target = _squash(org)
     if not target:
         return org
@@ -332,15 +365,17 @@ def _canonicalize_new_org(org: str, db: DB) -> str:
 
 
 def _canonicalize_existing_orgs(db: DB) -> int:
-    """Retroactive sweep: clusters every currently-stored org by the
-    same squash-equivalence as _canonicalize_new_org() and renames every
-    variant in a cluster to whichever spelling has the most items
-    (a tiebreak that's stable and doesn't need any judgment call).
-    Returns how many rows were renamed."""
+    """Retroactive sweep: clusters every currently-stored org by the same
+    normalize-then-squash equivalence as _canonicalize_new_org() — so
+    "the Shenoy Lab at Stanford" and "Shenoy's lab at Stanford" land in
+    the same cluster even though they're not letters/digits-equivalent —
+    and renames every variant in a cluster to the normalized form of
+    whichever spelling has the most items (a tiebreak that's stable and
+    doesn't need any judgment call). Returns how many rows were renamed."""
     counts = db.org_item_counts()
     clusters: dict[str, list[str]] = {}
     for org in counts:
-        clusters.setdefault(_squash(org), []).append(org)
+        clusters.setdefault(_squash(_normalize_lab_name(org)), []).append(org)
 
     renamed = 0
     for variants in clusters.values():
@@ -349,8 +384,12 @@ def _canonicalize_existing_orgs(db: DB) -> int:
         # Prefer the most-used spelling, but always collapse its own
         # whitespace to single spaces — a tie between "Ability Neurotech"
         # and "Ability  NeuroTech" (double space) shouldn't crown the
-        # double-space one just because it happened to sort higher.
-        canonical = re.sub(r"\s+", " ", max(variants, key=lambda o: counts[o])).strip()
+        # double-space one just because it happened to sort higher — then
+        # normalize it, so the cluster settles on a clean "<PI> Lab at
+        # <institution>" form regardless of which raw phrasing had the
+        # most items.
+        winner = re.sub(r"\s+", " ", max(variants, key=lambda o: counts[o])).strip()
+        canonical = _normalize_lab_name(winner)
         for variant in variants:
             if variant != canonical:
                 renamed += db.rename_org(variant, canonical)
