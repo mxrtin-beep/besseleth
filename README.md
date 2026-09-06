@@ -473,19 +473,20 @@ besseleth asks the local LLM to tag every new item with:
   left still reads like hedging prose rather than a name, it's dropped
   to null rather than guessing which part was meant — also retroactive.
 
-  For a lab you specifically care about getting right, every time,
-  regardless of how the LLM (or the source article) phrases it: maintain
-  `labs.yaml` (copy from `labs.example.yaml`) — a list of `{pi,
-  university}` entries. When an item's text mentions a listed PI's
-  surname alongside their university, besseleth sets `org` directly to
-  `"<PI> Lab at <University>"`, bypassing the LLM's own extraction for
-  that item entirely — real ground truth you supplied, not a guess, so
-  there's no phrasing inconsistency to normalize away. Requiring the
-  university too (when one's given) is what keeps a common surname
-  ("Chen") from matching every item that happens to share it. A lab not
-  listed here just falls through to the LLM's own extraction (and the
-  lab-name normalization described below), exactly as before this
-  existed — labs.yaml is additive, not a replacement.
+  `labs.yaml` (copy from `labs.example.yaml`, entirely optional — no
+  effect at all if missing or empty) is a `{pi, university}` list that
+  deterministically sets `org` to `"<PI> Lab at <University>"` for a
+  listed PI whenever their surname and university both appear in an
+  item's text, bypassing the LLM's own extraction for that one item.
+  This isn't meant as something to keep in sync with reality as labs
+  move/PIs change — that's real upkeep for something that should mostly
+  take care of itself — so treat it as a spot-check tool more than a
+  standing feature: hand it a handful of labs you know well, see whether
+  the *generic* extraction (the checks described above, with no entry
+  for that lab) already gets them right on its own, and only add an
+  entry for one it doesn't. A lab not listed just falls through to the
+  LLM's own extraction and normalization, exactly as if labs.yaml didn't
+  exist.
 - **org_type** — industry / academic / government / nonprofit / unknown
 - **modality** — EEG, ECoG, CNS implant, PNS implant, EMG, fMRI, fNIRS,
   or another short label if none fit. **Multi-valued**: a study combining

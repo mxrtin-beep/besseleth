@@ -366,8 +366,18 @@ def _clean_org_value(raw: str | None) -> str | None:
             org = tail
 
     # "Wu's lab (unspecified location, possibly China)" — a trailing
-    # parenthetical is commentary, never part of a real org's name.
-    org = re.sub(r"\s*\([^)]*\)\s*$", "", org).strip()
+    # parenthetical is usually commentary, not part of a real org's name
+    # — EXCEPT "Chang Lab (UCSF)" is a legitimate way of writing
+    # "Chang Lab at UCSF"; stripping that blindly would throw the
+    # institution away rather than the hedging. Only strip it as
+    # commentary when it actually reads like commentary (a hedging
+    # phrase, or more than a couple words — a real institution name in
+    # parens is short).
+    trailing_paren = re.search(r"\s*\(([^)]*)\)\s*$", org)
+    if trailing_paren:
+        inner = trailing_paren.group(1).strip()
+        if any(phrase in inner.lower() for phrase in _HEDGING_PHRASES) or len(inner.split()) > 3:
+            org = org[: trailing_paren.start()].strip()
 
     if not org:
         return None
@@ -505,7 +515,7 @@ def _clean_modality_tags(raw, config: Config) -> str:
 
 _LAB_NAME_RE = re.compile(
     r"^(?:the\s+)?(?P<pi>[A-Za-z][\w-]*)(?:'s)?\s+lab(?:oratory)?"
-    r"(?:\s+(?:at|@)\s+(?P<inst>.+))?$",
+    r"(?:\s*(?:at|@|,|\()\s*(?P<inst>[^)]+?)\)?)?$",
     re.IGNORECASE,
 )
 
@@ -513,12 +523,13 @@ _LAB_NAME_RE = re.compile(
 def _normalize_lab_name(org: str) -> str:
     """Collapses the handful of ways a PI-named lab gets phrased — "the
     Shenoy Lab at Stanford", "Shenoy's lab at Stanford", "Shenoy Lab",
-    "the Shenoy Laboratory" — into one consistent "<PI> Lab[ at
-    <institution>]" form, so the same lab doesn't fork into multiple
-    Orgs-table rows just because the LLM (or the source text) phrased it
-    differently from one item to the next. A no-op (returns `org`
-    unchanged) for anything that doesn't match this specific shape —
-    never guesses at a name it isn't confident is a PI-named lab."""
+    "the Shenoy Laboratory", "Shenoy Lab (Stanford)", "Shenoy Lab,
+    Stanford" — into one consistent "<PI> Lab[ at <institution>]" form,
+    so the same lab doesn't fork into multiple Orgs-table rows just
+    because the LLM (or the source text) phrased it differently from one
+    item to the next. A no-op (returns `org` unchanged) for anything
+    that doesn't match this specific shape — never guesses at a name it
+    isn't confident is a PI-named lab."""
     match = _LAB_NAME_RE.match(org.strip())
     if not match:
         return org
