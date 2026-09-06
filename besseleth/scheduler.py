@@ -46,11 +46,33 @@ class SchedulerStatus:
     last_error: str | None = None
     next_fetch_at: str | None = None
     next_report_at: str | None = None
+    # A very basic progress indicator for whatever run_now/fetch/enrich
+    # is currently doing — a short label (e.g. "Enriching 45/230 items",
+    # "Fetching news...") plus current/total when a real fraction is
+    # known (None/None for a step that doesn't have one, like a single
+    # fetch source — the frontend just shows the label alone then).
+    # Cleared (all None) once nothing is running. In-memory only, same
+    # as the rest of this object — a dashboard reload while something's
+    # running just starts polling fresh, nothing is lost.
+    progress_label: str | None = None
+    progress_current: int | None = None
+    progress_total: int | None = None
+    # Set once a background /api/enrich run finishes, so the dashboard can
+    # show the result after polling detects running_now went back to
+    # false (the old synchronous endpoint returned this directly; now it
+    # has to be picked up on the next status poll instead).
+    last_enrich_result: dict | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def as_dict(self) -> dict:
         with self._lock:
             return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
+
+    def set_progress(self, label: str | None, current: int | None = None, total: int | None = None):
+        with self._lock:
+            self.progress_label = label
+            self.progress_current = current
+            self.progress_total = total
 
 
 def _run_fetch(config: Config, status: SchedulerStatus):
@@ -59,7 +81,7 @@ def _run_fetch(config: Config, status: SchedulerStatus):
     try:
         db = DB(config.db_path)
         try:
-            results = fetch_all(config, db)
+            results = fetch_all(config, db, progress_cb=status.set_progress)
             # fetch_all() itself persists last_fetch_at now (so cli fetch
             # updates it too, not just this scheduled/Run-now path) —
             # read it back rather than writing it a second time here.
@@ -86,7 +108,7 @@ def _run_report(config: Config, status: SchedulerStatus):
     try:
         db = DB(config.db_path)
         try:
-            path = generate_weekly_report(config, db)
+            path = generate_weekly_report(config, db, progress_cb=status.set_progress)
             # generate_weekly_report() persists last_report_at itself now,
             # only when a report is actually produced (not on its "nothing
             # new" early return) — read it back rather than stamping "now"

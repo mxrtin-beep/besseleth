@@ -98,6 +98,10 @@
     <button class="btn" id="backfillBtn">Backfill</button>
     <button class="btn" id="runNowBtn">Run now</button>
   </div>
+  <div id="progressBar" style="display:none; align-items:center; gap:.6rem; padding:.4rem 1rem; margin:-0.6rem 0 1rem;">
+    <progress id="progressBarEl" style="flex:1 1 auto; height:.6rem;"></progress>
+    <span id="progressBarLabel" class="hint" style="white-space:nowrap"></span>
+  </div>
 
   <div class="tabs">
     <button id="tabReport" class="active">Report</button>
@@ -446,6 +450,10 @@ const statusText = document.getElementById('statusText');
 const runNowBtn = document.getElementById('runNowBtn');
 const backfillBtn = document.getElementById('backfillBtn');
 const backfillDate = document.getElementById('backfillDate');
+const progressBar = document.getElementById('progressBar');
+const progressBarEl = document.getElementById('progressBarEl');
+const progressBarLabel = document.getElementById('progressBarLabel');
+let fastPoll = false; // true while something's running, so the bar tracks it closely
 
 function fmtAgo(iso) {
   if (!iso) return 'never';
@@ -469,6 +477,26 @@ function fmtUntil(iso) {
   return `in ${Math.round(hours / 24)}d`;
 }
 
+function updateProgressBar(s) {
+  // A very basic bar: shown whenever something's running and the backend
+  // has a label for it. current/total may be null (a step that doesn't
+  // have a real fraction, e.g. a single fetch source) — an indeterminate
+  // <progress> (no `value`) covers that case.
+  if (!s.running_now || !s.progress_label) {
+    progressBar.style.display = 'none';
+    return;
+  }
+  progressBar.style.display = 'flex';
+  if (s.progress_current != null && s.progress_total) {
+    progressBarEl.value = s.progress_current;
+    progressBarEl.max = s.progress_total;
+    progressBarLabel.textContent = `${s.progress_label} (${s.progress_current}/${s.progress_total})`;
+  } else {
+    progressBarEl.removeAttribute('value');
+    progressBarLabel.textContent = s.progress_label;
+  }
+}
+
 async function pollStatus() {
   try {
     const res = await fetch('/api/status');
@@ -476,28 +504,64 @@ async function pollStatus() {
     runNowBtn.disabled = s.running_now;
     backfillBtn.disabled = s.running_now;
     runNowBtn.textContent = s.running_now ? 'Running…' : 'Run now';
+    updateProgressBar(s);
 
     if (!s.enabled) {
       statusText.textContent = 'Auto-schedule disabled — fetch/report only run when triggered manually.';
     } else if (s.running_now) {
-      statusText.textContent = 'Fetching/summarizing now…';
+      statusText.textContent = s.progress_label || 'Fetching/summarizing now…';
     } else {
       const parts = [`Last fetch: ${fmtAgo(s.last_fetch_at)}`, `— next ${fmtUntil(s.next_fetch_at)}`,
                       `· Last report: ${fmtAgo(s.last_report_at)}`, `— next ${fmtUntil(s.next_report_at)}`];
       if (s.last_error) parts.push(`· ⚠ ${s.last_error}`);
       statusText.textContent = parts.join(' ');
     }
+
+    // Poll quickly while something's running (so the bar feels live), and
+    // back off to the normal slow interval once it's done.
+    if (s.running_now && !fastPoll) {
+      fastPoll = true;
+      clearInterval(pollTimer);
+      pollTimer = setInterval(pollStatus, 1500);
+    } else if (!s.running_now && fastPoll) {
+      fastPoll = false;
+      clearInterval(pollTimer);
+      pollTimer = setInterval(pollStatus, 15000);
+      return s; // signal callers waiting on run-now/backfill to finish
+    }
   } catch (e) {
     statusText.textContent = 'Status unavailable.';
   }
 }
 
+// Fire-and-poll: start an operation, then poll /api/status until
+// running_now goes back to false, rather than blocking the request for
+// however long fetch/enrich/report takes (which used to make the browser
+// just sit there with no feedback for minutes).
+async function waitUntilDone() {
+  return new Promise((resolve) => {
+    const check = async () => {
+      const res = await fetch('/api/status');
+      const s = await res.json();
+      updateProgressBar(s);
+      if (s.running_now) {
+        statusText.textContent = s.progress_label || 'Running…';
+        setTimeout(check, 1200);
+      } else {
+        resolve(s);
+      }
+    };
+    check();
+  });
+}
+
 runNowBtn.onclick = async () => {
   runNowBtn.disabled = true;
   runNowBtn.textContent = 'Running…';
-  statusText.textContent = 'Fetching/summarizing now…';
+  statusText.textContent = 'Starting…';
   try {
     await fetch('/api/run-now', { method: 'POST' });
+    await waitUntilDone();
   } finally {
     // A run-now can produce a new report, so reload to pick it up in the sidebar.
     window.location.reload();
@@ -507,19 +571,22 @@ runNowBtn.onclick = async () => {
 backfillBtn.onclick = async () => {
   if (!backfillDate.value) { alert('Pick a date to backfill from.'); return; }
   backfillBtn.disabled = true;
-  statusText.textContent = `Backfilling from ${backfillDate.value}…`;
+  statusText.textContent = `Starting backfill from ${backfillDate.value}…`;
   try {
     const res = await fetch('/api/backfill', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ since: backfillDate.value }),
     });
     const data = await res.json();
-    if (data.ok) {
-      const total = Object.values(data.counts).reduce((a, b) => a + b, 0);
-      statusText.textContent = `Backfill done: ${total} new items fetched since ${backfillDate.value}.`;
-    } else {
+    if (!data.ok) {
       statusText.textContent = `Backfill failed: ${data.message}`;
+      return;
     }
+    const s = await waitUntilDone();
+    const total = s.last_fetch_counts ? Object.values(s.last_fetch_counts).reduce((a, b) => a + b, 0) : '?';
+    statusText.textContent = s.last_error
+      ? `Backfill failed: ${s.last_error}`
+      : `Backfill done: ${total} new items fetched since ${backfillDate.value}.`;
   } catch (e) {
     statusText.textContent = 'Backfill failed — see server log.';
   } finally {
@@ -527,8 +594,8 @@ backfillBtn.onclick = async () => {
   }
 };
 
+let pollTimer = setInterval(pollStatus, 15000);
 pollStatus();
-setInterval(pollStatus, 15000);
 
 // --- Paste box -----------------------------------------------------------
 document.getElementById('pasteBtn').onclick = async () => {
@@ -1072,21 +1139,29 @@ document.getElementById('enrichNowBtn').onclick = async (ev) => {
   const btn = ev.target;
   const resultEl = document.getElementById('enrichResult');
   btn.disabled = true;
-  btn.textContent = 'Enriching…';
+  btn.textContent = 'Starting…';
   resultEl.textContent = '';
   try {
     const force = document.getElementById('enrichForce').checked;
     const run_until_done = document.getElementById('enrichUntilDone').checked;
-    if (run_until_done) btn.textContent = 'Enriching everything… this can take a while, leave this tab open';
-    const res = await fetch('/api/enrich', {
+    const started = await fetch('/api/enrich', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force, run_until_done }),
     });
-    const data = await res.json();
+    const startedData = await started.json();
+    if (!startedData.ok) {
+      btn.textContent = 'Enrich now (busy)';
+      resultEl.textContent = startedData.message || 'Already running.';
+      return;
+    }
+    if (run_until_done) btn.textContent = 'Enriching everything… this can take a while, leave this tab open';
+    else btn.textContent = 'Enriching…';
+    const s = await waitUntilDone();
+    const data = s.last_enrich_result;
     papersLoaded = false;
     await loadPapers();
-    btn.textContent = `Enrich now (+${data.enriched})`;
-    resultEl.textContent = data.message || '';
-    renderEnrichStats(data.stats);
+    btn.textContent = data ? `Enrich now (+${data.enriched})` : 'Enrich now';
+    resultEl.textContent = (data && data.message) || s.last_error || '';
+    if (data && data.stats) renderEnrichStats(data.stats);
   } catch (e) {
     btn.textContent = 'Enrich now (failed)';
     resultEl.textContent = 'Request failed — see server log.';

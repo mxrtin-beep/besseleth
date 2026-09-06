@@ -1005,7 +1005,8 @@ def _sync_duplicate_novelty(config: Config, db: DB) -> int:
 
 
 def enrich_items_detailed(
-    config: Config, db: DB, force: bool = False, run_until_done: bool = False, background: bool = False
+    config: Config, db: DB, force: bool = False, run_until_done: bool = False, background: bool = False,
+    progress_cb=None,
 ) -> dict:
     """Returns {"processed": int, "message": str, "backend": str} — the
     message always explains a 0, so 'nothing happened' is never silent:
@@ -1221,10 +1222,19 @@ def enrich_items_detailed(
     total_attempted = 0
     work_seconds = 0.0  # excludes the deliberate pause_seconds sleeps — this is actual enrich time, not throttling
     rows = first_rows
+    # A very basic total estimate — exact for force+run_until_done (a
+    # snapshot count taken above) and for the plain interactive/background
+    # cases (the whole queue is already in `first_rows`); for plain
+    # run_until_done (no force) it's just this first batch, since the real
+    # backlog size isn't known until it runs dry — so the bar undershoots a
+    # bit there rather than promising a total it can't back up.
+    progress_total = force_pool_size if force_pool_size is not None else len(first_rows)
     while rows:
         total_attempted += len(rows)
         batch_processed = 0
         for i, row in enumerate(rows):
+            if progress_cb:
+                progress_cb(f"Enriching item {total_attempted - len(rows) + i + 1}", total_attempted - len(rows) + i + 1, progress_total)
             item_start = time.time()
             try:
                 if _enrich_one(row, db, config, summarizer_cfg):
@@ -1253,6 +1263,10 @@ def enrich_items_detailed(
             print(f"[enrich] Stopping: completed one full pass over all {force_pool_size} item(s) in scope.")
             break
         rows = db.items_to_reenrich(sources, max_items) if force else db.unenriched_items(sources, max_items)
+        if rows and force_pool_size is None:
+            # Growing backlog (plain run_until_done) — extend the estimate
+            # rather than let progress "overshoot" past a too-small total.
+            progress_total = total_attempted + len(rows)
         if rows:
             print(f"[enrich] Batch done ({total_processed} so far) — {len(rows)}+ item(s) left, continuing...")
             ok, status_msg = ollama_status(summarizer_cfg)

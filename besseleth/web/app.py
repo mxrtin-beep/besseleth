@@ -23,6 +23,7 @@ import argparse
 import os
 import re
 import secrets
+import threading
 from datetime import date
 from pathlib import Path
 
@@ -400,33 +401,69 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         status = app.config["BESSELETH_STATUS"]
         if status.running_now:
             return jsonify({"ok": False, "message": "Already running."}), 409
-        # Runs synchronously in the request thread — fetching+summarizing
-        # can take a while (LLM calls, network), so this blocks until
-        # done rather than pretending it's instant. The dashboard shows
-        # a spinner for this; poll /api/status if you'd rather not wait.
-        run_now(config, status)
-        return jsonify(status.as_dict())
+        # Runs in a background thread — fetching+summarizing can take a
+        # while (LLM calls, network) — so this returns immediately and the
+        # dashboard polls /api/status for progress_label/current/total and
+        # running_now instead of blocking on the request.
+        with status._lock:
+            status.running_now = True
+        status.set_progress("Starting run...")
+
+        def _work():
+            try:
+                run_now(config, status)
+            finally:
+                status.set_progress(None)
+                with status._lock:
+                    status.running_now = False
+
+        threading.Thread(target=_work, daemon=True).start()
+        return jsonify({"ok": True, "message": "Started."})
 
     @app.post("/api/enrich")
     def api_enrich():
         from ..enrich import enrich_items_detailed
 
+        status = app.config["BESSELETH_STATUS"]
+        if status.running_now:
+            return jsonify({"ok": False, "message": "Already running."}), 409
         payload = request.get_json(silent=True) or {}
         force = bool(payload.get("force"))
         run_until_done = bool(payload.get("run_until_done"))
-        # Runs synchronously in the request thread, same as /api/run-now —
-        # with run_until_done this can take a long while (the whole
-        # backlog, not one capped batch), so this blocks until it's
-        # actually done rather than pretending it finished after one batch.
-        db = DB(config.db_path)
-        try:
-            result = enrich_items_detailed(config, db, force=force, run_until_done=run_until_done)
-        finally:
-            db.close()
-        return jsonify({
-            "ok": True, "enriched": result["processed"], "message": result["message"], "backend": result["backend"],
-            "stats": result.get("stats"),
-        })
+        # Runs in a background thread, same as /api/run-now — with
+        # run_until_done this can take a long while (the whole backlog,
+        # not one capped batch), so the dashboard polls /api/status rather
+        # than the request blocking until it's actually done.
+        with status._lock:
+            status.running_now = True
+        status.set_progress("Starting enrichment...")
+
+        def _work():
+            try:
+                db = DB(config.db_path)
+                try:
+                    result = enrich_items_detailed(
+                        config, db, force=force, run_until_done=run_until_done,
+                        progress_cb=status.set_progress,
+                    )
+                finally:
+                    db.close()
+                with status._lock:
+                    status.last_error = None
+                status.last_enrich_result = {
+                    "ok": True, "enriched": result["processed"], "message": result["message"],
+                    "backend": result["backend"], "stats": result.get("stats"),
+                }
+            except Exception as e:
+                with status._lock:
+                    status.last_error = f"enrich: {e}"
+            finally:
+                status.set_progress(None)
+                with status._lock:
+                    status.running_now = False
+
+        threading.Thread(target=_work, daemon=True).start()
+        return jsonify({"ok": True, "message": "Started."})
 
     @app.get("/api/enrich/stats")
     def api_enrich_stats():
@@ -502,17 +539,28 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
 
         with status._lock:
             status.running_now = True
-        try:
-            db = DB(config.db_path)
+        status.set_progress("Starting backfill...")
+
+        def _work():
             try:
-                results = fetch_all(config, db, since=since)
+                db = DB(config.db_path)
+                try:
+                    results = fetch_all(config, db, since=since, progress_cb=status.set_progress)
+                finally:
+                    db.close()
+                with status._lock:
+                    status.last_error = None
+                status.last_fetch_counts = {k: len(v) for k, v in results.items()}
+            except Exception as e:
+                with status._lock:
+                    status.last_error = f"backfill: {e}"
             finally:
-                db.close()
-            counts = {k: len(v) for k, v in results.items()}
-            return jsonify({"ok": True, "since": since_str, "counts": counts})
-        finally:
-            with status._lock:
-                status.running_now = False
+                status.set_progress(None)
+                with status._lock:
+                    status.running_now = False
+
+        threading.Thread(target=_work, daemon=True).start()
+        return jsonify({"ok": True, "since": since_str, "message": "Started."})
 
     @app.post("/api/paste")
     def api_paste():

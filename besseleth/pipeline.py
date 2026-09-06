@@ -34,13 +34,26 @@ def _days_back(configured: int, since: date | None) -> int:
     return max(configured, (date.today() - since).days)
 
 
-def fetch_all(config: Config, db: DB, since: date | None = None) -> dict[str, list[Item]]:
+def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=None) -> dict[str, list[Item]]:
     """Runs every enabled scraper, dedupes against the DB, and returns the
     newly-seen items grouped by source (existing items are not
     re-included). Pass `since` to backfill further back than each
     source's configured `days_back` — e.g. to seed history right after
-    setup, or after being away for a while."""
+    setup, or after being away for a while.
+
+    progress_cb(label, current, total), if given, is called once per
+    fetch phase below (a fixed 9-step sequence — disabled sources still
+    advance the counter, just near-instantly, since there's no fetch to
+    wait on) — a very basic "step N of 9: <label>" indicator, not a
+    precise item-level progress bar."""
     results: dict[str, list[Item]] = {s: [] for s in SOURCES}
+    _TOTAL_FETCH_STEPS = 9  # arXiv, Papers, News, Blogs, Conferences, Events, Social, LinkedIn, Enrichment+Jobs
+    _step = [0]  # mutable cell, closed over below — a plain int can't be reassigned from the closure
+
+    def _tick(label: str):
+        _step[0] += 1
+        if progress_cb:
+            progress_cb(f"Fetching: {label}", _step[0], _TOTAL_FETCH_STEPS)
 
     # arXiv (preprints, same-day freshness) and OpenAlex (published
     # papers, has citation counts, but indexes with a real lag — days to
@@ -57,6 +70,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None) -> dict[str, li
             max_results_per_keyword=arxiv_cfg.get("max_results_per_keyword", 15),
         )
         results["papers"] += _dedupe_and_store(items, db)
+    _tick("arXiv")
 
     papers_cfg = config.source("papers")
     if papers_cfg.get("enabled"):
@@ -67,6 +81,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None) -> dict[str, li
             max_results_per_keyword=papers_cfg.get("max_results_per_keyword", 15),
         )
         results["papers"] += _dedupe_and_store(items, db)
+    _tick("Papers (OpenAlex)")
 
     # User-submitted feeds (the dashboard's Feeds tab) are additional
     # sources_.news/blogs feed URLs, merged in here rather than written
@@ -79,6 +94,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None) -> dict[str, li
         news_cfg = {**news_cfg, "feeds": [*news_cfg.get("feeds", []), *(f["url"] for f in submitted["news"])]}
         items = news_scraper.fetch(config, news_cfg, days_back=_days_back(news_cfg.get("days_back", 8), since))
         results["news"] = _dedupe_and_store(items, db)
+    _tick("News")
 
     blog_cfg = config.source("blogs")
     if blog_cfg.get("enabled"):
@@ -86,6 +102,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None) -> dict[str, li
         blog_cfg = {**blog_cfg, "feeds": [*blog_cfg.get("feeds", []), *(f["url"] for f in submitted["blog"])]}
         items = blog_scraper.fetch(config, blog_cfg, days_back=_days_back(blog_cfg.get("days_back", 8), since))
         results["blog"] = _dedupe_and_store(items, db)
+    _tick("Blogs")
 
     conf_cfg = config.source("conferences")
     if conf_cfg.get("enabled"):
@@ -97,32 +114,39 @@ def fetch_all(config: Config, db: DB, since: date | None = None) -> dict[str, li
             config, conf_cfg, days_back=_days_back(conf_cfg.get("days_back", 8), since)
         )
         results["conference_news"] = _dedupe_and_store(news_items, db)
+    _tick("Conferences")
 
     events_cfg = config.source("events")
     if events_cfg.get("enabled"):
         print("[pipeline] Fetching events...")
         items = events_scraper.fetch(config, events_cfg)
         results["event"] = _dedupe_and_store(items, db)
+    _tick("Events")
 
     social_cfg = config.source("social")
     if social_cfg.get("enabled"):
         print("[pipeline] Fetching social (Bluesky/X)...")
         items = social_scraper.fetch(config, social_cfg, days_back=_days_back(social_cfg.get("days_back", 8), since))
         results["social"] = _dedupe_and_store(items, db)
+    _tick("Social")
 
     linkedin_cfg = config.source("linkedin")
     if linkedin_cfg.get("enabled"):
         print("[pipeline] Fetching LinkedIn source...")
         items = linkedin_scraper.fetch(config, linkedin_cfg)
         results["linkedin"] = _dedupe_and_store(items, db)
+    _tick("LinkedIn")
 
     print("[pipeline] Enriching papers/news/blog items (org, modality, therapeutic target, novelty)...")
+    if progress_cb:
+        progress_cb("Enriching newly-fetched items...", None, None)
     enrich_items(config, db)
 
     # Runs after enrichment, not before: it needs the orgs enrichment
     # just extracted (db.orgs()) to know who to look up job boards for.
     print("[pipeline] Syncing job postings for known orgs...")
     jobs_result = jobs_scraper.fetch(config, db)
+    _tick("Enrichment & jobs")
     print(
         f"[pipeline] Jobs: {jobs_result['orgs_with_board']}/{jobs_result['orgs_checked']} orgs have a known "
         f"board, {jobs_result['active_postings']} posting(s) currently active."
@@ -147,7 +171,7 @@ def _dedupe_and_store(items: list[Item], db: DB) -> list[Item]:
     return new_items
 
 
-def generate_weekly_report(config: Config, db: DB) -> str:
+def generate_weekly_report(config: Config, db: DB, progress_cb=None) -> str:
     """Builds the report from every item in the last `days_back` days
     (config: `news.days_back`, default 8) — a fresh snapshot of "what's in
     this window right now," recomputed from scratch every time. It does
@@ -157,6 +181,8 @@ def generate_weekly_report(config: Config, db: DB) -> str:
     skips an item just because an earlier run already showed it. Each run
     still gets its own timestamped file, so re-running never overwrites an
     earlier report. Returns the saved file path."""
+    if progress_cb:
+        progress_cb("Building report...", None, None)
     days_back = config.source("news").get("days_back", 8)
     window_rows = db.items_in_window(days_back)
     items_by_source: dict[str, list[Item]] = {s: [] for s in SOURCES}
