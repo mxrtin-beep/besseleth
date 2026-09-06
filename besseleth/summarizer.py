@@ -151,18 +151,30 @@ def summarize_items_numbered(items: list[Item], industry_name: str, cfg: dict) -
 
 def summarize_context(new_items: list[Item], history: dict, industry_name: str, cfg: dict) -> str:
     """The report's closing section: not a recap of what's already
-    summarized above, but what this run's new items mean set against
-    everything besseleth has accumulated across every past run (`history`,
-    from DB.accumulated_knowledge_stats()) — is a quiet org suddenly
-    active again, does this continue a trend already being tracked, is it
-    a genuinely new direction. Empty if there's nothing new to place."""
+    summarized above, and not a recitation of besseleth's own database
+    stats either — what this run's new items actually MEAN set against
+    everything accumulated across every past run (`history`, from
+    DB.accumulated_knowledge_stats()): is a quiet org suddenly active
+    again, does this continue a trend already being tracked, is it a
+    genuinely new direction. Empty if there's nothing new to place."""
     if not new_items:
         return ""
 
     total_items = history.get("total_items", 0)
     total_orgs = history.get("total_orgs", 0)
-    top_orgs_str = ", ".join(f"{org} ({n})" for org, n in history.get("top_orgs", []))
+    top_orgs = history.get("top_orgs", [])
+    top_orgs_str = ", ".join(f"{org} ({n})" for org, n in top_orgs)
     earliest = history.get("earliest_date") or "an earlier date"
+
+    # A concrete hook for the LLM to reason about, rather than just handing
+    # it aggregate counts to paraphrase: which of today's items involve an
+    # org that's normally one of the most active (a returning player worth
+    # remarking on), and which involve one that's rare/new in the record
+    # entirely (worth flagging as new, not just "also happened").
+    top_org_names = {org for org, _ in top_orgs}
+    new_item_orgs = {i.org for i in new_items if i.org}
+    returning_orgs = sorted(new_item_orgs & top_org_names)
+    fresh_orgs = sorted(new_item_orgs - top_org_names)
 
     fallback = (
         f"Besseleth has accumulated {total_items} items on {industry_name} since {earliest}, "
@@ -178,16 +190,27 @@ def summarize_context(new_items: list[Item], history: dict, industry_name: str, 
     ollama_url = cfg.get("ollama_url", "http://localhost:11434")
     max_items = cfg.get("max_items_per_summary_call", 8)
     new_titles = "\n".join(f"- {i.title}" for i in new_items[:max_items])
+    returning_note = f" (here: {', '.join(returning_orgs)})" if returning_orgs else ""
+    fresh_note = f" (here: {', '.join(fresh_orgs)})" if fresh_orgs else ""
     prompt = (
         f"You are writing the closing 'Big picture' section of a weekly {industry_name} "
-        f"briefing. Besseleth has been tracking this industry since {earliest} and has "
-        f"accumulated {total_items} items total across {total_orgs} organizations, most "
-        f"active so far: {top_orgs_str or 'none tracked yet'}. In 2-4 sentences, place "
-        f"today's new items in that broader context — is an org that's been quiet suddenly "
-        f"active again, does this continue a trend already being tracked, or is it a "
-        f"genuinely new direction? Don't just restate the items — say what they mean given "
-        f"everything already known. Be factual, no fluff, no preamble like 'Here is a "
-        f"summary'.\n\n"
+        f"briefing — analysis for someone who already read the sections above, not a recap "
+        f"of the database. You have background stats on everything besseleth has ever "
+        f"tracked: {total_items} items since {earliest}, across {total_orgs} organizations, "
+        f"most active historically: {top_orgs_str or 'none tracked yet'}.\n\n"
+        f"Do NOT write a sentence that just restates these numbers (e.g. never write anything "
+        f"shaped like 'Besseleth has accumulated N items... most active: X (Y), Z (W)' — that "
+        f"is a database dump, not analysis, and the reader already has that data if they want "
+        f"it). Instead, in 2-4 sentences, say what today's new items actually MEAN given that "
+        f"history — pick ONE genuine angle and commit to it, e.g.: an org among today's items "
+        f"that's normally one of the most active ones{returning_note} showing up again — is "
+        f"this more of the same, or does it look like a shift in what they're doing; an org in "
+        f"today's items that's rare or new in the whole record{fresh_note} — is this a new "
+        f"entrant worth watching; or, if neither applies cleanly, whether today's items "
+        f"continue a pattern you'd expect from this field's history or actually cut against "
+        f"it. If you genuinely can't identify a real angle from what's given, say plainly that "
+        f"this week doesn't point to a clear shift, rather than manufacturing one. No preamble "
+        f"like 'Here is a summary', no fluff.\n\n"
         f"Today's new items:\n{new_titles}\n\nBig picture:"
     )
     result = _ollama_generate(prompt, ollama_url, model, num_thread=cfg.get("num_thread"))

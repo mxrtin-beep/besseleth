@@ -119,12 +119,17 @@ def _build_prompt(row, config: Config, context: str, author_affiliations: str = 
         '  "org_description": at most 5 words on what that org is/does, e.g. "BCI implant company" or '
         '"Academic neuroscience lab" — null if "org" is null\n'
         '  "org_type": one of "industry", "academic", "government", "nonprofit", or "unknown"\n'
-        '  "modality": the technical approach/category, e.g. "EEG", "ECoG", "CNS implant", "PNS implant", "EMG", '
-        '"fMRI", "fNIRS", or another short label if none fit. Make your best-effort call from what the text '
-        'actually describes (the device/method used) even if that word never appears verbatim — e.g. "electrodes '
-        'implanted in the motor cortex" is "CNS implant" even without that exact phrase. Only "unknown" if the '
-        "text genuinely gives no indication of the technical approach at all, not merely because it isn't spelled "
-        "out explicitly\n"
+        '  "modality": a JSON ARRAY of the technical approach(es)/category(ies) actually used, e.g. ["EEG"], '
+        '["ECoG"], ["CNS implant"], ["PNS implant"], ["EMG"], ["fMRI"], ["fNIRS"], ["eye movement (EM)"], or '
+        'another short label if none fit — MULTIPLE entries when the item genuinely combines more than one, e.g. '
+        'a study using both EEG and eye-tracking is ["EEG", "eye movement (EM)"], never a single combined string '
+        'like "EEG + eye movement (EM)". Make your best-effort call from what the text actually describes (the '
+        'device/method used) even if that word never appears verbatim — e.g. "electrodes implanted in the motor '
+        'cortex" is "CNS implant" even without that exact phrase. NEVER use "BCI", "brain-computer interface", '
+        '"brain-machine interface", or a synonym for the field itself as an entry here — that names the whole '
+        f'topic ({config.industry_name}), not a specific technique, so it is true of nearly everything and useless '
+        'as a category; name the actual technique(s) instead. ["unknown"] only if the text genuinely gives no '
+        "indication of the technical approach at all, not merely because it isn't spelled out explicitly\n"
         '  "therapeutic_target": what it addresses, e.g. "motor", "speech", "vision", "hearing", "memory", '
         '"mood/psychiatric", "epilepsy", "pain", "other". Same standard as modality — infer from what\'s described '
         '(a paralyzed patient regaining hand control is "motor") rather than requiring the word itself; "unknown" '
@@ -154,7 +159,7 @@ def _build_prompt(row, config: Config, context: str, author_affiliations: str = 
 
 
 _NON_ORG_EXACT = {
-    "unknown", "n/a", "na", "none", "various", "unspecified", "not specified", "not mentioned",
+    "unknown", "n/a", "na", "none", "null", "nil", "various", "unspecified", "not specified", "not mentioned",
     "not applicable", "researchers", "scientists", "the researchers", "the scientists", "authors",
     "the authors", "the team", "the company", "the companies", "the university", "the lab", "the labs",
     "investigators", "academics",
@@ -330,6 +335,51 @@ def _looks_like_a_named_org(org: str, config: Config) -> bool:
     return True
 
 
+# "BCI"/"brain-computer interface" describes the entire field — true of
+# nearly every item this tool tracks, so it's useless as a specific
+# modality tag (same reasoning as rejecting the industry name/a keyword
+# as an "org" above). Checked in addition to config.industry_name/
+# keywords (also rejected, dynamically) since these exact phrases are
+# the field's name regardless of what a given config calls the industry.
+_TOO_BROAD_MODALITY_TERMS = {
+    "bci", "bcis", "brain-computer interface", "brain computer interface",
+    "brain-machine interface", "brain machine interface", "bmi", "bmis",
+}
+
+
+def _clean_modality_tags(raw, config: Config) -> str:
+    """Normalizes the LLM's `modality` response — expected to be a JSON
+    array of one tag per distinct technique actually used (see
+    _build_prompt) — into a comma-separated string for storage: strips
+    each tag, drops empties and duplicates, and drops anything that's
+    just the field's own name (see _TOO_BROAD_MODALITY_TERMS above) or
+    this config's own industry name. Deliberately does NOT reject a
+    configured keyword in general the way "org" does: `industry.keywords`
+    routinely includes specific modality names themselves (EEG, ECoG,
+    TMS, DBS, ...), so those need to survive as valid tags here, unlike
+    an org name (which should never equal a search keyword). Also
+    accepts a bare string for backward compatibility with an older
+    single-value response shape. Returns "unknown" if nothing survives."""
+    if isinstance(raw, str):
+        raw = [raw]
+    elif not isinstance(raw, list):
+        raw = []
+
+    too_broad = _TOO_BROAD_MODALITY_TERMS | {config.industry_name.strip().lower()}
+
+    tags: list[str] = []
+    for tag in raw:
+        if not isinstance(tag, str):
+            continue
+        tag = tag.strip()
+        if not tag or tag.lower() in too_broad:
+            continue
+        if tag not in tags:
+            tags.append(tag)
+
+    return ", ".join(tags) if tags else "unknown"
+
+
 _LAB_NAME_RE = re.compile(
     r"^(?:the\s+)?(?P<pi>[A-Za-z][\w-]*)(?:'s)?\s+lab(?:oratory)?"
     r"(?:\s+(?:at|@)\s+(?P<inst>.+))?$",
@@ -470,6 +520,8 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
     except (TypeError, ValueError):
         novelty = None
 
+    modality = _clean_modality_tags(data.get("modality"), config)
+
     org = data.get("org") or None
     if org and not _looks_like_a_named_org(org, config):
         org = None
@@ -495,7 +547,7 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
         row["id"],
         org=org,
         org_type=data.get("org_type") or "unknown",
-        modality=data.get("modality") or "unknown",
+        modality=modality,
         therapeutic_target=data.get("therapeutic_target") or "unknown",
         novelty_score=novelty,
         novelty_rationale=data.get("novelty_rationale") or None,

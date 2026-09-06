@@ -130,7 +130,7 @@
       <div><label for="pfSource">Source</label><select id="pfSource"><option value="">All</option></select></div>
       <div><label for="pfOrgType">Org type</label><select id="pfOrgType"><option value="">All</option></select></div>
       <div><label for="pfOrg">Org</label><select id="pfOrg"><option value="">All</option></select></div>
-      <div><label for="pfModality">Modality</label><select id="pfModality"><option value="">All</option></select></div>
+      <div><label for="pfModality">Modality (multi-select — matches any of your item's tags, ctrl/cmd-click for more than one)</label><select id="pfModality" multiple size="4"></select></div>
       <div><label for="pfTarget">Therapeutic target</label><select id="pfTarget"><option value="">All</option></select></div>
       <div><label for="pfNovelty">Min novelty</label><select id="pfNovelty">
         <option value="0">Any</option><option value="1">1+</option><option value="2">2+</option>
@@ -903,11 +903,25 @@ function uniqueSorted(values) {
   return [...new Set(values.filter(v => v))].sort();
 }
 
+// modality is stored as a comma-separated list of tags (a paper can be
+// both EEG and eye-tracking, say) rather than one value — this splits
+// it back out, trimming each tag.
+function modalityTags(p) {
+  return (p.modality || '').split(',').map(s => s.trim()).filter(s => s);
+}
+
 function populateSelect(id, values) {
   const sel = document.getElementById(id);
   const current = sel.value;
   sel.innerHTML = '<option value="">All</option>' + values.map(v => `<option value="${v}">${v}</option>`).join('');
   if (values.includes(current)) sel.value = current;
+}
+
+function populateMultiSelect(id, values) {
+  const sel = document.getElementById(id);
+  const current = new Set(Array.from(sel.selectedOptions).map(o => o.value));
+  sel.innerHTML = values.map(v => `<option value="${v}">${v}</option>`).join('');
+  Array.from(sel.options).forEach(o => { if (current.has(o.value)) o.selected = true; });
 }
 
 async function loadPapers() {
@@ -917,7 +931,7 @@ async function loadPapers() {
   populateSelect('pfSource', uniqueSorted(papers.map(p => p.source)));
   populateSelect('pfOrgType', uniqueSorted(papers.map(p => p.org_type)));
   populateSelect('pfOrg', uniqueSorted(papers.map(p => p.org)));
-  populateSelect('pfModality', uniqueSorted(papers.map(p => p.modality)));
+  populateMultiSelect('pfModality', uniqueSorted(papers.flatMap(modalityTags)));
   populateSelect('pfTarget', uniqueSorted(papers.map(p => p.therapeutic_target)));
   ['pfFrom', 'pfTo', 'pfSource', 'pfOrgType', 'pfOrg', 'pfModality', 'pfTarget', 'pfNovelty', 'pfSort']
     .forEach(id => document.getElementById(id).onchange = renderPapers);
@@ -1073,7 +1087,7 @@ function renderPapers() {
   const source = document.getElementById('pfSource').value;
   const orgType = document.getElementById('pfOrgType').value;
   const org = document.getElementById('pfOrg').value;
-  const modality = document.getElementById('pfModality').value;
+  const modalitySelected = Array.from(document.getElementById('pfModality').selectedOptions).map(o => o.value);
   const target = document.getElementById('pfTarget').value;
   const minNovelty = parseInt(document.getElementById('pfNovelty').value, 10);
   const sortBy = document.getElementById('pfSort').value;
@@ -1085,7 +1099,7 @@ function renderPapers() {
     if (source && p.source !== source) return false;
     if (orgType && p.org_type !== orgType) return false;
     if (org && p.org !== org) return false;
-    if (modality && p.modality !== modality) return false;
+    if (modalitySelected.length && !modalityTags(p).some(t => modalitySelected.includes(t))) return false;
     if (target && p.therapeutic_target !== target) return false;
     if (minNovelty === 5 && p.novelty_score !== 5) return false;
     if (minNovelty > 0 && minNovelty < 5 && (p.novelty_score || 0) < minNovelty) return false;

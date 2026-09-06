@@ -147,6 +147,7 @@ def generate_weekly_report(config: Config, db: DB) -> str:
                 summary=row["summary"] or "",
                 published_at=row["published_at"] or "",
                 matched_keywords=(row["matched_keywords"] or "").split(",") if row["matched_keywords"] else [],
+                org=row["org"],  # already-enriched org, if any — used only by the report's "Big picture" section
                 # Deliberately NOT carried over from the row: matched_contact/
                 # matched_company/matched_reason get recomputed fresh below,
                 # every run, against the *current* contacts/interests config.

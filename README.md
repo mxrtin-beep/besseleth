@@ -444,7 +444,15 @@ fetch, besseleth asks the local LLM to tag every new item with:
   null/unknown?" below.
 - **org_type** — industry / academic / government / nonprofit / unknown
 - **modality** — EEG, ECoG, CNS implant, PNS implant, EMG, fMRI, fNIRS,
-  or another short label if none fit
+  or another short label if none fit. **Multi-valued**: a study combining
+  more than one technique (e.g. EEG + eye-tracking) gets tagged with each
+  one separately rather than forced into a single combined label — the
+  Papers tab's Modality filter is a multi-select that matches an item if
+  ANY of its tags match ANY you've selected. "BCI"/"brain-computer
+  interface" (or this config's own industry name) is never used as a tag
+  on its own — that names the whole field, not a specific technique, so
+  it's rejected the same way an org name matching the industry name/a
+  keyword is rejected
 - **therapeutic_target** — what it addresses: motor, speech, vision,
   hearing, memory, mood/psychiatric, epilepsy, pain, other
 - **novelty_score** (1-5) — how surprising the item is **compared to
@@ -584,7 +592,12 @@ closing **🧠 Big picture** section is the one place that does look back
 further, across everything besseleth has ever accumulated (item counts,
 most-active organizations, how far back its knowledge goes) to say what
 this run's items mean in that larger context — a trend continuing, a
-quiet org suddenly active again, or something genuinely new.
+quiet org suddenly active again, or something genuinely new. It's
+explicitly prompted to commit to one real angle instead of just
+paraphrasing besseleth's own stats back at you (never a sentence shaped
+like "Besseleth has accumulated N items... most active: X, Y, Z") — with
+`summarizer.backend: "none"` there's no LLM to do that synthesis, so it
+falls back to the plain stats themselves rather than nothing.
 
 ## Project layout
 
