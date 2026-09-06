@@ -124,6 +124,14 @@ def fetch_all(config: Config, db: DB, since: date | None = None) -> dict[str, li
         f"board, {jobs_result['active_postings']} posting(s) currently active."
     )
 
+    # Persisted here (not just by the scheduler's own wrapper) so `cli
+    # fetch`/`cli run` update this too — previously only a scheduled run
+    # or the dashboard's "Run now" ever touched it, so a CLI-only
+    # workflow left both the "next fetch due" math (_initial_fetch_delay,
+    # below) and the dashboard's status bar permanently reading "never"
+    # even though real fetches were happening.
+    db.set_meta("last_fetch_at", datetime.now(timezone.utc).isoformat())
+
     return results
 
 
@@ -237,6 +245,11 @@ def generate_weekly_report(config: Config, db: DB) -> str:
     # this, so it doesn't affect what future reports include.
     all_ids = [i.id for i in all_items] + list(dropped_ids)
     db.mark_reported(all_ids, report_id)
+
+    # Persisted here so `cli report`/`cli run` update it too, not just a
+    # scheduled run or the dashboard's "Run now" — see the matching
+    # comment on fetch_all()'s last_fetch_at write.
+    db.set_meta("last_report_at", datetime.now(timezone.utc).isoformat())
 
     print(f"[pipeline] Report written to {path}")
     return str(path)

@@ -60,11 +60,10 @@ def _run_fetch(config: Config, status: SchedulerStatus):
         db = DB(config.db_path)
         try:
             results = fetch_all(config, db)
-            fetch_finished_at = datetime.now(timezone.utc).isoformat()
-            # Persisted (unlike SchedulerStatus, which is in-memory only)
-            # so a restart can tell how recently this ran — see
-            # _initial_fetch_delay() below.
-            db.set_meta("last_fetch_at", fetch_finished_at)
+            # fetch_all() itself persists last_fetch_at now (so cli fetch
+            # updates it too, not just this scheduled/Run-now path) —
+            # read it back rather than writing it a second time here.
+            fetch_finished_at = db.get_meta("last_fetch_at")
         finally:
             db.close()
         with status._lock:
@@ -88,13 +87,16 @@ def _run_report(config: Config, status: SchedulerStatus):
         db = DB(config.db_path)
         try:
             path = generate_weekly_report(config, db)
+            # generate_weekly_report() persists last_report_at itself now,
+            # only when a report is actually produced (not on its "nothing
+            # new" early return) — read it back rather than stamping "now"
+            # unconditionally, so this reflects the last real report, not
+            # the last time this job merely ran and found nothing to do.
+            last_report_at = db.get_meta("last_report_at")
         finally:
             db.close()
         with status._lock:
-            status.last_report_at = datetime.now(timezone.utc).isoformat()
-            # generate_weekly_report returns "" when there was nothing new
-            # to report — keep showing whatever report last actually ran
-            # rather than blanking that out.
+            status.last_report_at = last_report_at
             if path:
                 status.last_report_path = path
             status.last_error = None

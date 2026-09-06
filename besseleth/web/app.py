@@ -373,7 +373,27 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
 
     @app.get("/api/status")
     def api_status():
-        return jsonify(app.config["BESSELETH_STATUS"].as_dict())
+        # last_fetch_at/last_report_at are in-memory on SchedulerStatus,
+        # so they reset to "never" on every restart and never reflect
+        # activity from a CLI-only workflow (cli fetch/report never touch
+        # this in-process object). Fall back to the persisted DB meta —
+        # written by pipeline.py's fetch_all()/generate_weekly_report()
+        # regardless of caller — whenever the in-memory value is unset,
+        # so the status bar reflects real history, not just this
+        # process's own uptime.
+        data = app.config["BESSELETH_STATUS"].as_dict()
+        if not data.get("last_fetch_at") or not data.get("last_report_at"):
+            db = DB(config.db_path)
+            try:
+                data.setdefault("last_fetch_at", None)
+                data.setdefault("last_report_at", None)
+                if not data["last_fetch_at"]:
+                    data["last_fetch_at"] = db.get_meta("last_fetch_at")
+                if not data["last_report_at"]:
+                    data["last_report_at"] = db.get_meta("last_report_at")
+            finally:
+                db.close()
+        return jsonify(data)
 
     @app.post("/api/run-now")
     def api_run_now():
