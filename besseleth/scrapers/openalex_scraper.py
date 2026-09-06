@@ -71,6 +71,21 @@ def fetch(config, days_back: int, max_results_per_keyword: int) -> list[Item]:
                 continue
 
             abstract = _reconstruct_abstract(work.get("abstract_inverted_index"))
+
+            # OpenAlex's `search` param is a fuzzy, relevance-ranked
+            # full-text search — it does NOT require the keyword phrase to
+            # actually appear in the title/abstract, so a search for e.g.
+            # "transcranial ultrasound stimulation" can return a paper
+            # that just scored well on "ultrasound" alone (an unrelated
+            # PSMA contrast-agent study, say). Re-check with the same
+            # strict substring match arxiv_scraper uses, and skip the
+            # result outright if none of our actual keywords are in there
+            # — don't just fall back to tagging it with the searched
+            # keyword regardless, which is what let this noise through.
+            hits = text_matches_keywords(f"{title} {abstract}", config.keywords)
+            if not hits:
+                continue
+
             authors = ", ".join(
                 name for a in work.get("authorships", [])
                 if (name := (a.get("author") or {}).get("display_name"))
@@ -80,7 +95,6 @@ def fetch(config, days_back: int, max_results_per_keyword: int) -> list[Item]:
                 or work.get("doi")
                 or openalex_id
             )
-            hits = text_matches_keywords(f"{title} {abstract}", config.keywords) or [keyword]
 
             items.append(
                 Item(
