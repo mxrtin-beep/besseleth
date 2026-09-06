@@ -53,7 +53,7 @@ from .trends.company_store import auto_mark_ipo, auto_upsert_company
 from .trends.store import auto_append_device
 from . import summarizer as summarizer_mod
 
-DEFAULT_SOURCES = ["arxiv", "news", "blog"]
+DEFAULT_SOURCES = ["papers", "news", "blog"]
 
 _JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 
@@ -625,9 +625,12 @@ def _author_affiliations_block(row) -> str:
     web_lookup.lookup_arxiv_authorships's docstring for why this is a
     lookup, not something left to the LLM to recall) — "" for a non-
     arXiv item, a paper OpenAlex doesn't have, or on any lookup failure,
-    so this is always safe to splice into the prompt unconditionally."""
-    if row["source"] != "arxiv":
-        return ""
+    so this is always safe to splice into the prompt unconditionally.
+    Gated on the URL being an arxiv.org one (not row["source"], which is
+    "papers" for both arXiv and OpenAlex-sourced items now — see
+    pipeline.py) since that's what actually determines whether an arXiv
+    id can even be extracted; a non-arXiv "papers" item's url just won't
+    match and this returns "" the same way."""
     arxiv_id = _arxiv_id_from_url(row["url"] or "")
     if not arxiv_id:
         return ""

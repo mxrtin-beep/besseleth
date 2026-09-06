@@ -232,7 +232,7 @@ enrichment:
                            # days back, uncapped — not max_items_per_run, which only bounds the automatic
                            # per-fetch run and `enrich --all`/"Enrich everything" (the whole backlog, any age)
   pause_seconds: 2        # sleep between items during a run — turns a CPU spike into a trickle
-  sources: ["arxiv", "papers", "news", "blog"]
+  sources: ["papers", "news", "blog"]
 
   # A separate pass, independent of the LLM extraction above: for orgs
   # that have no location at all (never mentioned in any item's text),

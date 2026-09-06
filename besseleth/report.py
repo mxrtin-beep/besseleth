@@ -19,10 +19,7 @@ _{{ date_range }}_
 {{ personalized_lines }}
 
 {% endif %}
-## 📄 arXiv research
-{{ arxiv_summary }}
-
-## 📚 Published papers (non-arXiv, ranked by citations)
+## 📚 Papers (arXiv + published, ranked by citations)
 {{ paper_lines }}
 
 ## 📰 News
@@ -71,13 +68,21 @@ def _snippet_lines(items: list[Item], max_chars: int = 200) -> str:
 
 
 def _paper_lines(items: list[Item]) -> str:
-    """Already sorted by citation_count (highest first) by the caller —
-    see pipeline.py. Shows the count and authors directly rather than
-    running these through an LLM summary the way arXiv items are: a
-    citation count and author list are already-final facts, not
-    something to paraphrase, and OpenAlex's abstract is the paper's own
-    text (nothing left to extract beyond what the link+citation count
-    already convey at a glance)."""
+    """One combined papers section — arXiv preprints and OpenAlex-indexed
+    published papers alike (see pipeline.py: both scrapers feed the same
+    "papers" source now, since to a reader they're the same thing:
+    research papers, just via two complementary feeds with different
+    tradeoffs — arXiv is same-day fresh but never has a citation count;
+    OpenAlex has real citation counts but indexes with a lag). Already
+    sorted by citation_count (highest first) by the caller. Shows the
+    count and authors directly rather than running these through an LLM
+    summary: a citation count and author list are already-final facts,
+    not something to paraphrase, and an abstract is the paper's own text
+    (nothing left to extract beyond what the link+citation count already
+    convey at a glance). An arXiv item's citation_count/authors are
+    usually None/empty — shown as "citations unknown" rather than 0, so
+    it doesn't read as "confirmed no citations" for a paper OpenAlex just
+    doesn't index."""
     lines = []
     for i in items:
         cite = f"{i.citation_count} citation{'s' if i.citation_count != 1 else ''}" if i.citation_count is not None else "citations unknown"
@@ -104,7 +109,6 @@ def _render_markdown(context: dict) -> str:
 def build_report(
     industry_name: str,
     days_back: int,
-    arxiv_items: list[Item],
     papers_items: list[Item],
     news_items: list[Item],
     blog_items: list[Item],
@@ -138,7 +142,6 @@ def build_report(
     # code from the item's position, never trusted to an LLM citing many
     # items in one combined call (which is what was dropping links
     # entirely for some items). See summarize_items_numbered's docstring.
-    arxiv_summary = summarizer.summarize_items_numbered(arxiv_items, industry_name, summarizer_cfg)
     news_summary = summarizer.summarize_items_numbered(news_items, industry_name, summarizer_cfg)
     blog_summary = summarizer.summarize_section(blog_items, "Blogs", industry_name, summarizer_cfg)
 
@@ -163,7 +166,6 @@ def build_report(
     ) or "_None on the watchlist this month._"
 
     all_new_items = [
-        *arxiv_items,
         *papers_items,
         *news_items,
         *blog_items,
@@ -180,7 +182,6 @@ def build_report(
         "industry": industry_name,
         "date_range": date_range,
         "personalized_lines": personalized_lines,
-        "arxiv_summary": arxiv_summary or "No new arXiv papers matched this week.",
         "paper_lines": _paper_lines(papers_items),
         "news_summary": news_summary or "No notable news this week.",
         "blog_summary": blog_summary or "No notable blog posts this week.",

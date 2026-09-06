@@ -86,16 +86,23 @@ def fetch(config, days_back: int, max_results_per_keyword: int) -> list[Item]:
                 title = entry.get("title", "").strip()
                 summary = strip_html(entry.get("summary", ""))
                 hits = text_matches_keywords(f"{title} {summary}", config.keywords)
+                authors = ", ".join(a.get("name", "") for a in entry.get("authors", []) if a.get("name"))
 
                 items.append(
                     Item(
+                        # Deliberately still "arxiv" here, not "papers" —
+                        # this is the dedup key (stable_id), and changing
+                        # it would make every already-stored arXiv item
+                        # look brand new on the next fetch and re-insert.
+                        # `source` (below) is the one that changed.
                         id=stable_id("arxiv", url or title),
-                        source="arxiv",
+                        source="papers",  # merged with openalex_scraper's output — see pipeline.py
                         title=title,
                         url=url,
                         summary=summary,
                         published_at=(published or datetime.now(timezone.utc)).isoformat(),
                         matched_keywords=hits or [keyword],
+                        authors=authors or None,
                     )
                 )
                 seen_urls.add(url)

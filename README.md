@@ -3,8 +3,7 @@
 A weekly industry-briefing bot. Point it at an industry (e.g.
 *neurotechnology*), and it:
 
-- Pulls recent **arXiv** papers matching your keywords/categories (free, official API)
-- Pulls recent **published papers not on arXiv** — journal/conference articles, via [OpenAlex](https://openalex.org) (free, keyless) — with real authors and a citation count for ranking by impact, something arXiv itself has no concept of; the report's papers section is sorted by citations, highest first
+- Pulls **papers** matching your keywords/categories from two complementary feeds under one `papers` source: **arXiv** (free, official API — preprints, same-day freshness, no citation data) and **OpenAlex** (free, keyless — published journal/conference papers, real authors and a citation count for ranking by impact, but indexes with a lag of days to weeks). The report's papers section is one list, sorted by citations, highest first
 - Pulls **news** from RSS feeds — including a free Google News search feed by default (optionally NewsAPI.org too); add more from the dashboard's **Feeds** tab, no config-file editing needed
 - Pulls **blogs** (company/lab blogs, researcher Substacks) from RSS — Substack needs no code, just its `/feed` URL; also addable from the Feeds tab
 - Tracks a curated **conferences** watchlist, plus optional **conference news** (CFPs, accepted talks) via each conference's own RSS feed
@@ -216,11 +215,12 @@ it's doing and when. Tabs:
 
 - **Report** — the latest (or any past) report, rendered from Markdown;
   delete old ones from the sidebar.
-- **Papers** — every arXiv/news/blog item besseleth has ever fetched, in
+- **Papers** — every papers/news/blog item besseleth has ever fetched, in
   one browsable table — not just this week's snapshot. Filter by date
   range, source, org, org type (industry/academic/government/nonprofit),
-  modality, therapeutic target, and a minimum novelty score; sort by date
-  or novelty. See "Papers table" below for what populates the columns.
+  modality, therapeutic target, and a minimum novelty score; sort by date,
+  novelty, or citations. See "Papers table" below for what populates the
+  columns.
 - **Map** — the companies/labs behind those papers, plotted by location
   (free via OpenStreetMap), sized by how much has been fetched about
   each. See "Map" below.
@@ -254,7 +254,7 @@ in the pasted text), hit Add. besseleth looks at the URL's domain and
 files it under the right source automatically:
 `linkedin.com`→LinkedIn, `bsky.app`/`x.com`/`twitter.com`→social,
 `lu.ma`/`eventbrite.com`/`meetup.com`→event, `substack.com`→blog,
-`arxiv.org`→arXiv — anything else lands in a generic "📌 Clipped" section
+`arxiv.org`→papers — anything else lands in a generic "📌 Clipped" section
 rather than guessing wrong. You never have to pick which source it is;
 just paste. The same thing works from the CLI: `besseleth.cli paste`
 (reads stdin, or `--text`/`--url`), or force a specific source with
@@ -427,11 +427,16 @@ point to open its source.
 ## Papers table (filter by date, org, modality, therapeutic target, novelty)
 
 Unlike the weekly report (a rolling snapshot of what's new), the
-dashboard's **Papers** tab is a standing index of every arXiv/papers/
-news/blog item besseleth has ever fetched, filterable and sortable. A
-`papers`-sourced item (published, non-arXiv) also carries **Authors**
-and **Citations** columns straight from OpenAlex — not LLM-derived, so
-they're exact — and "Citations (highest)" is a Sort by option, for
+dashboard's **Papers** tab is a standing index of every papers/news/blog
+item besseleth has ever fetched, filterable and sortable. `papers`
+covers both feeds — arXiv preprints and OpenAlex-indexed published
+papers — as one source, since to a reader they're the same thing: a
+research paper, just via two complementary feeds with different
+tradeoffs (see the intro bullets above). An OpenAlex-sourced item
+carries **Authors** and **Citations** columns straight from the API —
+not LLM-derived, so they're exact; an arXiv-sourced one shows "citations
+unknown" instead (OpenAlex doesn't track preprints' citations) rather
+than a misleading 0. "Citations (highest)" is a Sort by option, for
 ranking by actual impact rather than recency. After each fetch,
 besseleth asks the local LLM to tag every new item with:
 

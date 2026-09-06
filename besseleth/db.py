@@ -198,6 +198,14 @@ class DB:
             if col not in existing:
                 self.conn.execute(f"ALTER TABLE companies ADD COLUMN {col} {sqltype}")
 
+        # arXiv preprints and OpenAlex-indexed published papers used to be
+        # two separate sources ("arxiv" vs "papers") — now one, since to a
+        # reader they're the same thing (research papers) via two feeds
+        # with different tradeoffs. Idempotent (matches zero rows after
+        # the first run on a given DB) so it's cheap to just run on every
+        # open rather than gating it behind a one-time flag.
+        self.conn.execute("UPDATE items SET source = 'papers' WHERE source = 'arxiv'")
+
     def close(self):
         self.conn.close()
 

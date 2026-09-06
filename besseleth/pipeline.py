@@ -23,9 +23,7 @@ from .dedupe import merge_near_duplicates
 from .enrich import enrich_items
 from .feeds_store import load_feeds
 
-SOURCES = [
-    "arxiv", "papers", "news", "blog", "conference", "conference_news", "event", "social", "linkedin", "clip",
-]
+SOURCES = ["papers", "news", "blog", "conference", "conference_news", "event", "social", "linkedin", "clip"]
 
 
 def _days_back(configured: int, since: date | None) -> int:
@@ -44,6 +42,12 @@ def fetch_all(config: Config, db: DB, since: date | None = None) -> dict[str, li
     setup, or after being away for a while."""
     results: dict[str, list[Item]] = {s: [] for s in SOURCES}
 
+    # arXiv (preprints, same-day freshness) and OpenAlex (published
+    # papers, has citation counts, but indexes with a real lag — days to
+    # weeks behind actual publication) both feed the single "papers"
+    # bucket: to you these are the same thing (research papers), just
+    # from two complementary feeds with different tradeoffs, not two
+    # separate report sections to compare.
     arxiv_cfg = config.source("arxiv")
     if arxiv_cfg.get("enabled"):
         print("[pipeline] Fetching arXiv...")
@@ -52,17 +56,17 @@ def fetch_all(config: Config, db: DB, since: date | None = None) -> dict[str, li
             days_back=_days_back(arxiv_cfg.get("days_back", 8), since),
             max_results_per_keyword=arxiv_cfg.get("max_results_per_keyword", 15),
         )
-        results["arxiv"] = _dedupe_and_store(items, db)
+        results["papers"] += _dedupe_and_store(items, db)
 
     papers_cfg = config.source("papers")
     if papers_cfg.get("enabled"):
-        print("[pipeline] Fetching published papers (OpenAlex, non-arXiv)...")
+        print("[pipeline] Fetching published papers (OpenAlex)...")
         items = openalex_scraper.fetch(
             config,
             days_back=_days_back(papers_cfg.get("days_back", 8), since),
             max_results_per_keyword=papers_cfg.get("max_results_per_keyword", 15),
         )
-        results["papers"] = _dedupe_and_store(items, db)
+        results["papers"] += _dedupe_and_store(items, db)
 
     # User-submitted feeds (the dashboard's Feeds tab) are additional
     # sources_.news/blogs feed URLs, merged in here rather than written
@@ -211,17 +215,22 @@ def generate_weekly_report(config: Config, db: DB) -> str:
     report_cfg = config.report
     max_n = report_cfg.get("max_items_per_section", 12)
 
-    # Ranked by citation_count (highest first) rather than recency, same
-    # as arXiv/news/etc. are — a paper with real citations is more worth
-    # surfacing than a newer, uncited one; ties (including all-None, for
-    # a paper OpenAlex hasn't indexed citations for yet) keep published_at
-    # order via the stable sort.
+    # Ranked by citation_count (highest first), not recency — a paper
+    # with real citations is more worth surfacing than an uncited one.
+    # Ties (including all-None, since an arXiv preprint never has a
+    # citation count — OpenAlex only indexes published papers) keep
+    # published_at order via the stable sort, so within "0/unknown
+    # citations" the newest still comes first. Caveat worth knowing: a
+    # brand-new arXiv preprint always starts at 0/unknown citations, so
+    # a week with lots of well-cited published papers can crowd fresh
+    # preprints out of the top max_n entirely — say if you want a
+    # blended ranking (guaranteed room for the newest few regardless of
+    # citations) instead of pure citation ranking.
     papers_items = sorted(items_by_source["papers"], key=lambda i: i.citation_count or 0, reverse=True)[:max_n]
 
     report_id, markdown = report_mod.build_report(
         industry_name=config.industry_name,
         days_back=days_back,
-        arxiv_items=items_by_source["arxiv"][:max_n],
         papers_items=papers_items,
         news_items=items_by_source["news"][:max_n],
         blog_items=items_by_source["blog"][:max_n],

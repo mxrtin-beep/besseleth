@@ -222,7 +222,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         try:
             rows = db.papers(
                 config.raw.get("enrichment", {}).get(
-                    "sources", ["arxiv", "papers", "news", "blog", "linkedin", "social", "event", "clip"]
+                    "sources", ["papers", "news", "blog", "linkedin", "social", "event", "clip"]
                 )
             )
         finally:

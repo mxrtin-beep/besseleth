@@ -63,6 +63,11 @@ def _get(url: str, params: dict) -> dict | None:
         _last_request_at = time.monotonic()
         resp.raise_for_status()
         return resp.json()
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            return None  # a plain "not found" (e.g. OpenAlex has no record for this DOI) — expected, not worth logging
+        print(f"[web_lookup] request to {url} failed: {e}")
+        return None
     except (requests.RequestException, ValueError) as e:
         print(f"[web_lookup] request to {url} failed: {e}")
         return None
