@@ -745,9 +745,25 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         except UnicodeDecodeError:
             return jsonify({"ok": False, "message": "Couldn't read that file as text — is it the CSV LinkedIn emailed you?"}), 400
         # Your LinkedIn export is your whole network, not just neurotech —
-        # only import connections whose company/title look on-topic, using
-        # the same keyword list scrapers use to judge relevance.
-        added = import_linkedin_csv(config.contacts_path, text, keywords=config.keywords)
+        # only import connections whose company/title look on-topic. Uses
+        # both the industry keyword list (for a title like "EEG Research
+        # Scientist" at an otherwise generic-sounding employer) AND every
+        # org name besseleth has already seen in your actual feeds (so a
+        # company like "Neuralink" gets recognized even though its name
+        # doesn't literally contain a keyword phrase like "neurotechnology").
+        from ..trends.company_store import load_companies
+
+        db = DB(config.db_path)
+        try:
+            known_orgs = db.distinct_orgs()
+        finally:
+            db.close()
+        # Also fold in the Trends tab's curated company list (companies
+        # you're tracking funding/stock for) — a flagship name like
+        # "Neuralink" or "Blackrock Neurotech" is very likely already
+        # there even if no scraped item happens to have mentioned it yet.
+        known_orgs += [c.name for c in load_companies(config.db_path, config.companies_path)]
+        added = import_linkedin_csv(config.contacts_path, text, keywords=config.keywords, known_orgs=known_orgs)
         if added == 0:
             return jsonify({
                 "ok": True, "added": 0,

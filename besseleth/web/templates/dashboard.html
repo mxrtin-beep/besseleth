@@ -817,12 +817,13 @@ function renderContacts() {
     return;
   }
   table.innerHTML = `
-    <thead><tr><th>Name</th><th>Email(s)</th><th>Workplaces</th><th>Schools</th><th>Relationship</th><th>Notes</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Email(s)</th><th>Company</th><th>Job title</th><th>Schools</th><th>Relationship</th><th>Notes</th><th></th></tr></thead>
     <tbody>${contacts.map(c => `
       <tr>
         <td>${c.linkedin_url ? `<a href="${c.linkedin_url}" target="_blank" rel="noopener">${c.name}</a>` : c.name}</td>
         <td>${(c.emails || []).join(', ')}</td>
-        <td>${(c.workplaces || []).map(w => w.role ? `${w.company} (${w.role})` : w.company).join(', ')}</td>
+        <td>${(c.workplaces || []).map(w => w.company).join(', ')}</td>
+        <td>${(c.workplaces || []).map(w => w.role).filter(r => r).join(', ')}</td>
         <td>${(c.schools || []).map(s => s.level ? `${s.name} (${s.level})` : s.name).join(', ')}</td>
         <td>${c.relationship || ''}</td>
         <td>${c.notes || ''}</td>

@@ -196,24 +196,47 @@ def parse_linkedin_connections_csv(csv_text: str) -> list[Contact]:
     return contacts
 
 
-def _is_relevant(contact: Contact, keywords: list[str]) -> bool:
+def _is_relevant(contact: Contact, keywords: list[str], known_orgs: list[str]) -> bool:
     """A LinkedIn export is your whole network, not just the neurotech
-    corner of it — only import connections whose company/title actually
-    look like this industry, matched against the same keyword list
-    scrapers use to decide whether an article is on-topic (see
-    text_matches_keywords). No keywords configured -> don't filter (an
-    empty allowlist would silently import nobody and look like a bug)."""
-    if not keywords:
+    corner of it — only import connections who look on-topic. Two
+    independent checks, either one is enough:
+
+      - `keywords` (the same industry.keywords list scrapers use) matched
+        against their company+title text — catches a title like "EEG
+        Research Scientist" even at a company whose name says nothing
+        about neurotech.
+      - `known_orgs` (every org name besseleth has already seen and
+        enriched from your actual feeds — news/papers/etc.) matched
+        against their company name — catches a company like "Neuralink"
+        or "Blackrock Neurotech" whose name never literally contains one
+        of your industry keyword phrases (keywords are topic phrases like
+        "brain-computer interface", not a company gazetteer, so relying
+        on them alone silently drops exactly the contacts you'd most want
+        imported: people at the industry's own companies).
+
+    No keywords AND no known_orgs -> don't filter (an empty allowlist
+    would silently import nobody and look like a bug)."""
+    if not keywords and not known_orgs:
         return True
     text = " ".join(f"{w.get('company', '')} {w.get('role', '')}" for w in contact.workplaces)
-    return bool(text_matches_keywords(text, keywords))
+    if keywords and text_matches_keywords(text, keywords):
+        return True
+    if known_orgs:
+        companies = [w.get("company", "").strip().lower() for w in contact.workplaces if w.get("company")]
+        orgs_lower = [o.strip().lower() for o in known_orgs if o]
+        for company in companies:
+            if any(company == org or company in org or org in company for org in orgs_lower):
+                return True
+    return False
 
 
-def import_linkedin_csv(path: str | Path, csv_text: str, keywords: list[str] | None = None) -> int:
+def import_linkedin_csv(
+    path: str | Path, csv_text: str, keywords: list[str] | None = None, known_orgs: list[str] | None = None
+) -> int:
     """Appends every contact parsed from `csv_text` that isn't already
     present (matched by linkedin_url if both have one, else by exact
-    name) AND looks relevant to `keywords` (your company/role mentions
-    the industry) — safe to import the same export twice without
+    name) AND looks relevant per `_is_relevant` (industry keywords OR a
+    known org name) — safe to import the same export twice without
     duplicating everyone, and skips the rest of your LinkedIn network
     that has nothing to do with this industry. Returns how many new
     contacts were added."""
@@ -223,7 +246,7 @@ def import_linkedin_csv(path: str | Path, csv_text: str, keywords: list[str] | N
 
     added = 0
     for contact in parse_linkedin_connections_csv(csv_text):
-        if not _is_relevant(contact, keywords or []):
+        if not _is_relevant(contact, keywords or [], known_orgs or []):
             continue
         if contact.linkedin_url and contact.linkedin_url in existing_urls:
             continue
