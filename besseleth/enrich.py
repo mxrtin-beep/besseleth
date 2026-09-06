@@ -89,9 +89,18 @@ def ollama_status(summarizer_cfg: dict) -> tuple[bool, str]:
     return True, f"Ollama reachable at {ollama_url}, model {model!r} available."
 
 
-def _build_prompt(row, config: Config, context: str) -> str:
+def _build_prompt(row, config: Config, context: str, author_affiliations: str = "") -> str:
     metric_keys = ", ".join(f"{m['key']} ({m.get('unit', '')})" for m in config.trend_metrics if m.get("type", "numeric") == "numeric")
     categorical_keys = ", ".join(m["key"] for m in config.trend_metrics if m.get("type") == "categorical")
+
+    affiliations_block = (
+        f"\nReal author affiliation data (from OpenAlex — factual, not a guess; use it to help identify the org, "
+        f"e.g. pair an author's institution here with a lab/PI name mentioned in the item text, but still follow "
+        f'the "org" rule below — a bare institution name with no specific lab identified is still null):\n'
+        f"{author_affiliations}\n"
+        if author_affiliations
+        else ""
+    )
 
     return (
         f"Read this {row['source']} item about {config.industry_name}. Extract structured metadata as JSON with "
@@ -111,9 +120,15 @@ def _build_prompt(row, config: Config, context: str) -> str:
         '"Academic neuroscience lab" — null if "org" is null\n'
         '  "org_type": one of "industry", "academic", "government", "nonprofit", or "unknown"\n'
         '  "modality": the technical approach/category, e.g. "EEG", "ECoG", "CNS implant", "PNS implant", "EMG", '
-        '"fMRI", "fNIRS", or another short label if none fit; "unknown" if unclear\n'
+        '"fMRI", "fNIRS", or another short label if none fit. Make your best-effort call from what the text '
+        'actually describes (the device/method used) even if that word never appears verbatim — e.g. "electrodes '
+        'implanted in the motor cortex" is "CNS implant" even without that exact phrase. Only "unknown" if the '
+        "text genuinely gives no indication of the technical approach at all, not merely because it isn't spelled "
+        "out explicitly\n"
         '  "therapeutic_target": what it addresses, e.g. "motor", "speech", "vision", "hearing", "memory", '
-        '"mood/psychiatric", "epilepsy", "pain", "other", or "unknown" if not applicable/unclear\n'
+        '"mood/psychiatric", "epilepsy", "pain", "other". Same standard as modality — infer from what\'s described '
+        '(a paralyzed patient regaining hand control is "motor") rather than requiring the word itself; "unknown" '
+        "only if truly not applicable/indeterminable\n"
         '  "novelty_score": integer 1-5 — how surprising/novel this is COMPARED TO the other recent items on the '
         "same topic listed below (1 = incremental/expected, 5 = a genuine surprise or breakthrough relative to them)\n"
         '  "novelty_rationale": one concise sentence justifying the novelty_score\n'
@@ -130,7 +145,8 @@ def _build_prompt(row, config: Config, context: str) -> str:
         'string or null} — funding_total_usd/last_funding_round/last_funding_date if this item reports a specific '
         'funding amount/round for "org"; ipo_date/stock_exchange only if this item reports "org" actually going '
         'public (an IPO that happened or a completed direct listing — e.g. "NASDAQ: XYZ" starts trading), NOT a '
-        'mere announcement/rumor of a planned future IPO — use {} if none of this applies\n\n'
+        'mere announcement/rumor of a planned future IPO — use {} if none of this applies\n'
+        f"{affiliations_block}\n"
         f"Item title: {row['title']}\nItem text: {(row['summary'] or '')[:1500]}\n\n"
         f"Other recent items on the same topic (for novelty comparison):\n{context}\n\n"
         "Respond with ONLY the JSON object, no other text."
@@ -396,6 +412,35 @@ def _canonicalize_existing_orgs(db: DB) -> int:
     return renamed
 
 
+_ARXIV_ID_RE = re.compile(r"arxiv\.org/abs/([\w.\-/]+?)(?:v\d+)?/?$", re.IGNORECASE)
+
+
+def _arxiv_id_from_url(url: str) -> str | None:
+    match = _ARXIV_ID_RE.search(url or "")
+    return match.group(1) if match else None
+
+
+def _author_affiliations_block(row) -> str:
+    """Real author-institution data for an arXiv item (see
+    web_lookup.lookup_arxiv_authorships's docstring for why this is a
+    lookup, not something left to the LLM to recall) — "" for a non-
+    arXiv item, a paper OpenAlex doesn't have, or on any lookup failure,
+    so this is always safe to splice into the prompt unconditionally."""
+    if row["source"] != "arxiv":
+        return ""
+    arxiv_id = _arxiv_id_from_url(row["url"] or "")
+    if not arxiv_id:
+        return ""
+    authorships = web_lookup.lookup_arxiv_authorships(arxiv_id)
+    if not authorships:
+        return ""
+    lines = [
+        f"- {name}: {', '.join(institutions)}" if institutions else f"- {name}: (institution not on record)"
+        for name, institutions in authorships
+    ]
+    return "\n".join(lines)
+
+
 def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
     """Returns True if enrichment was saved (success or graceful
     'unknown' fallback), False if it should be retried next time."""
@@ -403,8 +448,9 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
         row["source"], (row["matched_keywords"] or "").split(","), exclude_id=row["id"]
     )
     context = "\n".join(f"- {r['title']}: {(r['summary'] or '')[:200]}" for r in context_rows) or "(no similar recent items yet)"
+    author_affiliations = _author_affiliations_block(row)
 
-    prompt = _build_prompt(row, config, context)
+    prompt = _build_prompt(row, config, context, author_affiliations)
     result = summarizer_mod._ollama_generate(
         prompt,
         summarizer_cfg.get("ollama_url", "http://localhost:11434"),

@@ -430,7 +430,18 @@ dashboard's **Papers** tab is a standing index of every arXiv/news/blog
 item besseleth has ever fetched, filterable and sortable. After each
 fetch, besseleth asks the local LLM to tag every new item with:
 
-- **org** — the company/lab/institution the item is about
+- **org** — the company/lab/institution the item is about. For an arXiv
+  item, besseleth also looks up its authors' real institutional
+  affiliations via [OpenAlex](https://openalex.org) (free, keyless — no
+  LLM guessing involved) and hands that to the LLM as factual context
+  alongside the abstract, to help it pair a lab/PI named in the text with
+  the right institution. This only works for papers arXiv has assigned a
+  DOI to (every preprint since Feb 2022) and only when OpenAlex has the
+  affiliation on record — it's a real improvement on the null rate, not
+  a fix for every paper: an abstract that never names a specific
+  lab/PI at all still (correctly) resolves to a null org, same as
+  before — see "Why is org/modality/therapeutic_target often
+  null/unknown?" below.
 - **org_type** — industry / academic / government / nonprofit / unknown
 - **modality** — EEG, ECoG, CNS implant, PNS implant, EMG, fMRI, fNIRS,
   or another short label if none fit
@@ -441,6 +452,20 @@ fetch, besseleth asks the local LLM to tag every new item with:
   similar items from the DB and includes them in the prompt so the score
   is relative, not just "does this sound impressive in isolation"),
   with a one-sentence rationale shown on hover
+
+**Why is org/modality/therapeutic_target often null/unknown?** The LLM
+only ever sees the item's own title + text (abstract, for arXiv) — never
+the full PDF, and (arXiv aside) never a web search. A `null` org usually
+means the text genuinely never names a specific lab/PI, not a failed
+extraction — that's a deliberate "null over a wrong guess" design choice
+throughout enrichment: an author's institution isn't enough on its own
+either (a bare university name is still null; besseleth wants the
+specific lab, not "Stanford"). `unknown` modality/therapeutic_target is
+usually more fixable — the prompt asks for a best-effort call from what's
+described even if the exact word never appears, but a smaller/weaker
+local model tends to play it safe and bail to "unknown" anyway; a
+stronger `summarizer.model` (if your hardware can run one) generally
+does noticeably better at this than prompt wording alone can.
 
 The automatic pass after each fetch is bounded (`enrichment.max_items_per_run`,
 default 10) so one fetch cycle can't trigger unbounded LLM calls — it
