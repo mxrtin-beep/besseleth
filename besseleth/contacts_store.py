@@ -209,50 +209,24 @@ def _normalize_org(name: str) -> str:
     return _NON_ALNUM_RE.sub("", _ORG_SUFFIX_RE.sub("", name.lower()))
 
 
-def _stem_matches(text: str, keywords: list[str], min_len: int = 5) -> bool:
-    """A looser companion to text_matches_keywords, for a company/title
-    field specifically rather than full article text: matches on a
-    shared word STEM (e.g. "neuro") rather than requiring one of your
-    full keyword phrases verbatim. Without this, a real neurotech title
-    like "Neuroengineer" or a company like "Axo Neurotech" gets missed
-    just because "neurotechnology"/"neural implant"/etc. never appear
-    verbatim — keywords are written as full phrases for article-body
-    matching (where false positives from a single common root are a real
-    risk across a whole paragraph), but a job title/company name is
-    short and dense enough that a shared 5+ letter root ("neuro...") is
-    already a meaningful, low-noise signal on its own."""
-    words = re.findall(r"[a-z]+", text.lower())
-    kw_words = {w for kw in keywords for w in re.findall(r"[a-z]+", kw.lower()) if len(w) >= min_len}
-    for w in words:
-        if len(w) < min_len:
-            continue
-        for kw_w in kw_words:
-            if _common_prefix_len(w, kw_w) >= min_len:
-                return True
-    return False
-
-
-def _common_prefix_len(a: str, b: str) -> int:
-    n = 0
-    for ca, cb in zip(a, b):
-        if ca != cb:
-            break
-        n += 1
-    return n
-
-
 def _is_relevant(contact: Contact, keywords: list[str], known_orgs: list[str]) -> bool:
     """A LinkedIn export is your whole network, not just the neurotech
-    corner of it — only import connections who look on-topic. Three
-    independent checks, any one is enough:
+    corner of it — only import connections who look on-topic. Two
+    independent checks, either is enough:
 
       - `keywords` matched against their company+title text, same as an
         article body (see text_matches_keywords) — catches a title like
         "EEG Research Scientist" even at a company whose name says
-        nothing about neurotech.
-      - A shared word stem with `keywords` (see _stem_matches) — catches
-        "Neuroengineer" / "Axo Neurotech", which the phrase-level check
-        above misses (neither literally contains a full keyword phrase).
+        nothing about neurotech. Requires one of your keyword PHRASES
+        verbatim — deliberately precision-over-recall: an earlier looser
+        version also matched on a shared word stem (e.g. "neuro...", to
+        catch "Neuroengineer"/"Axo Neurotech" without a full phrase) but
+        that same looseness is what let generic biomedical/academic
+        neighbors through — "neuroscience", "neurology", a random
+        university's "neuro" building/department, etc. A real match this
+        strict misses (an unusual title at a small company with an
+        unlisted name) is a fine trade for not re-importing your whole
+        adjacent-field network; add anyone missed by hand.
       - `known_orgs` matched by NORMALIZED EXACT identity (not substring
         containment — see _normalize_org) against their company name.
         Deliberately scoped by the caller to only your manually-vetted
@@ -271,7 +245,7 @@ def _is_relevant(contact: Contact, keywords: list[str], known_orgs: list[str]) -
     if not keywords and not known_orgs:
         return True
     text = " ".join(f"{w.get('company', '')} {w.get('role', '')}" for w in contact.workplaces)
-    if keywords and (text_matches_keywords(text, keywords) or _stem_matches(text, keywords)):
+    if keywords and text_matches_keywords(text, keywords):
         return True
     if known_orgs:
         companies = {_normalize_org(w.get("company", "")) for w in contact.workplaces if w.get("company")}
