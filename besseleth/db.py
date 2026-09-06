@@ -248,6 +248,21 @@ class DB:
         cur = self.conn.execute("SELECT 1 FROM items WHERE id = ?", (item.id,))
         if cur.fetchone():
             return False
+        # Papers-specific extra guard: arxiv_scraper and openalex_scraper
+        # each mint their own id (a different OpenAlex work, or an arXiv
+        # entry vs. its OpenAlex record, can land on the exact same
+        # landing-page URL — e.g. two OpenAlex records for the same
+        # Zenodo deposit, one per DOI version), so the id check above
+        # alone lets literal duplicates with different ids both in. A
+        # same-URL papers item already stored is always the same paper,
+        # so skip it rather than adding a second row with an identical
+        # (often broken/unhelpful, per Zenodo) link.
+        if item.source == "papers" and item.url:
+            cur = self.conn.execute(
+                "SELECT 1 FROM items WHERE source = 'papers' AND url = ?", (item.url,)
+            )
+            if cur.fetchone():
+                return False
         self.conn.execute(
             """INSERT INTO items
                (id, source, title, url, summary, published_at, fetched_at,

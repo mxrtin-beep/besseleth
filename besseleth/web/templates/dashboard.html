@@ -54,6 +54,15 @@
      (e.g. the job title) into a narrow, multi-line wrap. */
   #jobsTable { table-layout: fixed; }
   #jobsTable td { overflow-wrap: break-word; }
+  /* Resizable columns (papersTable): table-layout:fixed so a <col> width
+     actually sticks, a drag handle on each th's trailing edge, widths
+     persisted per-viewer in localStorage so they survive a reload. */
+  table.resizable { table-layout: fixed; }
+  table.resizable td { overflow-wrap: break-word; }
+  table.resizable th { position: relative; }
+  .col-resizer { position: absolute; top: 0; right: 0; width: 6px; height: 100%; cursor: col-resize;
+                 user-select: none; touch-action: none; }
+  .col-resizer:hover, .col-resizer.resizing { background: #4a90d966; }
   .metric-tags { display: flex; flex-wrap: wrap; gap: .3rem; }
   .metric-tag { display: inline-block; border: 1px solid #4a90d966; background: #4a90d914; border-radius: 999px;
                 padding: .15rem .6rem; font-size: .78rem; white-space: nowrap; }
@@ -136,6 +145,7 @@
       <div><label for="pfOrgType">Org type</label><select id="pfOrgType"><option value="">All</option></select></div>
       <div><label for="pfOrg">Org</label><select id="pfOrg"><option value="">All</option></select></div>
       <div><label for="pfModality">Modality (multi-select — matches any of your item's tags, ctrl/cmd-click for more than one)</label><select id="pfModality" multiple size="4"></select></div>
+      <div><label for="pfAuthor">Author (most prolific first — exact-string match, so "J. Smith" and "John Smith" count separately)</label><select id="pfAuthor"><option value="">All</option></select></div>
       <div><label for="pfTarget">Therapeutic target</label><select id="pfTarget"><option value="">All</option></select></div>
       <div><label for="pfNovelty">Min novelty</label><select id="pfNovelty">
         <option value="0">Any</option><option value="1">1+</option><option value="2">2+</option>
@@ -997,6 +1007,27 @@ function modalityTags(p) {
   return (p.modality || '').split(',').map(s => s.trim()).filter(s => s);
 }
 
+// authors is stored as a plain comma-separated string as returned by
+// each scraper (OpenAlex/arXiv), same shape as modality above.
+function authorList(p) {
+  return (p.authors || '').split(',').map(s => s.trim()).filter(s => s);
+}
+
+// A prolific-author dropdown, most-frequent first — deliberately exact-
+// string counting, not name standardization: "J. Smith" and "John Smith"
+// count as different people, since reliably merging author name variants
+// (shared surnames especially) isn't something worth guessing at here.
+function populateAuthorSelect(rows) {
+  const counts = new Map();
+  for (const p of rows) for (const a of authorList(p)) counts.set(a, (counts.get(a) || 0) + 1);
+  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const sel = document.getElementById('pfAuthor');
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All</option>' +
+    sorted.map(([name, n]) => `<option value="${name}">${name} (${n})</option>`).join('');
+  if (counts.has(current)) sel.value = current;
+}
+
 function populateSelect(id, values) {
   const sel = document.getElementById(id);
   const current = sel.value;
@@ -1019,8 +1050,9 @@ async function loadPapers() {
   populateSelect('pfOrgType', uniqueSorted(papers.map(p => p.org_type)));
   populateSelect('pfOrg', uniqueSorted(papers.map(p => p.org)));
   populateMultiSelect('pfModality', uniqueSorted(papers.flatMap(modalityTags)));
+  populateAuthorSelect(papers);
   populateSelect('pfTarget', uniqueSorted(papers.map(p => p.therapeutic_target)));
-  ['pfFrom', 'pfTo', 'pfSource', 'pfOrgType', 'pfOrg', 'pfModality', 'pfTarget', 'pfNovelty', 'pfSort']
+  ['pfFrom', 'pfTo', 'pfSource', 'pfOrgType', 'pfOrg', 'pfModality', 'pfAuthor', 'pfTarget', 'pfNovelty', 'pfSort']
     .forEach(id => document.getElementById(id).onchange = renderPapers);
   renderPapers();
 }
@@ -1176,6 +1208,48 @@ function novelBadge(score) {
   return `<span class="metric-tag" style="background:${colors[score] || '#8886'}">${score}/5</span>`;
 }
 
+// Drag-to-resize columns for a fixed-layout table. Widths are stored per
+// <col data-col="..."> and persisted to localStorage under `tableId` so
+// they survive a reload — per-viewer/per-browser only, same as any other
+// localStorage use here, nothing shared or sent anywhere.
+function makeTableResizable(table, tableId) {
+  const cols = table.querySelectorAll('colgroup col');
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(`colwidths:${tableId}`) || '{}'); } catch (e) {}
+  cols.forEach(col => {
+    const w = saved[col.dataset.col];
+    if (w) col.style.width = `${w}px`;
+  });
+
+  const ths = table.querySelectorAll('thead th');
+  ths.forEach((th, i) => {
+    if (i === ths.length - 1) return; // no handle on the trailing (delete) column
+    const handle = document.createElement('div');
+    handle.className = 'col-resizer';
+    th.appendChild(handle);
+    handle.addEventListener('mousedown', (ev) => {
+      ev.preventDefault();
+      const col = cols[i];
+      const startX = ev.clientX;
+      const startWidth = th.getBoundingClientRect().width;
+      handle.classList.add('resizing');
+      function onMove(e) {
+        const newWidth = Math.max(40, startWidth + (e.clientX - startX));
+        col.style.width = `${newWidth}px`;
+      }
+      function onUp() {
+        handle.classList.remove('resizing');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        saved[col.dataset.col] = parseInt(col.style.width, 10);
+        try { localStorage.setItem(`colwidths:${tableId}`, JSON.stringify(saved)); } catch (e) {}
+      }
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  });
+}
+
 let currentPapersRows = [];
 
 function renderPapers() {
@@ -1185,6 +1259,7 @@ function renderPapers() {
   const orgType = document.getElementById('pfOrgType').value;
   const org = document.getElementById('pfOrg').value;
   const modalitySelected = Array.from(document.getElementById('pfModality').selectedOptions).map(o => o.value);
+  const author = document.getElementById('pfAuthor').value;
   const target = document.getElementById('pfTarget').value;
   const minNovelty = parseInt(document.getElementById('pfNovelty').value, 10);
   const sortBy = document.getElementById('pfSort').value;
@@ -1197,6 +1272,7 @@ function renderPapers() {
     if (orgType && p.org_type !== orgType) return false;
     if (org && p.org !== org) return false;
     if (modalitySelected.length && !modalityTags(p).some(t => modalitySelected.includes(t))) return false;
+    if (author && !authorList(p).includes(author)) return false;
     if (target && p.therapeutic_target !== target) return false;
     if (minNovelty === 5 && p.novelty_score !== 5) return false;
     if (minNovelty > 0 && minNovelty < 5 && (p.novelty_score || 0) < minNovelty) return false;
@@ -1214,8 +1290,23 @@ function renderPapers() {
   document.getElementById('papersCount').textContent =
     `${rows.length} of ${papers.length} items` + (papers.some(p => !p.enriched) ? ' (some not yet enriched)' : '');
 
+  // Authors condensed to "First Author et al." — the full comma-separated
+  // list is still there in the title tooltip and in the CSV export, this
+  // is just what saves the row from becoming a wall of names. Click it to
+  // filter the table down to that first author (a shortcut for something
+  // you could also do via the Author dropdown above).
+  function authorCell(p) {
+    const names = authorList(p);
+    if (!names.length) return '';
+    const shown = names.length > 1 ? `${names[0]} et al. (${names.length})` : names[0];
+    return `<span class="author-cell" data-author="${names[0]}" title="${names.join(', ')}" style="cursor:pointer; text-decoration:underline dotted;">${shown}</span>`;
+  }
+
+  const cols = ['date', 'title', 'source', 'authors', 'citations', 'org', 'org_type', 'modality', 'target', 'novelty', 'del'];
   const table = document.getElementById('papersTable');
+  table.className = 'datatable resizable';
   table.innerHTML = `
+    <colgroup>${cols.map(c => `<col data-col="${c}">`).join('')}</colgroup>
     <thead><tr><th>Date</th><th>Title</th><th>Source</th><th>Authors</th><th>Citations</th><th>Org</th>
       <th>Org type</th><th>Modality</th><th>Target</th><th>Novelty</th><th></th></tr></thead>
     <tbody>${rows.map(p => `
@@ -1223,7 +1314,7 @@ function renderPapers() {
         <td>${(p.published_at || '').slice(0, 10)}</td>
         <td>${p.title}</td>
         <td>${p.url ? `<a href="${p.url}" target="_blank" rel="noopener">${p.source}</a>` : p.source}</td>
-        <td>${p.authors || ''}</td>
+        <td>${authorCell(p)}</td>
         <td>${p.citation_count ?? ''}</td>
         <td>${p.org || (p.enriched ? '—' : '<span class="hint">pending</span>')}</td>
         <td>${p.org_type || ''}</td>
@@ -1241,6 +1332,15 @@ function renderPapers() {
       renderPapers();
     };
   });
+
+  table.querySelectorAll('[data-author]').forEach(el => {
+    el.onclick = () => {
+      document.getElementById('pfAuthor').value = el.dataset.author;
+      renderPapers();
+    };
+  });
+
+  makeTableResizable(table, 'papersTable');
 }
 
 function csvEscape(value) {
