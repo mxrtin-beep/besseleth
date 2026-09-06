@@ -1142,10 +1142,16 @@ def enrich_items_detailed(
     # text, so those don't just stay unlocated forever. The per-run
     # budget (enrichment.max_org_lookups_per_run, default 8) is sized for
     # a normal interactive click, nowhere near enough to work through
-    # hundreds of orgs in one go — raised substantially for
-    # run_until_done, since "enrich everything" implies "look up
-    # everything you can too," not just the item-extraction pass.
-    location_lookup_cap = 200 if run_until_done else None
+    # hundreds of orgs in one go — raised for run_until_done (since
+    # "enrich everything" implies "look up everything you can too," not
+    # just the item-extraction pass), but configurable and modest by
+    # default: each lookup is a web request (+ an LLM call for tier 3),
+    # and on a machine already tight on RAM (Ollama holding a model
+    # resident, a browser open) hundreds of them back-to-back is real
+    # sustained load, not free just because no single one is large.
+    # Lower enrichment.run_until_done_location_lookup_cap if this run is
+    # too heavy for your machine.
+    location_lookup_cap = cfg.get("run_until_done_location_lookup_cap", 50) if run_until_done else None
     locations_filled = _backfill_org_locations(config, db, max_lookups_override=location_lookup_cap)
     contact_locations_filled = _backfill_contact_locations(config, db, max_lookups_override=location_lookup_cap)
     location_note = (

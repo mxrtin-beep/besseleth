@@ -576,8 +576,25 @@ so orgs stuck in a stale cooldown from before get a real check
 immediately rather than waiting out 30 days. Also, `Enrich everything`
 (run_until_done) raises the per-run location-lookup budget from
 `enrichment.max_org_lookups_per_run`'s interactive default (8 — sized
-for one click, not hundreds of orgs) to 200, since "enrich everything"
-implies looking up locations for everything you can too.
+for one click, not hundreds of orgs) to
+`enrichment.run_until_done_location_lookup_cap` (default 50), since
+"enrich everything" implies looking up locations for everything you can
+too — lower that setting if a full run is straining your machine (each
+lookup is a web request, and one tier is an LLM call, so hundreds of
+them back-to-back on top of Ollama already holding a model resident is
+real sustained memory/CPU pressure even though no single lookup is
+large).
+
+**If "Enrich everything" runs your machine out of memory**: this is
+usually overall system memory pressure (Ollama's resident model + a
+long-running enrich pass + everything else open), not one runaway leak.
+Levers, in order of impact: lower
+`enrichment.run_until_done_location_lookup_cap` (above); close other
+memory-heavy apps (especially the browser) while it runs; or just don't
+use "Enrich everything" for a very large backlog — plain "Enrich now"
+(no cap at all, but only the last `enrichment.default_days_back` days,
+not your whole history) repeated over several days as new items arrive
+is much lighter per run.
 
 ## Map
 

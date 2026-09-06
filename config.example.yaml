@@ -248,6 +248,16 @@ enrichment:
   # miss isn't re-queried every time.
   max_org_lookups_per_run: 8
   location_recheck_days: 30
+  # Same budget, but for "Enrich everything"/`enrich --all` specifically
+  # (which otherwise implies looking up every org's location too, not
+  # just extracting item metadata) — much higher than the interactive
+  # default above since there's a real backlog to work through in one
+  # go, but each lookup is a web request (+ an LLM call for the last
+  # tier), and hundreds of them back-to-back is sustained load on a
+  # machine already tight on RAM (Ollama holding a model resident, a
+  # browser open) even though no single one is large. Lower this if a
+  # full enrich run is straining your machine.
+  run_until_done_location_lookup_cap: 50
 
 summarizer:
   # Uses a local LLM via Ollama (https://ollama.ai) — free, runs offline.
