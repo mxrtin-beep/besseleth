@@ -159,6 +159,7 @@
     <p class="hint" id="papersCount"></p>
     <p><button class="btn" id="exportPapersBtn">Export CSV</button></p>
     <table class="datatable" id="papersTable"></table>
+    <p><button class="btn" id="papersShowMoreBtn" style="display:none">Show more</button></p>
   </div>
 
   <div id="enrichLogPane" style="display:none">
@@ -1285,8 +1286,10 @@ function makeTableResizable(table, tableId, defaults) {
 }
 
 let currentPapersRows = [];
+let papersPageSize = 50; // how many filtered rows are actually rendered into the table right now
 
-function renderPapers() {
+function renderPapers(resetPage = true) {
+  if (resetPage) papersPageSize = 50; // any filter/sort change starts back at the top, not wherever "Show more" left off
   const from = document.getElementById('pfFrom').value;
   const to = document.getElementById('pfTo').value;
   const source = document.getElementById('pfSource').value;
@@ -1319,10 +1322,18 @@ function renderPapers() {
     return (b.published_at || '').localeCompare(a.published_at || '');
   });
 
-  currentPapersRows = rows;
+  currentPapersRows = rows; // full filtered set — CSV export always exports everything matching the filters, not just the visible page
 
+  const visible = rows.slice(0, papersPageSize);
+  const remaining = rows.length - visible.length;
   document.getElementById('papersCount').textContent =
-    `${rows.length} of ${papers.length} items` + (papers.some(p => !p.enriched) ? ' (some not yet enriched)' : '');
+    (remaining > 0 ? `Showing ${visible.length} of ${rows.length} filtered (${papers.length} total items)` : `${rows.length} of ${papers.length} items`)
+    + (papers.some(p => !p.enriched) ? ' (some not yet enriched)' : '');
+  const moreBtn = document.getElementById('papersShowMoreBtn');
+  if (moreBtn) {
+    moreBtn.style.display = remaining > 0 ? '' : 'none';
+    moreBtn.textContent = `Show more (${Math.min(remaining, 50)} of ${remaining} remaining)`;
+  }
 
   // Authors condensed to "First Author et al." — the full comma-separated
   // list is still there in the title tooltip and in the CSV export, this
@@ -1341,7 +1352,7 @@ function renderPapers() {
   table.innerHTML = `
     <thead><tr><th>Date</th><th>Title</th><th>Source</th><th>Authors</th><th>Citations</th><th>Org</th>
       <th>Org type</th><th>Modality</th><th>Target</th><th>Novelty</th><th></th></tr></thead>
-    <tbody>${rows.map(p => `
+    <tbody>${visible.map(p => `
       <tr data-paper-row="${p.id}">
         <td>${(p.published_at || '').slice(0, 10)}</td>
         <td>${p.title}</td>
@@ -1382,6 +1393,11 @@ function csvEscape(value) {
   const s = String(value ?? '');
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
+
+document.getElementById('papersShowMoreBtn').onclick = () => {
+  papersPageSize += 50;
+  renderPapers(false); // false: keep the page size we just grew, don't reset back to 50
+};
 
 document.getElementById('exportPapersBtn').onclick = () => {
   const columns = [
