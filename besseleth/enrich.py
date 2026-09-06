@@ -306,16 +306,33 @@ def _is_bare_university(org: str) -> bool:
     return True
 
 
+_LOOKS_LIKE_A_DOMAIN_RE = re.compile(
+    r"^([a-z0-9][a-z0-9-]*\.)+(com|org|net|io|co|info|biz|news|press|tech|ai)$",
+    re.IGNORECASE,
+)
+
+
 def _looks_like_a_named_org(org: str, config: Config) -> bool:
     """False for anything that isn't naming a specific organization: the
     industry name/a keyword verbatim, an explicit non-answer ('unknown',
     'n/a', ...), a vague group description ('Chinese scientists', 'the
     researchers'), one of besseleth's own configured news/blog feed
     sources (e.g. "Tech Times", "36Kr", "bioengineer.org") — those are
-    who reported the story, not who it's about — or a bare university/
-    college name with no specific lab named (see _is_bare_university).
-    All prompted against directly too (see _build_prompt) — this is the
-    defensive backstop for when the LLM ignores that instruction
+    who reported the story, not who it's about — a bare university/
+    college name with no specific lab named (see _is_bare_university), or
+    a bare domain-shaped string ("bioengineer.org", "techtimes.com").
+
+    That last check matters beyond the configured-feed list above: a news
+    item reached via an aggregator/search feed (Google News search,
+    NewsAPI) comes from a publisher that was never itself configured
+    anywhere, so _known_publisher_names has no way to know it — this
+    catches the common failure mode (the LLM naming the outlet, not the
+    subject) on shape alone, independent of what's configured. A real
+    org's name is essentially never written as a bare "word.tld" string
+    in running prose (a company styled "x.ai" gets referred to as "xAI"
+    in text, not literally "x.ai"), so the false-positive risk here is
+    low. All prompted against directly too (see _build_prompt) — this is
+    the defensive backstop for when the LLM ignores that instruction
     anyway."""
     normalized = org.strip().lower()
     if not normalized:
@@ -328,6 +345,8 @@ def _looks_like_a_named_org(org: str, config: Config) -> bool:
     if normalized in _COUNTRIES or _COUNTRY_POSSESSIVE_RE.match(org.strip()):
         return False
     if _is_bare_university(org):
+        return False
+    if _LOOKS_LIKE_A_DOMAIN_RE.match(org.strip()):
         return False
     publisher_names = _known_publisher_names(config)
     if normalized in publisher_names or _squash(org) in publisher_names:
@@ -430,6 +449,22 @@ def _canonicalize_new_org(org: str, db: DB) -> str:
     return org
 
 
+def _self_referential_org_ids(db: DB) -> list[str]:
+    """Retroactive counterpart to the self-referential-hostname check in
+    _enrich_one (see its comment): item ids whose stored `org` squashes to
+    the same base name as their OWN url's hostname — org="36Kr" on an
+    item from 36kr.com, say. Unlike the industry-name/domain-shape checks
+    in _looks_like_a_named_org, this can't be swept by org name alone
+    (the same org string could be legitimate on a different item), so it
+    has to look at each item's own url."""
+    ids = []
+    for row in db.items_with_org():
+        host_base = _hostname(row["url"] or "").split(".")[0]
+        if host_base and _squash(row["org"]) == _squash(host_base):
+            ids.append(row["id"])
+    return ids
+
+
 def _canonicalize_existing_orgs(db: DB) -> int:
     """Retroactive sweep: clusters every currently-stored org by the same
     normalize-then-squash equivalence as _canonicalize_new_org() — so
@@ -524,6 +559,15 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
 
     org = data.get("org") or None
     if org and not _looks_like_a_named_org(org, config):
+        org = None
+    if org and _squash(org) == _squash(_hostname(row["url"] or "").split(".")[0]):
+        # The org the LLM named squashes to the same base name as the
+        # item's OWN url's hostname — e.g. org="36Kr" on an item from
+        # 36kr.com. This is the same "who reported it, not who it's
+        # about" mistake _known_publisher_names guards against, but
+        # catches it for a publisher reached via an aggregator/search
+        # feed (Google News search, NewsAPI) that was never itself
+        # configured anywhere, so that list has no way to know about it.
         org = None
     if org:
         org = _canonicalize_new_org(org, db)
@@ -866,12 +910,16 @@ def enrich_items_detailed(
       - force=True: re-checks items that already have enrichment too
         (oldest-checked first), instead of only ones that have never
         been enriched — for catching up already-stored data after
-        enrich.py's extraction logic improves. Ignores the day window
-        (there's no "recent" backlog here, only "all of it"), and not
-        combined with run_until_done: re-checking has no natural end
-        (the oldest-checked-first queue never runs dry — the batch you
-        just re-checked is simply the newest-checked now), so this
-        still cycles one capped batch per call, on purpose."""
+        enrich.py's extraction logic improves (a new validity rule, a
+        prompt change, ...). Ignores the day window (there's no "recent"
+        backlog here, only "all of it"); without run_until_done, cycles
+        one capped batch per call, since that queue never runs dry on
+        its own (the batch you just re-checked is simply the newest-
+        checked now, not gone). Combined with run_until_done, keeps
+        going until it's cycled through every item currently in
+        `enrichment.sources` once — bounded by a count taken at the
+        start, not "until empty" (which would never arrive) — so
+        "re-check everything" actually means everything, not one batch."""
     cfg = config.raw.get("enrichment", {}) or {}
     summarizer_cfg = config.summarizer
     backend = summarizer_cfg.get("backend", "none")
@@ -895,6 +943,11 @@ def enrich_items_detailed(
     cleared = db.clear_org_matches(invalid_orgs)
     if cleared:
         print(f"[enrich] Cleared {cleared} item(s) whose 'org' was actually the industry name/a keyword.")
+
+    self_referential = _self_referential_org_ids(db)
+    cleared_self_ref = db.clear_org_matches_by_id(self_referential)
+    if cleared_self_ref:
+        print(f"[enrich] Cleared {cleared_self_ref} item(s) whose 'org' was actually who reported the story (its own url's publisher).")
 
     renamed = _canonicalize_existing_orgs(db)
     if renamed:
@@ -949,7 +1002,12 @@ def enrich_items_detailed(
     sources = cfg.get("sources", DEFAULT_SOURCES)
     max_items = cfg.get("max_items_per_run", 20)
     default_days_back = cfg.get("default_days_back", 14)
-    keep_going = run_until_done and not force
+    keep_going = run_until_done
+    # Only meaningful for force+run_until_done — a one-time snapshot of
+    # how many items exist right now, so that combo means "one full pass
+    # over everything currently stored," not "forever" (the re-check
+    # queue has no natural empty state to stop at on its own).
+    force_pool_size = db.count_items(sources) if (force and run_until_done) else None
 
     if force:
         first_rows = db.items_to_reenrich(sources, max_items)
@@ -1022,12 +1080,15 @@ def enrich_items_detailed(
             break
         if not batch_processed:
             # Nothing in this batch actually got enriched (Ollama up, but
-            # every item errored/timed out) — unenriched_items() would keep
-            # handing back this same stuck batch forever, so stop instead
-            # of spinning. Whatever succeeded elsewhere is still kept.
+            # every item errored/timed out) — the next batch would just
+            # hand back this same stuck item(s), so stop instead of
+            # spinning. Whatever succeeded elsewhere is still kept.
             print(f"[enrich] Stopping: {len(rows)} item(s) in the last batch made no progress (see errors above).")
             break
-        rows = db.unenriched_items(sources, max_items)
+        if force_pool_size is not None and total_attempted >= force_pool_size:
+            print(f"[enrich] Stopping: completed one full pass over all {force_pool_size} item(s) in scope.")
+            break
+        rows = db.items_to_reenrich(sources, max_items) if force else db.unenriched_items(sources, max_items)
         if rows:
             print(f"[enrich] Batch done ({total_processed} so far) — {len(rows)}+ item(s) left, continuing...")
             ok, status_msg = ollama_status(summarizer_cfg)

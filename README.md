@@ -441,7 +441,18 @@ fetch, besseleth asks the local LLM to tag every new item with:
   a fix for every paper: an abstract that never names a specific
   lab/PI at all still (correctly) resolves to a null org, same as
   before — see "Why is org/modality/therapeutic_target often
-  null/unknown?" below.
+  null/unknown?" below. The opposite failure — naming who *reported* the
+  story instead of who it's about (e.g. "bioengineer.org", "36Kr" on a
+  news item from either site) — is guarded against three ways: an exact
+  match against your configured news/blog feeds' hostnames, a bare-
+  domain shape check ("word.com"/"word.org"/etc, independent of any
+  config — catches a publisher reached via an aggregator/search feed,
+  like Google News search or NewsAPI, that was never itself configured
+  anywhere), and a same-item check (the org squashes to the same base
+  name as *that specific item's own* url hostname). All three run on
+  every enrich call, including retroactively over already-stored items,
+  so existing bad rows self-correct the next time you enrich rather than
+  needing a manual fix.
 - **org_type** — industry / academic / government / nonprofit / unknown
 - **modality** — EEG, ECoG, CNS implant, PNS implant, EMG, fMRI, fNIRS,
   or another short label if none fit. **Multi-valued**: a study combining
@@ -490,7 +501,13 @@ long that takes:
 ```
 
 ...or check **Enrich everything** next to **Enrich now** on the Papers
-tab before clicking it. Requires
+tab before clicking it. Combined with **"Re-check already-enriched items
+too"** (re-running everything against a since-improved extraction rule,
+say), this does one full pass over every item currently in
+`enrichment.sources` — bounded by a count taken when the run starts, not
+"until empty" (a re-check queue has no empty state to reach on its own,
+so without that bound, checking both together used to silently fall
+back to one capped batch — fixed). Requires
 `summarizer.backend: "ollama"` to actually extract anything (Ollama
 running) — without it, items are marked `org_type: unknown` etc. rather
 than left unprocessed forever, since there's nothing more to learn

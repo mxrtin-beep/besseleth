@@ -326,6 +326,16 @@ class DB:
             params.append(limit)
         return list(self.conn.execute(q, params).fetchall())
 
+    def count_items(self, sources: list[str]) -> int:
+        """How many items exist in the given sources, period — used to
+        bound a force re-check "run until done" to one full pass over
+        everything currently stored, since that queue (oldest-checked-
+        first) never runs dry on its own the way a never-enriched queue
+        does."""
+        placeholders = ",".join("?" for _ in sources)
+        row = self.conn.execute(f"SELECT COUNT(*) FROM items WHERE source IN ({placeholders})", sources).fetchone()
+        return row[0] if row else 0
+
     def items_to_reenrich(self, sources: list[str], limit: int) -> list[sqlite3.Row]:
         """Every item in the given sources, oldest-enriched (or never
         enriched) first — for the dashboard's "re-check already-enriched
@@ -464,6 +474,25 @@ class DB:
         row instead of them accumulating as separate Orgs-table entries.
         Returns how many rows were changed."""
         cur = self.conn.execute("UPDATE items SET org = ? WHERE org = ?", (new_org, old_org))
+        self.conn.commit()
+        return cur.rowcount
+
+    def items_with_org(self) -> list[sqlite3.Row]:
+        """(id, org, url) for every item with an org set — for a per-item
+        cleanup check that can't be expressed as a plain org-name-list
+        match (e.g. comparing an item's own org against its own url's
+        hostname), unlike clear_org_matches()/clear_org_matches_by_id()."""
+        self.conn.row_factory = sqlite3.Row
+        return list(self.conn.execute("SELECT id, org, url FROM items WHERE org IS NOT NULL").fetchall())
+
+    def clear_org_matches_by_id(self, ids: list[str]) -> int:
+        """Like clear_org_matches(), but for specific item ids rather
+        than an org-name list — for a cleanup check that's inherently
+        per-item (see items_with_org())."""
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        cur = self.conn.execute(f"UPDATE items SET org = NULL, org_description = NULL WHERE id IN ({placeholders})", ids)
         self.conn.commit()
         return cur.rowcount
 
