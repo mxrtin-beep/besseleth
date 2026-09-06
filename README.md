@@ -449,10 +449,38 @@ fetch, besseleth asks the local LLM to tag every new item with:
   config — catches a publisher reached via an aggregator/search feed,
   like Google News search or NewsAPI, that was never itself configured
   anywhere), and a same-item check (the org squashes to the same base
-  name as *that specific item's own* url hostname). All three run on
-  every enrich call, including retroactively over already-stored items,
-  so existing bad rows self-correct the next time you enrich rather than
-  needing a manual fix.
+  name as *that specific item's own* url hostname). A static list of
+  well-known media/journal-publisher names (Nature, Science, CGTN, Tech
+  Times, ...) is also rejected outright — not exhaustive, so add an
+  outlet's own feed to `sources.news.feeds` when you spot a new one
+  slipping through (that also feeds the hostname-match check above). All
+  of this runs on every enrich call, including retroactively over
+  already-stored items, so existing bad rows self-correct the next time
+  you enrich rather than needing a manual fix.
+
+  A weaker local model doesn't always follow "respond with just the
+  name, or null" — it sometimes wraps the real answer in commentary
+  instead ("HCPLive (note: not a specific research group, but a news
+  outlet)", "Unknown (Poon Lab at UC Berkeley)", a whole sentence with
+  the real name after a colon). besseleth tries to recover the actual
+  name from these shapes (unwrapping, stripping a trailing parenthetical,
+  taking the tail after a colon) before the checks above run; if what's
+  left still reads like hedging prose rather than a name, it's dropped
+  to null rather than guessing which part was meant — also retroactive.
+
+  For a lab you specifically care about getting right, every time,
+  regardless of how the LLM (or the source article) phrases it: maintain
+  `labs.yaml` (copy from `labs.example.yaml`) — a list of `{pi,
+  university}` entries. When an item's text mentions a listed PI's
+  surname alongside their university, besseleth sets `org` directly to
+  `"<PI> Lab at <University>"`, bypassing the LLM's own extraction for
+  that item entirely — real ground truth you supplied, not a guess, so
+  there's no phrasing inconsistency to normalize away. Requiring the
+  university too (when one's given) is what keeps a common surname
+  ("Chen") from matching every item that happens to share it. A lab not
+  listed here just falls through to the LLM's own extraction (and the
+  lab-name normalization described below), exactly as before this
+  existed — labs.yaml is additive, not a replacement.
 - **org_type** — industry / academic / government / nonprofit / unknown
 - **modality** — EEG, ECoG, CNS implant, PNS implant, EMG, fMRI, fNIRS,
   or another short label if none fit. **Multi-valued**: a study combining
@@ -527,6 +555,23 @@ what got extracted for the last 50 enriched items. If everything in that
 list is null/unknown, the status line above the table will say why
 (usually `summarizer.backend` isn't `"ollama"`, or Ollama isn't running)
 rather than leaving you to guess from the Papers table alone.
+
+If org locations specifically stay null even for orgs that show up
+constantly (Neuralink, a lab you know is at a specific university):
+`_backfill_org_locations`'s web-lookup tier 3 requires
+`summarizer.backend: "ollama"`, and a "not found" result used to get
+cached for `location_recheck_days` (default 30) regardless of *why* it
+came back empty — including because the backend wasn't "ollama" yet at
+the time, so tier 3 never actually ran. Fixed two ways: going forward, a
+miss is only cached when tier 3 got a genuine attempt; and a one-time
+cleanup (gated so it only ever runs once) clears every existing "not
+found" cache row the first time an enrich call sees `backend: "ollama"`,
+so orgs stuck in a stale cooldown from before get a real check
+immediately rather than waiting out 30 days. Also, `Enrich everything`
+(run_until_done) raises the per-run location-lookup budget from
+`enrichment.max_org_lookups_per_run`'s interactive default (8 — sized
+for one click, not hundreds of orgs) to 200, since "enrich everything"
+implies looking up locations for everything you can too.
 
 ## Map
 
@@ -671,7 +716,8 @@ extension/                # browser extension: select text anywhere -> POST /api
   environments restrict outbound hosts — this is unrelated to the code).
 - `data/besseleth.db` and `reports/*.md` are local, gitignored artifacts.
 - `config.yaml` is gitignored too, same as `contacts.yaml`/`devices.yaml`/
-  `companies.yaml`/`interests.yaml`/`feeds.yaml`/`job_boards.yaml` — it's
+  `companies.yaml`/`interests.yaml`/`feeds.yaml`/`job_boards.yaml`/
+  `labs.yaml` — it's
   your own settings/contacts, not something to version control or diff
   against another machine's copy. `config.example.yaml` is the tracked
   template `cp` it from; pull in a code update's config changes (a new

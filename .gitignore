@@ -14,6 +14,7 @@ job_boards.yaml
 feeds.yaml
 contacts.yaml
 interests.yaml
+labs.yaml
 event_drops/
 social_drops/
 .geocode_cache.json

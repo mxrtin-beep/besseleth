@@ -550,6 +550,17 @@ class DB:
         ).fetchall()
         return [r[0] for r in rows]
 
+    def clear_negative_location_cache(self) -> int:
+        """Deletes every 'checked, nothing found' org_location_cache row
+        (a real hit, found=1, is untouched) — used once to recover from
+        misses that were cached while summarizer.backend wasn't 'ollama'
+        (tier 3 of the lookup never actually ran, so 'not found' wasn't a
+        real answer, just backend being off) rather than waiting out
+        each one's location_recheck_days cooldown individually."""
+        cur = self.conn.execute("DELETE FROM org_location_cache WHERE found = 0")
+        self.conn.commit()
+        return cur.rowcount
+
     def get_org_location_cache(self, org: str) -> sqlite3.Row | None:
         self.conn.row_factory = sqlite3.Row
         return self.conn.execute("SELECT * FROM org_location_cache WHERE org = ?", (org,)).fetchone()

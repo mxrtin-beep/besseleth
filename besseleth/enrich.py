@@ -115,7 +115,10 @@ def _build_prompt(row, config: Config, context: str, author_affiliations: str = 
         f'— a common mistake — the PUBLICATION or news outlet reporting the story (e.g. if the text says '
         f'"according to TechCrunch..." or "36Kr reports that...", that outlet is NOT the org; keep looking for who '
         f"the story is actually about). If the text doesn't name the specific organization, that's null, not your "
-        f"best guess at a description of one\n"
+        f"best guess at a description of one. This field is a NAME ONLY — a few words, never a sentence, never "
+        f"your reasoning about it: if you're unsure, or the org is only implied/mentioned in a roundabout way, "
+        f'use null rather than writing out your uncertainty (e.g. never "Unknown (possibly X)" or "X, but the '
+        f'text doesn\'t clearly say so" — either commit to the plain name or use null, nothing in between)\n'
         '  "org_description": at most 5 words on what that org is/does, e.g. "BCI implant company" or '
         '"Academic neuroscience lab" — null if "org" is null\n'
         '  "org_type": one of "industry", "academic", "government", "nonprofit", or "unknown"\n'
@@ -163,6 +166,23 @@ _NON_ORG_EXACT = {
     "not applicable", "researchers", "scientists", "the researchers", "the scientists", "authors",
     "the authors", "the team", "the company", "the companies", "the university", "the lab", "the labs",
     "investigators", "academics",
+}
+# Generic media/journal-publisher names common enough across almost any
+# science/tech-news feed mix that they're worth rejecting outright,
+# rather than relying solely on _known_publisher_names (which only
+# catches a hostname you've explicitly configured as a feed — useless
+# for a publisher reached via an aggregator/search feed like Google News
+# search or NewsAPI, which was never itself configured anywhere) or the
+# per-item hostname/domain-shape checks (which miss a publisher whose
+# brand name isn't domain-shaped and doesn't match this specific item's
+# own url, e.g. a syndicated repost). Not exhaustive — add to this list,
+# or better, add the outlet's own feed to `sources.news.feeds`, so
+# _known_publisher_names catches its other spellings/variants too.
+_KNOWN_MEDIA_OUTLETS = {
+    "nature", "science", "cell", "the lancet", "nejm", "pnas",
+    "hcplive", "pandaily", "36kr", "cgtn", "tech times", "techtimes",
+    "rockefeller university press", "baishideng publishing group",
+    "mercator institute for china studies", "the milelion", "milelion", "moomoo",
 }
 # "<Demonym/adjective> <generic role noun>" — e.g. "Chinese scientists",
 # "European researchers". Deliberately doesn't include "lab(s)"/"labs" or
@@ -306,6 +326,87 @@ def _is_bare_university(org: str) -> bool:
     return True
 
 
+_HEDGING_PHRASES = (
+    "not a specific", "not specific", "no specific", "didn't mention", "did not mention",
+    "doesn't mention", "does not mention", "unspecified", "n/a", "note:", "possibly",
+    "according to another", "isn't clear", "is not clear", "unclear from",
+)
+
+
+def _clean_org_value(raw: str | None) -> str | None:
+    """A weaker local model doesn't reliably follow "respond with just
+    the name" — it sometimes wraps the real answer in commentary instead
+    of using null: a trailing parenthetical hedge ("Wu's lab (unspecified
+    location, possibly China)"), a garbage prefix wrapping the real
+    answer ("Unknown (Poon Lab at UC Berkeley)"), or a full explanatory
+    sentence with the actual name tacked on after a colon ("Pandaily
+    didn't mention a specific organization, but according to another
+    news item: Merge Labs"). This tries to recover the real name from
+    each of those shapes; if what's left still reads like hedging prose
+    rather than a name (a hedging phrase survives, or it's just too long
+    /many words to be a name), returns None rather than guessing which
+    part was meant. Runs before _looks_like_a_named_org, so a name it
+    recovers still goes through all the normal validity checks after."""
+    if not raw:
+        return None
+    org = raw.strip()
+
+    # "Unknown (Poon Lab at UC Berkeley)" — the real answer is what's
+    # wrapped in parens after a non-answer prefix; unwrap it.
+    wrapped = re.match(r"^(?:unknown|n/a|none|null)\s*\((.+)\)$", org, re.IGNORECASE)
+    if wrapped:
+        org = wrapped.group(1).strip()
+
+    # "...but according to another news item: Merge Labs" — take
+    # whatever's after the last colon if it's short enough to plausibly
+    # be a name on its own, rather than another clause of the sentence.
+    if ":" in org:
+        tail = org.rsplit(":", 1)[1].strip()
+        if 0 < len(tail.split()) <= 6:
+            org = tail
+
+    # "Wu's lab (unspecified location, possibly China)" — a trailing
+    # parenthetical is commentary, never part of a real org's name.
+    org = re.sub(r"\s*\([^)]*\)\s*$", "", org).strip()
+
+    if not org:
+        return None
+    lowered = org.lower()
+    if any(phrase in lowered for phrase in _HEDGING_PHRASES):
+        return None
+    # A real org/lab name is a few words, never a full sentence — this
+    # catches hedging prose the checks above didn't happen to unwrap.
+    if len(org.split()) > 8:
+        return None
+    return org
+
+
+def _match_known_lab(text: str, config: Config) -> str | None:
+    """Deterministic override using labs.yaml (see labs_store.py) — real
+    ground truth you supplied, not an LLM guess. If `text` mentions a
+    listed PI's surname, AND (when the entry gives one) their university,
+    returns the canonical "<PI> Lab at <University>" form directly;
+    checked BEFORE the LLM's own org extraction is used, so a listed lab
+    is never subject to however the LLM's phrasing or normalization
+    happens to shake out. Requiring the university too (when given) is
+    what keeps a common surname from matching every item that happens to
+    share it — "Chen" alone proves nothing, "Chen" + "USC" is specific.
+    None if nothing in labs.yaml matches (falls through to the LLM's own
+    extraction, exactly as before labs.yaml existed)."""
+    for lab in config.labs:
+        pi = lab["pi"]
+        if not pi:
+            continue
+        surname = pi.split()[-1]
+        if not re.search(rf"\b{re.escape(surname)}\b", text, re.IGNORECASE):
+            continue
+        university = lab["university"]
+        if university and not re.search(rf"\b{re.escape(university)}\b", text, re.IGNORECASE):
+            continue
+        return f"{pi} Lab at {university}" if university else f"{pi} Lab"
+    return None
+
+
 _LOOKS_LIKE_A_DOMAIN_RE = re.compile(
     r"^([a-z0-9][a-z0-9-]*\.)+(com|org|net|io|co|info|biz|news|press|tech|ai)$",
     re.IGNORECASE,
@@ -337,8 +438,11 @@ def _looks_like_a_named_org(org: str, config: Config) -> bool:
     normalized = org.strip().lower()
     if not normalized:
         return False
-    non_orgs = _NON_ORG_EXACT | {config.industry_name.strip().lower()} | {k.strip().lower() for k in config.keywords}
-    if normalized in non_orgs:
+    non_orgs = (
+        _NON_ORG_EXACT | _KNOWN_MEDIA_OUTLETS
+        | {config.industry_name.strip().lower()} | {k.strip().lower() for k in config.keywords}
+    )
+    if normalized in non_orgs or _squash(org) in {_squash(n) for n in _KNOWN_MEDIA_OUTLETS}:
         return False
     if _GENERIC_GROUP_RE.match(org.strip()):
         return False
@@ -557,7 +661,7 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
 
     modality = _clean_modality_tags(data.get("modality"), config)
 
-    org = data.get("org") or None
+    org = _clean_org_value(data.get("org"))
     if org and not _looks_like_a_named_org(org, config):
         org = None
     if org and _squash(org) == _squash(_hostname(row["url"] or "").split(".")[0]):
@@ -569,6 +673,9 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
         # feed (Google News search, NewsAPI) that was never itself
         # configured anywhere, so that list has no way to know about it.
         org = None
+    known_lab = _match_known_lab(f"{row['title']} {row['summary'] or ''}", config)
+    if known_lab:
+        org = known_lab  # real ground truth (labs.yaml) wins over the LLM's own extraction
     if org:
         org = _canonicalize_new_org(org, db)
     org_description = (data.get("org_description") or "").strip() or None
@@ -688,7 +795,7 @@ def _search_org_location(org: str, summarizer_cfg: dict) -> tuple[str, float, fl
     return (location_text, *coords)
 
 
-def _backfill_org_locations(config: Config, db: DB) -> int:
+def _backfill_org_locations(config: Config, db: DB, max_lookups_override: int | None = None) -> int:
     """Fills in a missing location for orgs that have none, independent
     of the LLM pass above (that one only ever knows what a given item's
     own text says, so an org whose location was never mentioned in any
@@ -701,7 +808,7 @@ def _backfill_org_locations(config: Config, db: DB) -> int:
     newer item for the same org shows up without its own location.
     Returns how many orgs got newly filled in."""
     cfg = config.raw.get("enrichment", {}) or {}
-    max_lookups = cfg.get("max_org_lookups_per_run", 8)
+    max_lookups = max_lookups_override if max_lookups_override is not None else cfg.get("max_org_lookups_per_run", 8)
     recheck_days = cfg.get("location_recheck_days", 30)
     if max_lookups <= 0:
         return 0
@@ -730,13 +837,18 @@ def _backfill_org_locations(config: Config, db: DB) -> int:
             db.set_org_location(org, label, lat, lon)
             db.set_org_location_cache(org, found=True, location_text=label, lat=lat, lon=lon)
             filled += 1
-        else:
+        elif config.summarizer.get("backend") == "ollama":
+            # Only cache a miss once tier 3 (the LLM-read web search) got
+            # a genuine shot — with backend != "ollama", _search_org_location
+            # returns None immediately without trying, so caching that as
+            # "not found" would wrongly lock the org out of a real check
+            # for location_recheck_days once Ollama is actually available.
             db.set_org_location_cache(org, found=False)
 
     return filled
 
 
-def _backfill_contact_locations(config: Config, db: DB) -> int:
+def _backfill_contact_locations(config: Config, db: DB, max_lookups_override: int | None = None) -> int:
     """Same free Wikidata/Wikipedia (then web-search+LLM) lookup as
     _backfill_org_locations, but for your contacts' current employers —
     powers the Map tab's "friends" layer, which needs a location for a
@@ -746,7 +858,7 @@ def _backfill_contact_locations(config: Config, db: DB) -> int:
     backfill — a company that's both a contact's employer and a source
     org only ever gets looked up once. Returns how many got newly filled."""
     cfg = config.raw.get("enrichment", {}) or {}
-    max_lookups = cfg.get("max_org_lookups_per_run", 8)
+    max_lookups = max_lookups_override if max_lookups_override is not None else cfg.get("max_org_lookups_per_run", 8)
     if max_lookups <= 0:
         return 0
 
@@ -774,8 +886,8 @@ def _backfill_contact_locations(config: Config, db: DB) -> int:
             label, lat, lon = result
             db.set_org_location_cache(org, found=True, location_text=label, lat=lat, lon=lon)
             filled += 1
-        else:
-            db.set_org_location_cache(org, found=False)
+        elif config.summarizer.get("backend") == "ollama":
+            db.set_org_location_cache(org, found=False)  # see _backfill_org_locations's comment on this condition
 
     return filled
 
@@ -939,10 +1051,25 @@ def enrich_items_detailed(
     # — sweeps every org value currently stored against the same check a
     # fresh enrichment applies. Cheap (one query for the distinct list,
     # then an indexed exact-match update), safe to run every call.
-    invalid_orgs = [o for o in db.distinct_orgs() if not _looks_like_a_named_org(o, config)]
+    #
+    # Also retroactively applies _clean_org_value (existing rows saved
+    # before that existed can still have the raw hedging-prose org value
+    # verbatim): a value it can't recover a name from joins invalid_orgs
+    # below (nulled); one it rewrites to something shorter gets renamed
+    # to the cleaned form instead of nulled.
+    existing_orgs = db.distinct_orgs()
+    invalid_orgs = []
+    for o in existing_orgs:
+        cleaned = _clean_org_value(o)
+        if cleaned is None:
+            invalid_orgs.append(o)
+        elif cleaned != o:
+            db.rename_org(o, cleaned)
+        elif not _looks_like_a_named_org(o, config):
+            invalid_orgs.append(o)
     cleared = db.clear_org_matches(invalid_orgs)
     if cleared:
-        print(f"[enrich] Cleared {cleared} item(s) whose 'org' was actually the industry name/a keyword.")
+        print(f"[enrich] Cleared {cleared} item(s) whose 'org' was actually the industry name/a keyword (or unrecoverable hedging text).")
 
     self_referential = _self_referential_org_ids(db)
     cleared_self_ref = db.clear_org_matches_by_id(self_referential)
@@ -975,6 +1102,17 @@ def enrich_items_detailed(
     if dated_companies:
         print(f"[enrich] Backfilled a funding date for {dated_companies} compan(ies) that had funding data but no date.")
 
+    # One-time recovery for negative org_location_cache rows written while
+    # summarizer.backend wasn't "ollama" (tier 3 never actually ran then,
+    # so "not found" wasn't a real answer — see the comment where this is
+    # now guarded against in _backfill_org_locations). Gated on a meta
+    # flag so this only ever runs once, not every enrich call.
+    if config.summarizer.get("backend") == "ollama" and not db.get_meta("location_cache_backend_fix_applied"):
+        reset = db.clear_negative_location_cache()
+        db.set_meta("location_cache_backend_fix_applied", "1")
+        if reset:
+            print(f"[enrich] Reset {reset} cached 'not found' location(s) so they get a real check now that Ollama is available.")
+
     invalid_locations = [loc for loc in db.distinct_locations() if not _looks_like_a_real_location(loc)]
     locations_cleared = db.clear_location_matches(invalid_locations)
     if locations_cleared:
@@ -990,9 +1128,15 @@ def enrich_items_detailed(
 
     # Independent of the LLM pass below — a free web lookup (Wikidata)
     # for orgs whose location was never mentioned in any item's own
-    # text, so those don't just stay unlocated forever.
-    locations_filled = _backfill_org_locations(config, db)
-    contact_locations_filled = _backfill_contact_locations(config, db)
+    # text, so those don't just stay unlocated forever. The per-run
+    # budget (enrichment.max_org_lookups_per_run, default 8) is sized for
+    # a normal interactive click, nowhere near enough to work through
+    # hundreds of orgs in one go — raised substantially for
+    # run_until_done, since "enrich everything" implies "look up
+    # everything you can too," not just the item-extraction pass.
+    location_lookup_cap = 200 if run_until_done else None
+    locations_filled = _backfill_org_locations(config, db, max_lookups_override=location_lookup_cap)
+    contact_locations_filled = _backfill_contact_locations(config, db, max_lookups_override=location_lookup_cap)
     location_note = (
         f" Filled in a location for {locations_filled} org(s) via web lookup." if locations_filled else ""
     )
