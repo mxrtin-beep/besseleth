@@ -6,6 +6,8 @@ industry:
   # broad single words like "brain" will flood the report with noise.
   keywords:
     - "neurotechnology"
+    - "neurotech"
+    - "neuroengineer"
     - "brain-computer interface"
     - "neural implant"
     - "neuroprosthetics"
