@@ -158,7 +158,6 @@
       <div><label for="pfFrom">From</label><input type="date" id="pfFrom"></div>
       <div><label for="pfTo">To</label><input type="date" id="pfTo"></div>
       <div><label for="pfSource">Source</label><select id="pfSource"><option value="">All</option></select></div>
-      <div><label>&nbsp;</label><button class="btn" id="clearSourceBtn" title="Delete EVERY item currently stored for the selected source (e.g. after a stale keyword polluted it) — irreversible; a re-fetch only brings back what's still inside the normal fetch window">Clear source…</button></div>
       <div><label for="pfOrgType">Org type</label><select id="pfOrgType"><option value="">All</option></select></div>
       <div><label for="pfOrg">Org</label><select id="pfOrg"><option value="">All</option></select></div>
       <div><label for="pfModality" title="Multi-select — matches any of your item's tags, ctrl/cmd-click for more than one">Modality</label><select id="pfModality" multiple size="4"></select></div>
@@ -172,6 +171,7 @@
         <option value="date">Date (newest)</option><option value="novelty">Novelty (highest)</option>
         <option value="citations">Citations (highest)</option>
       </select></div>
+      <div><label>&nbsp;</label><button class="btn" id="clearSourceBtn" title="Delete EVERY item currently stored for the selected source (e.g. after a stale keyword polluted it) — irreversible; a re-fetch only brings back what's still inside the normal fetch window">Clear source…</button></div>
     </div>
     <p class="hint" id="papersCount"></p>
     <p><button class="btn" id="exportPapersBtn">Export CSV</button></p>
