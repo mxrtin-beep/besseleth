@@ -20,7 +20,7 @@ time (title/text similarity) collapses these the same way.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import requests
 
@@ -28,6 +28,7 @@ from ..db import Item
 from .util import stable_id, text_matches_keywords
 
 OPENALEX_WORKS_API = "https://api.openalex.org/works"
+MAX_RESULTS_PER_KEYWORD_HARD_CAP = 1000  # backfill safety valve — see fetch()'s docstring
 
 
 def _reconstruct_abstract(inverted_index: dict | None) -> str:
@@ -45,72 +46,112 @@ def _reconstruct_abstract(inverted_index: dict | None) -> str:
 
 
 def fetch(config, days_back: int, max_results_per_keyword: int) -> list[Item]:
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).date().isoformat()
+    """Fetches papers matching each configured keyword, newest first,
+    stopping once results fall outside the `days_back` window.
+
+    Paginates past `max_results_per_keyword` when needed — same fix as
+    arxiv_scraper's fetch(): OpenAlex sorts newest-first and returns one
+    page (of that size) per request, so without pagination a `days_back`
+    of years (a deep backfill) just returns the same newest handful of
+    papers over and over, no matter how far back the window is widened,
+    and never actually reaches the older, more-cited papers a backfill is
+    for. This also happens to be the direct explanation for citation
+    counts looking suspiciously all-zero: a paper that's only ever a few
+    days/weeks old genuinely hasn't had time to accumulate citations yet
+    (that's real, not a bug) — but a backfill that was silently stuck on
+    only ever fetching the newest page made EVERY fetched paper look that
+    fresh, backfill or not, which is the bug. Stops paginating for a
+    keyword once a page's oldest entry falls before the cutoff, OpenAlex
+    returns fewer than a full page (no more results), or a hard cap of
+    MAX_RESULTS_PER_KEYWORD_HARD_CAP total is hit."""
+    cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days_back)).date()
+    cutoff = cutoff_date.isoformat()
     items: list[Item] = []
     seen_ids: set[str] = set()
 
     for keyword in config.keywords:
-        params = {
-            "search": keyword,
-            "filter": f"from_publication_date:{cutoff},type:article",
-            "sort": "publication_date:desc",
-            "per-page": max_results_per_keyword,
-        }
-        try:
-            resp = requests.get(OPENALEX_WORKS_API, params=params, timeout=20)
-            resp.raise_for_status()
-            data = resp.json()
-        except (requests.RequestException, ValueError) as e:
-            print(f"[papers] OpenAlex request failed for '{keyword}': {e}")
-            continue
+        page = 1
+        while True:
+            params = {
+                "search": keyword,
+                "filter": f"from_publication_date:{cutoff},type:article",
+                "sort": "publication_date:desc",
+                "per-page": max_results_per_keyword,
+                "page": page,
+            }
+            try:
+                resp = requests.get(OPENALEX_WORKS_API, params=params, timeout=20)
+                resp.raise_for_status()
+                data = resp.json()
+            except (requests.RequestException, ValueError) as e:
+                print(f"[papers] OpenAlex request failed for '{keyword}' (page={page}): {e}")
+                break
 
-        for work in data.get("results", []):
-            openalex_id = work.get("id", "")
-            title = (work.get("title") or "").strip()
-            if not openalex_id or not title or openalex_id in seen_ids:
-                continue
+            results = data.get("results", [])
+            if not results:
+                break
 
-            abstract = _reconstruct_abstract(work.get("abstract_inverted_index"))
+            reached_cutoff = False
+            for work in results:
+                openalex_id = work.get("id", "")
+                title = (work.get("title") or "").strip()
+                pub_date_str = work.get("publication_date") or ""
+                try:
+                    if pub_date_str and date.fromisoformat(pub_date_str) < cutoff_date:
+                        # Sorted newest-first, so nothing from here on (this
+                        # page or the next) can be back in the window either.
+                        reached_cutoff = True
+                        break
+                except ValueError:
+                    pass
+                if not openalex_id or not title or openalex_id in seen_ids:
+                    continue
 
-            # OpenAlex's `search` param is a fuzzy, relevance-ranked
-            # full-text search — it does NOT require the keyword phrase to
-            # actually appear in the title/abstract, so a search for e.g.
-            # "transcranial ultrasound stimulation" can return a paper
-            # that just scored well on "ultrasound" alone (an unrelated
-            # PSMA contrast-agent study, say). Re-check with the same
-            # strict substring match arxiv_scraper uses, and skip the
-            # result outright if none of our actual keywords are in there
-            # — don't just fall back to tagging it with the searched
-            # keyword regardless, which is what let this noise through.
-            hits = text_matches_keywords(f"{title} {abstract}", config.keywords)
-            if not hits:
-                continue
+                abstract = _reconstruct_abstract(work.get("abstract_inverted_index"))
 
-            authors = ", ".join(
-                name for a in work.get("authorships", [])
-                if (name := (a.get("author") or {}).get("display_name"))
-            )
-            url = (
-                (work.get("primary_location") or {}).get("landing_page_url")
-                or work.get("doi")
-                or openalex_id
-            )
+                # OpenAlex's `search` param is a fuzzy, relevance-ranked
+                # full-text search — it does NOT require the keyword phrase to
+                # actually appear in the title/abstract, so a search for e.g.
+                # "transcranial ultrasound stimulation" can return a paper
+                # that just scored well on "ultrasound" alone (an unrelated
+                # PSMA contrast-agent study, say). Re-check with the same
+                # strict substring match arxiv_scraper uses, and skip the
+                # result outright if none of our actual keywords are in there
+                # — don't just fall back to tagging it with the searched
+                # keyword regardless, which is what let this noise through.
+                hits = text_matches_keywords(f"{title} {abstract}", config.keywords)
+                if not hits:
+                    continue
 
-            items.append(
-                Item(
-                    id=stable_id("papers", openalex_id),
-                    source="papers",
-                    title=title,
-                    url=url or "",
-                    summary=abstract,
-                    published_at=work.get("publication_date") or datetime.now(timezone.utc).isoformat(),
-                    matched_keywords=hits,
-                    authors=authors or None,
-                    citation_count=work.get("cited_by_count"),
+                authors = ", ".join(
+                    name for a in work.get("authorships", [])
+                    if (name := (a.get("author") or {}).get("display_name"))
                 )
-            )
-            seen_ids.add(openalex_id)
+                url = (
+                    (work.get("primary_location") or {}).get("landing_page_url")
+                    or work.get("doi")
+                    or openalex_id
+                )
 
-        time.sleep(1)  # be polite to OpenAlex's free API
+                items.append(
+                    Item(
+                        id=stable_id("papers", openalex_id),
+                        source="papers",
+                        title=title,
+                        url=url or "",
+                        summary=abstract,
+                        published_at=pub_date_str or datetime.now(timezone.utc).isoformat(),
+                        matched_keywords=hits,
+                        authors=authors or None,
+                        citation_count=work.get("cited_by_count"),
+                    )
+                )
+                seen_ids.add(openalex_id)
+
+            page += 1
+            time.sleep(1)  # be polite to OpenAlex's free API
+
+            if reached_cutoff or len(results) < max_results_per_keyword or page * max_results_per_keyword >= MAX_RESULTS_PER_KEYWORD_HARD_CAP:
+                break
 
     return items
