@@ -35,6 +35,22 @@
   .tabs button.active { border-bottom-color: #4a90d9; font-weight: 600; }
   .controls { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: end; }
   .controls label { display: block; font-size: .8rem; opacity: .75; margin-bottom: .25rem; }
+  /* A dense filter bar (lots of small selects, e.g. the Papers tab) reads
+     as messy under the plain flex layout above once it wraps to several
+     rows — this variant lines everything up on a tidy grid instead, in a
+     bordered card so the whole filter bar reads as one unit. Opt-in via
+     an extra class rather than changing .controls itself, since other
+     .controls blocks (the paste textarea, feed-add forms) rely on the
+     plain flex behavior (flex:1 growing children, etc.) that a grid
+     would break. */
+  .controls.filterbar {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: .9rem 1rem; align-items: start;
+    padding: .9rem 1rem; border: 1px solid #8883; border-radius: 8px;
+  }
+  .controls.filterbar > div { display: flex; flex-direction: column; gap: .3rem; min-width: 0; }
+  .controls.filterbar select, .controls.filterbar input { width: 100%; box-sizing: border-box; }
+  .controls.filterbar .btn { align-self: stretch; white-space: nowrap; }
   select, input[type=text], input[type=date], textarea {
     padding: .4rem .6rem; border-radius: 6px; border: 1px solid #8886; font-size: .9rem;
     background: transparent; color: inherit; font-family: inherit;
@@ -138,13 +154,11 @@
     </p>
     <p class="hint" id="enrichResult"></p>
     <p class="hint" id="enrichStats"></p>
-    <div class="controls">
+    <div class="controls filterbar">
       <div><label for="pfFrom">From</label><input type="date" id="pfFrom"></div>
       <div><label for="pfTo">To</label><input type="date" id="pfTo"></div>
       <div><label for="pfSource">Source</label><select id="pfSource"><option value="">All</option></select></div>
-      <div style="align-self:flex-end">
-        <button class="btn" id="clearSourceBtn" title="Delete EVERY item currently stored for the selected source (e.g. after a stale keyword polluted it) — irreversible; a re-fetch only brings back what's still inside the normal fetch window">Clear source…</button>
-      </div>
+      <div><label>&nbsp;</label><button class="btn" id="clearSourceBtn" title="Delete EVERY item currently stored for the selected source (e.g. after a stale keyword polluted it) — irreversible; a re-fetch only brings back what's still inside the normal fetch window">Clear source…</button></div>
       <div><label for="pfOrgType">Org type</label><select id="pfOrgType"><option value="">All</option></select></div>
       <div><label for="pfOrg">Org</label><select id="pfOrg"><option value="">All</option></select></div>
       <div><label for="pfModality">Modality (multi-select — matches any of your item's tags, ctrl/cmd-click for more than one)</label><select id="pfModality" multiple size="4"></select></div>
@@ -177,7 +191,7 @@
   </div>
 
   <div id="orgsPane" style="display:none">
-    <div class="controls">
+    <div class="controls filterbar">
       <div><label for="ofOrgType">Org type</label><select id="ofOrgType"><option value="">All</option></select></div>
       <div><label for="ofSource">Source</label><select id="ofSource"><option value="">All</option></select></div>
     </div>
@@ -186,7 +200,7 @@
   </div>
 
   <div id="jobsPane" style="display:none">
-    <div class="controls">
+    <div class="controls filterbar">
       <div><label for="jfOrg">Org</label><select id="jfOrg"><option value="">All</option></select></div>
       <div><label for="jfStatus">Status</label><select id="jfStatus">
         <option value="active">Active only</option><option value="">All (incl. removed)</option>
