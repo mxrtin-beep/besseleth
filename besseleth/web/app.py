@@ -812,6 +812,22 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             abort(404)
         return jsonify({"ok": True, "deleted": item_id})
 
+    @app.delete("/api/source/<source>")
+    def api_clear_source(source):
+        # Bulk "delete everything from this source, I'll re-pull what's
+        # still reachable" — for cleaning up after a stale keyword (or
+        # similar) polluted a whole source, when deleting rows one at a
+        # time via /api/item isn't practical. Irreversible; a re-fetch
+        # only brings back whatever's still inside the source's normal
+        # days_back window (or a fresh backfill), same caveat as any
+        # other delete here.
+        db = DB(config.db_path)
+        try:
+            removed = db.delete_items_by_source(source)
+        finally:
+            db.close()
+        return jsonify({"ok": True, "removed": removed})
+
     return app
 
 

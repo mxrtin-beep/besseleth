@@ -12,6 +12,8 @@ Usage:
     python -m besseleth.cli company-refresh-stock          # update stock_price for companies.yaml's tickers (free)
     python -m besseleth.cli report-delete <report-id>       # e.g. report-delete 2026-09-01
     python -m besseleth.cli item-delete --item-id <id>       # remove a pasted (or any) item outright
+    python -m besseleth.cli source-clear --source news       # delete EVERY item for a source (e.g. after a stale
+                                                              # keyword polluted it) — irreversible, re-fetch after
     python -m besseleth.cli enrich [--all]                   # tag arXiv/news/blog items for the Papers table
                                                               # --all: work through the whole backlog, not just one
                                                               # max_items_per_run batch — leave it running
@@ -68,6 +70,7 @@ COMMANDS = [
     "company-refresh-stock",
     "report-delete",
     "item-delete",
+    "source-clear",
     "enrich",
     "serve",
 ]
@@ -86,6 +89,7 @@ def main(argv=None):
         "so you can pipe or paste content and press Ctrl-D.",
     )
     parser.add_argument("--item-id", default=None, help="Item id to draft a devices.yaml entry from (device-suggest)")
+    parser.add_argument("--source", default=None, help="Source to wipe for source-clear, e.g. news, blog, papers")
     parser.add_argument(
         "--since", default=None, help="Backfill from this date (YYYY-MM-DD) instead of each source's usual days_back."
     )
@@ -158,6 +162,22 @@ def main(argv=None):
                 sys.exit(1)
         finally:
             db.close()
+        return
+
+    if args.command == "source-clear":
+        if not args.source:
+            print("[cli] Usage: besseleth.cli source-clear --source <news|blog|papers|...>", file=sys.stderr)
+            sys.exit(1)
+        db = DB(config.db_path)
+        try:
+            removed = db.delete_items_by_source(args.source)
+        finally:
+            db.close()
+        print(
+            f"[cli] Deleted {removed} item(s) with source={args.source!r}. Run `fetch` (optionally with --since "
+            f"for a backfill) to re-pull whatever's still reachable — anything older than the source's normal "
+            f"days_back window (or your --since date) is gone for good."
+        )
         return
 
     if args.command == "report-delete":

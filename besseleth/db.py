@@ -295,6 +295,19 @@ class DB:
         self.conn.commit()
         return cur.rowcount > 0
 
+    def delete_items_by_source(self, source: str) -> int:
+        """Removes every item currently stored for `source` outright —
+        for a bulk 'clear and re-pull' when a source's data quality has
+        gone bad (a stale keyword left noise across a lot of rows, say)
+        and deleting them one at a time via delete_item isn't practical.
+        A re-fetch afterward only brings back whatever's still inside the
+        source's normal days_back window (or a fresh backfill) — anything
+        older than that is gone for good, same as delete_item. Returns
+        how many rows were removed."""
+        cur = self.conn.execute("DELETE FROM items WHERE source = ?", (source,))
+        self.conn.commit()
+        return cur.rowcount
+
     def manual_items(self, sources: list[str], limit: int = 100) -> list[sqlite3.Row]:
         """Recently pasted items (linkedin/event/social/clip), newest
         first — for the dashboard's Paste tab list-with-delete view."""
