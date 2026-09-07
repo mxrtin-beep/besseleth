@@ -125,6 +125,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             stage_rank, stage_label = stage_for(d.fda_status)
             result.append(
                 {
+                    "id": d.id,
                     "name": d.name,
                     "org": d.org,
                     "org_type": d.org_type,
@@ -139,6 +140,17 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
                 }
             )
         return jsonify(result)
+
+    @app.delete("/api/devices/<int:device_id>")
+    def api_delete_device(device_id):
+        db = DB(config.db_path)
+        try:
+            deleted = db.delete_device(device_id)
+        finally:
+            db.close()
+        if not deleted:
+            abort(404)
+        return jsonify({"ok": True, "deleted": device_id})
 
     @app.get("/api/trends/fda-stages")
     def api_fda_stages():

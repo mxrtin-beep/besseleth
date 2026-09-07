@@ -826,6 +826,15 @@ class DB:
         self.conn.row_factory = sqlite3.Row
         return list(self.conn.execute("SELECT * FROM devices ORDER BY date_reported, id").fetchall())
 
+    def delete_device(self, device_id: int) -> bool:
+        """Removes one device row outright — for a bad extraction (a unit
+        conversion error, a hallucinated metric) that isn't the generic
+        'name == org' pattern delete_bogus_devices already sweeps
+        automatically. Returns True if a row was actually removed."""
+        cur = self.conn.execute("DELETE FROM devices WHERE id = ?", (device_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def delete_bogus_devices(self) -> int:
         """Removes device rows whose name is just the org's own name
         (case-insensitive) — a bug in an earlier version of enrich.py

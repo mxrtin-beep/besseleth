@@ -159,7 +159,16 @@ def _build_prompt(row, config: Config, context: str, author_affiliations: str = 
         "device or system (do NOT put the org's own name here as a stand-in — that's what \"org\" is for)\n"
         '  "device_metrics": an object with any of these keys the text reports concrete numbers/values for — '
         f"{metric_keys}, {categorical_keys} — omit keys with no data, use {{}} if none reported. Only meaningful "
-        'if "device_name" is set\n'
+        'if "device_name" is set. CONVERT the number to the unit named in parentheses above — the text will often '
+        "report a different unit, and the field only means what it says if the value has actually been converted, "
+        'not copied over as-is with a mismatched unit. Show your conversion by doing the arithmetic, don\'t just '
+        'restate the source number: e.g. for "information_transfer_rate (bits/min)", a reported "32 Mbps" is '
+        "32,000,000 bits/SECOND, so the bits/min value is 32,000,000 × 60 = 1,920,000, not 32 and not 32,000,000 "
+        '(those would be treating Mbps as if it already meant bits/min, or bits/second, respectively — it\'s '
+        'neither). Likewise "150 kbps" is 150,000 bits/sec → 9,000,000 bits/min, and a rate already given per-minute '
+        'or in raw bits/sec needs the matching conversion (×60 for /sec→/min, none needed if already /min). If '
+        "you're not confident you can convert the reported unit correctly, omit that key rather than guess — a "
+        "missing metric is fine, a wrong one silently corrupts a numeric trend chart\n"
         '  "company_funding": an object {"funding_total_usd": number or null, "last_funding_round": string or '
         'null, "last_funding_date": "YYYY-MM-DD" or null, "ipo_date": "YYYY-MM-DD" or null, "stock_exchange": '
         'string or null} — funding_total_usd/last_funding_round/last_funding_date if this item reports a specific '

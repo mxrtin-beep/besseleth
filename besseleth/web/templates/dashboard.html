@@ -1795,9 +1795,9 @@ function renderTable() {
   }
   if (currentDataset === 'devices') {
     table.innerHTML = `
-      <thead><tr><th>Device</th><th>Org</th><th>Type</th><th>FDA status</th><th>Metrics</th><th>Reported</th><th>Source</th></tr></thead>
+      <thead><tr><th>Device</th><th>Org</th><th>Type</th><th>FDA status</th><th>Metrics</th><th>Reported</th><th>Source</th><th></th></tr></thead>
       <tbody>${devices.map(d => `
-        <tr>
+        <tr data-device-row="${d.id}">
           <td>${d.name}</td>
           <td>${d.org}</td>
           <td>${d.org_type}</td>
@@ -1805,8 +1805,18 @@ function renderTable() {
           <td><div class="metric-tags">${Object.entries(d.metrics).map(([k, v]) => formatMetricValue(k, v)).join('')}</div></td>
           <td>${d.date_reported || ''}</td>
           <td>${d.source_url ? `<a href="${d.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
+          <td><button class="delBtn" data-del-device="${d.id}" title="Delete this device row — e.g. a bad extraction (wrong unit conversion, hallucinated metric)">🗑</button></td>
         </tr>`).join('')}</tbody>`;
     makeTableResizable(table, 'dataTable:devices');
+    table.querySelectorAll('[data-del-device]').forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm('Delete this device row outright? This can\'t be undone — if the underlying item still exists, re-enriching it may add it back (hopefully corrected this time).')) return;
+        await fetch(`/api/devices/${btn.dataset.delDevice}`, { method: 'DELETE' });
+        devices = devices.filter(x => String(x.id) !== btn.dataset.delDevice);
+        renderTable();
+        renderChart();
+      };
+    });
   } else {
     table.innerHTML = `
       <thead><tr><th>Company</th><th>Funding</th><th>Last round</th><th>Stock</th><th>Source</th><th>Notes</th></tr></thead>
