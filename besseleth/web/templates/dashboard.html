@@ -1378,6 +1378,25 @@ function renderPapers(resetPage = true) {
     return `<span class="author-cell" data-author="${names[0]}" title="${names.join(', ')}" style="cursor:pointer; text-decoration:underline dotted;">${shown}</span>`;
   }
 
+  // A blank citation count means two very different things depending on
+  // where the paper came from, and the Source column alone can't tell
+  // you which — both arxiv_scraper and openalex_scraper write source
+  // "papers" (they're merged into one section on purpose), but only
+  // OpenAlex ever reports a citation count at all. arXiv preprints
+  // genuinely have no citation data to give (that API doesn't track it)
+  // — expected, not a bug. A blank OpenAlex row, on the other hand,
+  // means something's actually wrong (OpenAlex reported no cited_by_count
+  // for a published paper, or the item was never re-fetched since the
+  // pagination fix). Distinguish by URL shape: an arxiv.org link is
+  // unambiguously an arXiv-sourced item regardless of when it was fetched.
+  function citationCell(p) {
+    if (p.citation_count !== null && p.citation_count !== undefined) return String(p.citation_count);
+    const isArxiv = /^https?:\/\/(www\.)?arxiv\.org\//i.test(p.url || '');
+    return isArxiv
+      ? '<span class="hint" title="arXiv preprints have no citation data — this is expected, not a gap">n/a (arXiv)</span>'
+      : '<span class="hint" title="No citation count from OpenAlex for this paper — could be a genuine 0, or worth a re-fetch">—</span>';
+  }
+
   const table = document.getElementById('papersTable');
   table.className = 'datatable resizable';
   table.innerHTML = `
@@ -1389,7 +1408,7 @@ function renderPapers(resetPage = true) {
         <td>${p.title}</td>
         <td>${p.url ? `<a href="${p.url}" target="_blank" rel="noopener">${p.source}</a>` : p.source}</td>
         <td>${authorCell(p)}</td>
-        <td>${p.citation_count ?? ''}</td>
+        <td>${citationCell(p)}</td>
         <td>${p.org || (p.enriched ? '—' : '<span class="hint">pending</span>')}</td>
         <td>${p.org_type || ''}</td>
         <td>${p.modality || ''}</td>
