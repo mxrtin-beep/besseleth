@@ -166,9 +166,14 @@ def _build_prompt(row, config: Config, context: str, author_affiliations: str = 
         "32,000,000 bits/SECOND, so the bits/min value is 32,000,000 × 60 = 1,920,000, not 32 and not 32,000,000 "
         '(those would be treating Mbps as if it already meant bits/min, or bits/second, respectively — it\'s '
         'neither). Likewise "150 kbps" is 150,000 bits/sec → 9,000,000 bits/min, and a rate already given per-minute '
-        'or in raw bits/sec needs the matching conversion (×60 for /sec→/min, none needed if already /min). If '
-        "you're not confident you can convert the reported unit correctly, omit that key rather than guess — a "
-        "missing metric is fine, a wrong one silently corrupts a numeric trend chart\n"
+        'or in raw bits/sec needs the matching conversion (×60 for /sec→/min, none needed if already /min). Same '
+        'principle for any other unit, not just data rates — e.g. for "longevity_days (days in vivo)", a reported '
+        '"16 months of data" is 16 × ~30.4 ≈ 487 days, NOT 16 (that would be treating months as if they were '
+        'already days); "2 years" is ~730 days; "6 weeks" is 42 days. If a duration is described as ongoing/at '
+        'least that long ("still implanted after 16 months" or "16 months and counting"), still report it as a '
+        "days value (487), not the raw number — the field is a day count, always, regardless of what unit the "
+        "text happened to use. If you're not confident you can convert the reported unit correctly, omit that key "
+        "rather than guess — a missing metric is fine, a wrong one silently corrupts a numeric trend chart\n"
         '  "company_funding": an object {"funding_total_usd": number or null, "last_funding_round": string or '
         'null, "last_funding_date": "YYYY-MM-DD" or null, "ipo_date": "YYYY-MM-DD" or null, "stock_exchange": '
         'string or null} — funding_total_usd/last_funding_round/last_funding_date if this item reports a specific '
@@ -1074,6 +1079,25 @@ def enrich_items_detailed(
 
     if not cfg.get("enabled", True):
         return {"processed": 0, "message": "enrichment.enabled is false in config.yaml — nothing to do.", "backend": backend}
+
+    # force=True ("Re-check already-enriched items too") rebuilds the
+    # Trends tab from scratch first. Necessary, not just tidy: add_company
+    # and auto_upsert_device both deliberately never overwrite an existing
+    # row (so a hand-correction can't get silently clobbered by a later
+    # re-extraction) — which also means a bad value from before an
+    # extraction-quality fix sticks around forever even after re-
+    # enrichment, since the insert is just skipped, not updated. Wiping
+    # the auto-extracted rows first is what makes a re-check pass actually
+    # a do-over. Manually-added/edited rows (auto_extracted=0) are never
+    # touched. A plain (non-force) enrich run leaves Trends alone, same as
+    # always — this only fires on the explicit "re-check" ask.
+    if force:
+        devices_cleared, companies_cleared = db.clear_auto_extracted_trends()
+        if devices_cleared or companies_cleared:
+            print(
+                f"[enrich] Rebuilding Trends from scratch: cleared {devices_cleared} auto-extracted device(s) and "
+                f"{companies_cleared} auto-extracted compan(ies) — repopulated as their source items get re-enriched below."
+            )
 
     # Rows for the same story across multiple feeds are expected and
     # stay separate — this only makes sure they agree on novelty. See

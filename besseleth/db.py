@@ -938,6 +938,24 @@ class DB:
         self.conn.execute("DELETE FROM companies WHERE lower(name) = lower(?)", (name,))
         self.conn.commit()
 
+    def clear_auto_extracted_trends(self) -> tuple[int, int]:
+        """Wipes every AUTO-EXTRACTED devices/companies row (never a
+        manually-added or manually-edited one) — for rebuilding the
+        Trends tab from scratch alongside a full re-enrich pass. Exists
+        because add_company/auto_upsert_device never overwrite an
+        existing row (deliberately, so a hand-correction never gets
+        silently clobbered by a later, possibly-wrong re-extraction) —
+        which also means a bad value from before an extraction-quality
+        fix (a wrong unit conversion, say) sticks around FOREVER even
+        after re-enrichment, since there's no matching row to update, only
+        one to skip. Clearing first is what turns 're-check everything'
+        into an actual do-over instead of leaving every already-wrong row
+        in place. Returns (devices_removed, companies_removed)."""
+        dev_cur = self.conn.execute("DELETE FROM devices WHERE auto_extracted = 1")
+        co_cur = self.conn.execute("DELETE FROM companies WHERE auto_extracted = 1")
+        self.conn.commit()
+        return dev_cur.rowcount, co_cur.rowcount
+
     def merge_company(self, keep_name: str, drop_name: str) -> None:
         """Folds `drop_name` into `keep_name` — fills any field that's
         set on the dropped row but null/empty on the kept one, then

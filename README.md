@@ -565,8 +565,18 @@ say), this does one full pass over every item currently in
 `enrichment.sources` — bounded by a count taken when the run starts, not
 "until empty" (a re-check queue has no empty state to reach on its own,
 so without that bound, checking both together used to silently fall
-back to one capped batch — fixed). Requires
-`summarizer.backend: "ollama"` to actually extract anything (Ollama
+back to one capped batch — fixed). **"Re-check already-enriched items
+too" on its own (Enrich everything not required) also rebuilds the
+Trends tab from scratch first** — every auto-extracted device/company row
+gets cleared before the re-check pass repopulates them. This is necessary,
+not just tidy: `add_company`/device auto-upsert deliberately never
+overwrite an existing row (so a hand-correction can never get silently
+clobbered by a later re-extraction), which also means a bad value from
+before an extraction-quality fix — a wrong unit conversion, say — would
+otherwise stick around forever even after re-enriching its source item,
+since the insert is just skipped rather than updated. Manually-added or
+hand-edited rows are never touched by this, only ones enrichment itself
+auto-extracted. Requires `summarizer.backend: "ollama"` to actually extract anything (Ollama
 running) — without it, items are marked `org_type: unknown` etc. rather
 than left unprocessed forever, since there's nothing more to learn
 without an LLM. The vocab above is a *suggestion* in the prompt, not a
