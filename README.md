@@ -500,19 +500,19 @@ besseleth asks the local LLM to tag every new item with:
   entry for one it doesn't. A lab not listed just falls through to the
   LLM's own extraction and normalization, exactly as if labs.yaml didn't
   exist.
-- **org_type** — industry / academic / government / nonprofit / unknown
+- **org_type** — industry / academic / government / nonprofit / general / unknown
 - **modality** — EEG, ECoG, CNS implant, PNS implant, EMG, fMRI, fNIRS,
-  or another short label if none fit. **Multi-valued**: a study combining
-  more than one technique (e.g. EEG + eye-tracking) gets tagged with each
-  one separately rather than forced into a single combined label — the
-  Papers tab's Modality filter is a multi-select that matches an item if
-  ANY of its tags match ANY you've selected. "BCI"/"brain-computer
-  interface" (or this config's own industry name) is never used as a tag
-  on its own — that names the whole field, not a specific technique, so
-  it's rejected the same way an org name matching the industry name/a
-  keyword is rejected
+  general, or another short label if none fit. **Multi-valued**: a study
+  combining more than one technique (e.g. EEG + eye-tracking) gets tagged
+  with each one separately rather than forced into a single combined
+  label — the Papers tab's Modality filter is a multi-select that matches
+  an item if ANY of its tags match ANY you've selected. "BCI"/"brain-
+  computer interface" (or this config's own industry name) is never used
+  as a tag on its own — that names the whole field, not a specific
+  technique, so it's rejected the same way an org name matching the
+  industry name/a keyword is rejected
 - **therapeutic_target** — what it addresses: motor, speech, vision,
-  hearing, memory, mood/psychiatric, epilepsy, pain, other
+  hearing, memory, mood/psychiatric, epilepsy, pain, other, general
 - **novelty_score** (1-5) — how surprising the item is **compared to
   other recent items on the same topic** (besseleth pulls a handful of
   similar items from the DB and includes them in the prompt so the score
@@ -526,12 +526,23 @@ means the text genuinely never names a specific lab/PI, not a failed
 extraction — that's a deliberate "null over a wrong guess" design choice
 throughout enrichment: an author's institution isn't enough on its own
 either (a bare university name is still null; besseleth wants the
-specific lab, not "Stanford"). `unknown` modality/therapeutic_target is
-usually more fixable — the prompt asks for a best-effort call from what's
-described even if the exact word never appears, but a smaller/weaker
-local model tends to play it safe and bail to "unknown" anyway; a
-stronger `summarizer.model` (if your hardware can run one) generally
-does noticeably better at this than prompt wording alone can.
+specific lab, not "Stanford"). A genuinely `unknown` modality/
+therapeutic_target is rarer than it used to be: a lot of what used to
+collapse into "unknown" is actually **`general`** instead — a distinct
+value for "this item is genuinely about the technology/field broadly,
+not tied to one org/technique/target" (an industry trend piece, a
+funding-market roundup, a policy story), which is a real answer, not a
+gap. `unknown` is now reserved for the narrower case of a specific
+org/technique/target clearly being discussed that the text just doesn't
+name — the prompt asks for a best-effort call from what's described even
+if the exact word never appears, but a smaller/weaker local model still
+sometimes plays it safe and bails to "unknown" anyway; a stronger
+`summarizer.model` (if your hardware can run one) generally does
+noticeably better at this than prompt wording alone can. Note that this
+`general` distinction only applies going forward — an item enriched
+before this change still shows the old null/unknown; run **Re-check
+already-enriched items too** (Enrich now, Papers tab) to reclassify your
+existing backlog.
 
 The automatic pass after each fetch is bounded (`enrichment.max_items_per_run`,
 default 10) so one fetch cycle can't trigger unbounded LLM calls — it
