@@ -168,8 +168,8 @@
         <option value="3">3+</option><option value="4">4+</option><option value="5">5 only</option>
       </select></div>
       <div><label for="pfSort">Sort by</label><select id="pfSort">
-        <option value="date">Date (newest)</option><option value="novelty">Novelty (highest)</option>
-        <option value="citations">Citations (highest)</option>
+        <option value="date">Date (newest)</option><option value="date_oldest">Date (oldest)</option>
+        <option value="novelty">Novelty (highest)</option><option value="citations">Citations (highest)</option>
       </select></div>
       <div><label>&nbsp;</label><button class="btn" id="clearSourceBtn" title="Delete EVERY item currently stored for the selected source (e.g. after a stale keyword polluted it) — irreversible; a re-fetch only brings back what's still inside the normal fetch window">Clear source…</button></div>
     </div>
@@ -1336,6 +1336,7 @@ function renderPapers(resetPage = true) {
   rows = rows.slice().sort((a, b) => {
     if (sortBy === 'novelty') return (b.novelty_score || 0) - (a.novelty_score || 0);
     if (sortBy === 'citations') return (b.citation_count || 0) - (a.citation_count || 0);
+    if (sortBy === 'date_oldest') return (a.published_at || '').localeCompare(b.published_at || '');
     return (b.published_at || '').localeCompare(a.published_at || '');
   });
 
@@ -1349,7 +1350,7 @@ function renderPapers(resetPage = true) {
   const moreBtn = document.getElementById('papersShowMoreBtn');
   if (moreBtn) {
     moreBtn.style.display = remaining > 0 ? '' : 'none';
-    moreBtn.textContent = `Show more (${Math.min(remaining, 50)} of ${remaining} remaining)`;
+    moreBtn.textContent = `Show all (${remaining} remaining)`;
   }
 
   // Authors condensed to "First Author et al." — the full comma-separated
@@ -1432,8 +1433,8 @@ document.getElementById('clearSourceBtn').onclick = async () => {
 };
 
 document.getElementById('papersShowMoreBtn').onclick = () => {
-  papersPageSize += 50;
-  renderPapers(false); // false: keep the page size we just grew, don't reset back to 50
+  papersPageSize = Infinity; // show every remaining filtered row, not another capped batch
+  renderPapers(false); // false: keep it expanded, don't reset back to 50
 };
 
 document.getElementById('exportPapersBtn').onclick = () => {
