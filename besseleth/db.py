@@ -234,6 +234,24 @@ class DB:
         self.set_meta("enrich_last_run_seconds", str(seconds))
         self.set_meta("enrich_last_run_at", datetime.now(timezone.utc).isoformat())
 
+    def enrichment_progress(self, sources: list[str]) -> tuple[int, int]:
+        """(enriched_count, total_count) across the given sources right
+        now — a live snapshot of the *current* DB, unlike get_enrich_stats'
+        all-time counter (which is a lifetime running total that never
+        goes down, even after a bulk delete/source-clear). This is scoped
+        to `sources` specifically (normally enrichment.sources) rather
+        than every item in the DB: linkedin/social/event/clip items are
+        never enrichment targets at all, so counting them as 'not yet
+        enriched' would understate progress on what's actually eligible."""
+        if not sources:
+            return 0, 0
+        placeholders = ",".join("?" for _ in sources)
+        total = self.conn.execute(f"SELECT COUNT(*) FROM items WHERE source IN ({placeholders})", sources).fetchone()[0]
+        enriched = self.conn.execute(
+            f"SELECT COUNT(*) FROM items WHERE source IN ({placeholders}) AND enriched_at IS NOT NULL", sources
+        ).fetchone()[0]
+        return enriched, total
+
     def get_enrich_stats(self) -> dict:
         return {
             "total_items": int(self.get_meta("enrich_total_items") or 0),

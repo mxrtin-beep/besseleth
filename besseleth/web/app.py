@@ -504,13 +504,24 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
 
     @app.get("/api/enrich/stats")
     def api_enrich_stats():
-        # Read-only — for the dashboard to show "enriched N items so far,
-        # avg Xs/item" on page load, without triggering a run.
+        # Read-only — for the dashboard to show enrichment progress on
+        # page load, without triggering a run.
+        from .enrich import DEFAULT_SOURCES
+
+        sources = config.raw.get("enrichment", {}).get("sources", DEFAULT_SOURCES)
         db = DB(config.db_path)
         try:
             stats = db.get_enrich_stats()
+            enriched, total = db.enrichment_progress(sources)
         finally:
             db.close()
+        # current_enriched/current_total: a live snapshot of right now
+        # (goes down if you delete items, unlike total_items/total_seconds
+        # below, which are an all-time running total that never resets —
+        # kept for the avg-seconds-per-item math, but current_* is the
+        # number actually worth looking at day to day).
+        stats["current_enriched"] = enriched
+        stats["current_total"] = total
         return jsonify(stats)
 
     @app.get("/api/enrich/log")

@@ -1198,13 +1198,22 @@ function renderJobs() {
 
 function renderEnrichStats(stats) {
   const el = document.getElementById('enrichStats');
-  if (!stats || !stats.total_items) { el.textContent = ''; return; }
-  const avg = stats.total_seconds / stats.total_items;
-  let text = `Enriched ${stats.total_items} item(s) all-time (avg ${avg.toFixed(1)}s/item).`;
+  if (!stats) { el.textContent = ''; return; }
+  // Leads with the live count (how much of what's currently in the DB is
+  // actually enriched) rather than the all-time running total — that
+  // counter only ever goes up, even across a source-clear/rebuild, so
+  // it stops meaning "how caught up am I" the moment you delete anything.
+  let text = (stats.current_total)
+    ? `${stats.current_enriched} of ${stats.current_total} current item(s) enriched.`
+    : '';
+  if (stats.total_items) {
+    const avg = stats.total_seconds / stats.total_items;
+    text += ` (avg ${avg.toFixed(1)}s/item over ${stats.total_items} enriched all-time.)`;
+  }
   if (stats.last_run_items) {
     text += ` Last run: ${stats.last_run_items} item(s) in ${stats.last_run_seconds.toFixed(1)}s.`;
   }
-  el.textContent = text;
+  el.textContent = text.trim();
 }
 
 (async () => {
@@ -1238,7 +1247,11 @@ document.getElementById('enrichNowBtn').onclick = async (ev) => {
     await loadPapers();
     btn.textContent = data ? `Enrich now (+${data.enriched})` : 'Enrich now';
     resultEl.textContent = (data && data.message) || s.last_error || '';
-    if (data && data.stats) renderEnrichStats(data.stats);
+    // Re-fetch rather than using data.stats directly — that object comes
+    // straight from enrich.py's own return value, which doesn't know the
+    // current_enriched/current_total live counts (those are computed
+    // separately, only in this endpoint).
+    renderEnrichStats(await (await fetch('/api/enrich/stats')).json());
   } catch (e) {
     btn.textContent = 'Enrich now (failed)';
     resultEl.textContent = 'Request failed — see server log.';
