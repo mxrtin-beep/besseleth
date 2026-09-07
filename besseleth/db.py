@@ -3,6 +3,7 @@ structured "paper" fields (org, modality, therapeutic target, novelty)
 that besseleth/enrich.py fills in for the papers table."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -443,19 +444,32 @@ class DB:
         )
         self.conn.commit()
 
-    def recent_items_for_context(self, source: str, keywords: list[str], exclude_id: str, limit: int = 5) -> list[sqlite3.Row]:
+    def recent_items_for_context(self, sources: list[str], keywords: list[str], exclude_id: str, limit: int = 5) -> list[sqlite3.Row]:
         """A handful of other recent items sharing at least one keyword —
-        used as novelty-scoring context ('surprising compared to what?')."""
-        if not keywords:
+        used as novelty-scoring context ('surprising compared to what?').
+
+        Searches across ALL of `sources` (normally enrichment.sources —
+        papers/news/blog), not just the item's own source: a news article
+        announcing a result is exactly as "surprising compared to what?"
+        against a paper that already reported it three months ago as it
+        is against another news article. Restricting to same-source
+        alone (the original behavior) meant a news item never got
+        compared against the actual papers covering the same technique,
+        which is usually the more informative comparison — a journalist
+        writing up a result that's been in the literature for a year
+        should score low novelty, and same-source-only context couldn't
+        catch that."""
+        if not keywords or not sources:
             return []
         self.conn.row_factory = sqlite3.Row
+        source_placeholders = ",".join("?" for _ in sources)
         clauses = " OR ".join("matched_keywords LIKE ?" for _ in keywords)
         params = [f"%{kw}%" for kw in keywords]
         q = (
-            f"SELECT title, summary FROM items WHERE source = ? AND id != ? AND ({clauses}) "
+            f"SELECT title, summary, source FROM items WHERE source IN ({source_placeholders}) AND id != ? AND ({clauses}) "
             "ORDER BY published_at DESC LIMIT ?"
         )
-        return list(self.conn.execute(q, [source, exclude_id, *params, limit]).fetchall())
+        return list(self.conn.execute(q, [*sources, exclude_id, *params, limit]).fetchall())
 
     def save_enrichment(
         self,
@@ -828,6 +842,39 @@ class DB:
                 "SELECT * FROM items WHERE enriched_at IS NOT NULL ORDER BY enriched_at DESC LIMIT ?", (limit,)
             ).fetchall()
         )
+
+    def best_known_metric_values(self, metric_keys: list[str]) -> dict[str, dict]:
+        """For each numeric trend metric key, the best (highest) value
+        besseleth has ever recorded for it across every device — the
+        actual accumulated 'state of the art' this instance has observed,
+        used as grounding context so novelty scoring can judge a reported
+        number against a real prior benchmark instead of the LLM's own
+        (often wrong, un-updateable) sense of what's impressive for this
+        specific numeric field. Returns {key: {"value": float, "device":
+        str, "org": str}} — keys with no recorded value at all are
+        omitted. Computed in Python over metrics_json rather than in SQL:
+        the devices table is small (dozens to low hundreds of rows even
+        with heavy use), and a value is only ever a JSON blob here, not a
+        column SQLite could index/aggregate directly anyway."""
+        if not metric_keys:
+            return {}
+        self.conn.row_factory = sqlite3.Row
+        rows = self.conn.execute("SELECT name, org, metrics_json FROM devices").fetchall()
+        best: dict[str, dict] = {}
+        for row in rows:
+            if not row["metrics_json"]:
+                continue
+            try:
+                metrics = json.loads(row["metrics_json"])
+            except ValueError:
+                continue
+            for key in metric_keys:
+                value = metrics.get(key)
+                if not isinstance(value, (int, float)):
+                    continue
+                if key not in best or value > best[key]["value"]:
+                    best[key] = {"value": value, "device": row["name"], "org": row["org"]}
+        return best
 
     def papers(self, sources: list[str]) -> list[sqlite3.Row]:
         """All items in the given sources, enriched or not — the papers

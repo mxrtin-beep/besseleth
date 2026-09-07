@@ -515,9 +515,17 @@ besseleth asks the local LLM to tag every new item with:
   hearing, memory, mood/psychiatric, epilepsy, pain, other, general
 - **novelty_score** (1-5) — how surprising the item is **compared to
   other recent items on the same topic** (besseleth pulls a handful of
-  similar items from the DB and includes them in the prompt so the score
-  is relative, not just "does this sound impressive in isolation"),
-  with a one-sentence rationale shown on hover
+  similar items from the DB — across every enrichment source, not just
+  the item's own, so a news article gets compared against the papers
+  already covering the same result, not just other news) **and against
+  the best value besseleth has ever recorded for a relevant device
+  metric**, when the item reports one (e.g. an information transfer rate
+  that merely matches — or falls short of — the best one already in your
+  Trends data is incremental, not novel, regardless of how the item's
+  own framing sounds) — included in the prompt so the score is grounded
+  in your actual accumulated history, not just "does this sound
+  impressive in isolation" or the model's own general sense of what's
+  good. A one-sentence rationale is shown on hover
 
 **Why is org/modality/therapeutic_target often null/unknown?** The LLM
 only ever sees the item's own title + text (abstract, for arXiv) — never

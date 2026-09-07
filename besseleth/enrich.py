@@ -89,7 +89,7 @@ def ollama_status(summarizer_cfg: dict) -> tuple[bool, str]:
     return True, f"Ollama reachable at {ollama_url}, model {model!r} available."
 
 
-def _build_prompt(row, config: Config, context: str, author_affiliations: str = "") -> str:
+def _build_prompt(row, config: Config, context: str, author_affiliations: str = "", known_benchmarks: str = "") -> str:
     metric_keys = ", ".join(f"{m['key']} ({m.get('unit', '')})" for m in config.trend_metrics if m.get("type", "numeric") == "numeric")
     categorical_keys = ", ".join(m["key"] for m in config.trend_metrics if m.get("type") == "categorical")
 
@@ -99,6 +99,16 @@ def _build_prompt(row, config: Config, context: str, author_affiliations: str = 
         f'the "org" rule below — a bare institution name with no specific lab identified is still null):\n'
         f"{author_affiliations}\n"
         if author_affiliations
+        else ""
+    )
+
+    benchmarks_block = (
+        f"\nBest values besseleth has recorded so far for these metrics, across every device it has ever seen "
+        f"(actual accumulated history, not general knowledge — use this to judge whether a reported number in "
+        f"this item is actually notable or just ordinary, e.g. a reported rate BELOW the known best is incremental "
+        f"even if it sounds impressive in isolation, and one that clearly BEATS it is genuinely novel):\n"
+        f"{known_benchmarks}\n"
+        if known_benchmarks
         else ""
     )
 
@@ -150,7 +160,11 @@ def _build_prompt(row, config: Config, context: str, author_affiliations: str = 
         '"unknown" only when a specific application IS clearly being discussed but the target genuinely can\'t be '
         "determined from the text — not simply because it isn't spelled out explicitly\n"
         '  "novelty_score": integer 1-5 — how surprising/novel this is COMPARED TO the other recent items on the '
-        "same topic listed below (1 = incremental/expected, 5 = a genuine surprise or breakthrough relative to them)\n"
+        "same topic listed below (1 = incremental/expected, 5 = a genuine surprise or breakthrough relative to them) "
+        "AND, if this item reports a number for one of the device_metrics above, compared to the best value "
+        'besseleth has recorded for that metric (see "Best values" below, when given) — a number that merely '
+        "matches or falls short of the known best is incremental regardless of how the item's own framing sounds, "
+        "while one that clearly beats it is genuine evidence for a higher score, not just the item's own tone\n"
         '  "novelty_rationale": one concise sentence justifying the novelty_score\n'
         '  "location": the city and country of the org\'s relevant site/HQ mentioned or clearly implied by the '
         'text, as "City, Country" (e.g. "San Francisco, USA") — null if not mentioned or you would be guessing\n'
@@ -180,9 +194,10 @@ def _build_prompt(row, config: Config, context: str, author_affiliations: str = 
         'funding amount/round for "org"; ipo_date/stock_exchange only if this item reports "org" actually going '
         'public (an IPO that happened or a completed direct listing — e.g. "NASDAQ: XYZ" starts trading), NOT a '
         'mere announcement/rumor of a planned future IPO — use {} if none of this applies\n'
-        f"{affiliations_block}\n"
+        f"{affiliations_block}"
+        f"{benchmarks_block}\n"
         f"Item title: {row['title']}\nItem text: {(row['summary'] or '')[:1500]}\n\n"
-        f"Other recent items on the same topic (for novelty comparison):\n{context}\n\n"
+        f"Other recent items on the same topic, across every source type (for novelty comparison):\n{context}\n\n"
         "Respond with ONLY the JSON object, no other text."
     )
 
@@ -646,6 +661,23 @@ def _arxiv_id_from_url(url: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _known_benchmarks_block(config: Config, db: DB) -> str:
+    """Formats db.best_known_metric_values() into prompt text — "" if
+    besseleth has never recorded a single numeric metric yet (a fresh
+    setup, or before any device has been extracted), so this is always
+    safe to splice in unconditionally, same as _author_affiliations_block."""
+    numeric_keys = [m["key"] for m in config.trend_metrics if m.get("type", "numeric") == "numeric"]
+    best = db.best_known_metric_values(numeric_keys)
+    if not best:
+        return ""
+    unit_by_key = {m["key"]: m.get("unit", "") for m in config.trend_metrics}
+    lines = [
+        f"- {key} ({unit_by_key.get(key, '')}): {v['value']:,} — {v['device']} ({v['org']})"
+        for key, v in best.items()
+    ]
+    return "\n".join(lines)
+
+
 def _author_affiliations_block(row) -> str:
     """Real author-institution data for an arXiv item (see
     web_lookup.lookup_arxiv_authorships's docstring for why this is a
@@ -673,13 +705,23 @@ def _author_affiliations_block(row) -> str:
 def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
     """Returns True if enrichment was saved (success or graceful
     'unknown' fallback), False if it should be retried next time."""
+    # Cross-source: searches every enrichment-eligible source, not just
+    # this item's own — a news article reporting a result is exactly as
+    # "surprising compared to what?" against a paper that already covered
+    # it, and that's usually the more informative comparison (same-source-
+    # only context couldn't catch a journalist reporting year-old work).
+    context_sources = config.raw.get("enrichment", {}).get("sources", DEFAULT_SOURCES)
     context_rows = db.recent_items_for_context(
-        row["source"], (row["matched_keywords"] or "").split(","), exclude_id=row["id"]
+        context_sources, (row["matched_keywords"] or "").split(","), exclude_id=row["id"]
     )
-    context = "\n".join(f"- {r['title']}: {(r['summary'] or '')[:200]}" for r in context_rows) or "(no similar recent items yet)"
+    context = (
+        "\n".join(f"- [{r['source']}] {r['title']}: {(r['summary'] or '')[:200]}" for r in context_rows)
+        or "(no similar recent items yet)"
+    )
     author_affiliations = _author_affiliations_block(row)
+    known_benchmarks = _known_benchmarks_block(config, db)
 
-    prompt = _build_prompt(row, config, context, author_affiliations)
+    prompt = _build_prompt(row, config, context, author_affiliations, known_benchmarks)
     result = summarizer_mod._ollama_generate(
         prompt,
         summarizer_cfg.get("ollama_url", "http://localhost:11434"),
