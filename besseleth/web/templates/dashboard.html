@@ -1852,13 +1852,13 @@ function renderTable() {
     });
   } else {
     table.innerHTML = `
-      <thead><tr><th>Company</th><th>Funding</th><th>Last round</th><th>Stock</th><th>Source</th><th>Notes</th></tr></thead>
+      <thead><tr><th>Company</th><th>Funding</th><th>Last round</th><th>Active job postings</th><th>Source</th><th>Notes</th></tr></thead>
       <tbody>${companies.map(c => `
         <tr>
           <td>${c.name}</td>
           <td>${c.funding_total_usd ? '$' + c.funding_total_usd.toLocaleString() : '—'}</td>
           <td>${c.last_funding_round ? `${c.last_funding_round} (${c.last_funding_date})` : '—'}</td>
-          <td>${c.stock_price ? `${c.stock_ticker}: $${c.stock_price.toLocaleString()}` : (c.stock_ticker || '—')}</td>
+          <td>${c.active_job_postings || '—'}</td>
           <td>${c.source_url ? `<a href="${c.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
           <td class="hint">${c.notes || ''}</td>
         </tr>`).join('')}</tbody>`;

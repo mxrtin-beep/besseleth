@@ -59,9 +59,16 @@ industry:
       label: "Total funding raised"
       unit: "USD"
       type: "numeric"
-    - key: "stock_price"
-      label: "Stock price"
-      unit: "USD"
+    # active_job_postings isn't extracted from articles like the other
+    # metrics here — it's computed live from the Jobs tab's data (every
+    # currently-active posting jobs_scraper has found via each org's
+    # Greenhouse/Lever/Ashby board). A free, always-fresh signal
+    # available for most companies you're tracking (unlike stock_price,
+    # essentially never populated since almost no neurotech company is
+    # public) — hiring pace as a growth/momentum signal.
+    - key: "active_job_postings"
+      label: "Active job postings"
+      unit: "postings"
       type: "numeric"
 
 sources:

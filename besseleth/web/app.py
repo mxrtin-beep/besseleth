@@ -163,6 +163,11 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
     @app.get("/api/companies")
     def api_companies():
         companies = load_companies(config.companies_path, config.legacy_companies_yaml_path)
+        db = DB(config.db_path)
+        try:
+            active_job_counts = db.active_job_counts_by_org()
+        finally:
+            db.close()
         return jsonify(
             [
                 {
@@ -179,6 +184,12 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
                     "source_url": c.source_url,
                     "notes": c.notes,
                     "auto_extracted": c.auto_extracted,
+                    # A free, always-fresh proxy for hiring momentum —
+                    # unlike stock_price/ipo_date (almost never populated;
+                    # most tracked companies are private), this is
+                    # available for any company with a known job board —
+                    # see db.active_job_counts_by_org's docstring.
+                    "active_job_postings": active_job_counts.get(c.name, 0),
                 }
                 for c in companies
             ]

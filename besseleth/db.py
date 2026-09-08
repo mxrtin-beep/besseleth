@@ -824,6 +824,20 @@ class DB:
         self.conn.commit()
         return cur.rowcount
 
+    def active_job_counts_by_org(self) -> dict[str, int]:
+        """Currently-active (not marked removed) job posting count per
+        org — a free, always-fresh proxy for hiring momentum/company
+        growth, using data jobs_scraper already collects. Powers the
+        Trends tab's 'Active job postings' company metric, in place of
+        stock price/IPO date (almost never populated — most neurotech
+        companies are private) as a numeric signal that's actually
+        available for most tracked companies, not just the rare public
+        one."""
+        rows = self.conn.execute(
+            "SELECT org, COUNT(*) FROM job_postings WHERE removed_at IS NULL GROUP BY org"
+        ).fetchall()
+        return {org: count for org, count in rows}
+
     def job_postings(self, active_only: bool = False) -> list[sqlite3.Row]:
         self.conn.row_factory = sqlite3.Row
         q = "SELECT * FROM job_postings"
