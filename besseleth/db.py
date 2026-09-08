@@ -838,6 +838,30 @@ class DB:
         ).fetchall()
         return {org: count for org, count in rows}
 
+    def job_postings_added_by_org(self, days: int = 30) -> dict[str, int]:
+        """How many NEW postings each org's board has picked up in the
+        last `days` days — a velocity signal, distinct from
+        active_job_counts_by_org's snapshot: a company with 50 stagnant
+        postings and one that just added 8 this month look identical
+        under a raw count alone, but very different under this."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        rows = self.conn.execute(
+            "SELECT org, COUNT(*) FROM job_postings WHERE first_seen_at >= ? GROUP BY org", (cutoff,)
+        ).fetchall()
+        return {org: count for org, count in rows}
+
+    def publication_counts_by_org(self) -> dict[str, int]:
+        """How many 'papers' items besseleth has ever attributed to each
+        org — a free research-output signal derived entirely from data
+        already extracted during enrichment, no new scraping. Counts
+        every papers-source item with that org, arXiv preprint and
+        OpenAlex-indexed published paper alike (see pipeline.py — both
+        feed the same merged 'papers' source)."""
+        rows = self.conn.execute(
+            "SELECT org, COUNT(*) FROM items WHERE source = 'papers' AND org IS NOT NULL AND org != '' GROUP BY org"
+        ).fetchall()
+        return {org: count for org, count in rows}
+
     def job_postings(self, active_only: bool = False) -> list[sqlite3.Row]:
         self.conn.row_factory = sqlite3.Row
         q = "SELECT * FROM job_postings"

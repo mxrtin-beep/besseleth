@@ -70,6 +70,18 @@ industry:
       label: "Active job postings"
       unit: "postings"
       type: "numeric"
+    # Velocity, not snapshot: new postings on this org's board in the
+    # last 30 days — distinguishes stagnant vs. actively-growing boards.
+    - key: "job_postings_added_30d"
+      label: "Job postings added (30d)"
+      unit: "postings"
+      type: "numeric"
+    # Free research-output signal from data already extracted during
+    # enrichment (every papers-source item's org) — no new scraping.
+    - key: "publication_count"
+      label: "Publications"
+      unit: "papers"
+      type: "numeric"
 
 sources:
   arxiv:

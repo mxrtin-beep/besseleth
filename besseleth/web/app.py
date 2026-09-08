@@ -166,6 +166,8 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         db = DB(config.db_path)
         try:
             active_job_counts = db.active_job_counts_by_org()
+            added_job_counts = db.job_postings_added_by_org()
+            publication_counts = db.publication_counts_by_org()
         finally:
             db.close()
         return jsonify(
@@ -190,6 +192,8 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
                     # available for any company with a known job board —
                     # see db.active_job_counts_by_org's docstring.
                     "active_job_postings": active_job_counts.get(c.name, 0),
+                    "job_postings_added_30d": added_job_counts.get(c.name, 0),
+                    "publication_count": publication_counts.get(c.name, 0),
                 }
                 for c in companies
             ]
