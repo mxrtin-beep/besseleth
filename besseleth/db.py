@@ -176,6 +176,7 @@ class Item:
     matched_reason: Optional[str] = None
     org: Optional[str] = None
     org_type: Optional[str] = None
+    org_description: Optional[str] = None
     modality: Optional[str] = None
     therapeutic_target: Optional[str] = None
     novelty_score: Optional[int] = None
@@ -444,6 +445,7 @@ class DB:
                 id=r["id"], source=r["source"], title=r["title"], url=r["url"] or "",
                 summary=r["summary"] or "", published_at=r["published_at"] or "",
                 novelty_score=r["novelty_score"], novelty_rationale=r["novelty_rationale"],
+                org=r["org"], org_type=r["org_type"], org_description=r["org_description"],
             )
             for r in rows
         ]
@@ -452,6 +454,13 @@ class DB:
         self.conn.execute(
             "UPDATE items SET novelty_score = ?, novelty_rationale = ? WHERE id = ?",
             (novelty_score, novelty_rationale, item_id),
+        )
+        self.conn.commit()
+
+    def sync_org(self, item_id: str, org: Optional[str], org_type: Optional[str], org_description: Optional[str]) -> None:
+        self.conn.execute(
+            "UPDATE items SET org = ?, org_type = ?, org_description = ? WHERE id = ?",
+            (org, org_type, org_description, item_id),
         )
         self.conn.commit()
 

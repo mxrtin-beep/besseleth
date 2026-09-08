@@ -1072,6 +1072,66 @@ def _sync_duplicate_novelty(config: Config, db: DB) -> int:
     return synced
 
 
+def _sync_duplicate_orgs(config: Config, db: DB) -> tuple[int, int]:
+    """Same idea as _sync_duplicate_novelty, for `org`/`org_type`/
+    `org_description`: multiple rows for the same underlying paper/story
+    (arXiv + OpenAlex versions of one paper, or the same news article via
+    two feeds) are expected and kept — but each row's org gets extracted
+    independently, by a separate LLM call that can just have a worse day
+    on one of them (e.g. "Poon Lab" on one row, a hallucinated "Pooiman
+    Lab" on the other, for literally the same paper). Within a confirmed
+    near-duplicate group, a disagreement is unambiguous evidence at least
+    one row is wrong — unlike _apply_location_consensus's org-wide
+    location voting (where "no clear majority" means leave it alone, one
+    real org can legitimately show up at more than one true location),
+    here the group IS the same one real-world item, so there's exactly
+    one correct answer. Applies the majority org when there's a clear one
+    (3+ member groups); with a tie (most commonly a 2-row group split
+    1-vs-1, arXiv/OpenAlex's most common shape) there's no way to tell
+    which side is right, so both get nulled rather than guessing — same
+    "null over a wrong guess" standard used everywhere else in this file.
+    Returns (rows synced to the majority, rows nulled on a tie)."""
+    from .dedupe import group_near_duplicates
+
+    cfg = config.raw.get("enrichment", {}) or {}
+    sources = cfg.get("sources", DEFAULT_SOURCES)
+    items = db.recent_items_for_dedupe(sources)
+    if len(items) < 2:
+        return 0, 0
+
+    synced = 0
+    nulled = 0
+    for group in group_near_duplicates(items):
+        if len(group) < 2:
+            continue
+        orgs_present = [i.org for i in group if i.org]
+        if not orgs_present:
+            continue  # nobody in this group has an org yet — nothing to reconcile
+        distinct = set(orgs_present)
+        if len(distinct) == 1:
+            continue  # already unanimous (nulls don't count as disagreement)
+
+        counts = {org: orgs_present.count(org) for org in distinct}
+        ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+        has_majority = len(ranked) == 1 or ranked[0][1] > ranked[1][1]
+
+        if has_majority:
+            canonical = next(i for i in group if i.org == ranked[0][0])
+            for item in group:
+                if (item.org, item.org_type, item.org_description) == (canonical.org, canonical.org_type, canonical.org_description):
+                    continue
+                db.sync_org(item.id, canonical.org, canonical.org_type, canonical.org_description)
+                synced += 1
+        else:
+            for item in group:
+                if item.org is None:
+                    continue
+                db.sync_org(item.id, None, None, None)
+                nulled += 1
+
+    return synced, nulled
+
+
 def enrich_items_detailed(
     config: Config, db: DB, force: bool = False, run_until_done: bool = False, background: bool = False,
     progress_cb=None,
@@ -1147,6 +1207,16 @@ def enrich_items_detailed(
     synced = _sync_duplicate_novelty(config, db)
     if synced:
         print(f"[enrich] Synced novelty score across {synced} duplicate item(s) of the same story.")
+
+    # Same idea, for org/org_type/org_description — see
+    # _sync_duplicate_orgs()'s docstring for why a disagreement here (two
+    # rows for the same paper naming two different orgs) always means at
+    # least one is wrong, and why a tie gets nulled rather than guessed.
+    org_synced, org_nulled = _sync_duplicate_orgs(config, db)
+    if org_synced:
+        print(f"[enrich] Synced org to the majority across {org_synced} duplicate item(s) of the same story.")
+    if org_nulled:
+        print(f"[enrich] Cleared org on {org_nulled} duplicate item(s) whose org disagreed with no clear majority.")
 
     # Self-healing cleanup for items enriched before this guard existed
     # (or before it covered vague-group phrasing like "Chinese scientists")
