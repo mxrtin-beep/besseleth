@@ -45,7 +45,7 @@ def _reconstruct_abstract(inverted_index: dict | None) -> str:
     return " ".join(positions[i] for i in sorted(positions))
 
 
-def fetch(config, days_back: int, max_results_per_keyword: int) -> list[Item]:
+def fetch(config, days_back: int, max_results_per_keyword: int, mailto: str | None = None) -> list[Item]:
     """Fetches papers matching each configured keyword, newest first,
     stopping once results fall outside the `days_back` window.
 
@@ -55,15 +55,26 @@ def fetch(config, days_back: int, max_results_per_keyword: int) -> list[Item]:
     of years (a deep backfill) just returns the same newest handful of
     papers over and over, no matter how far back the window is widened,
     and never actually reaches the older, more-cited papers a backfill is
-    for. This also happens to be the direct explanation for citation
-    counts looking suspiciously all-zero: a paper that's only ever a few
-    days/weeks old genuinely hasn't had time to accumulate citations yet
-    (that's real, not a bug) — but a backfill that was silently stuck on
-    only ever fetching the newest page made EVERY fetched paper look that
-    fresh, backfill or not, which is the bug. Stops paginating for a
-    keyword once a page's oldest entry falls before the cutoff, OpenAlex
-    returns fewer than a full page (no more results), or a hard cap of
-    MAX_RESULTS_PER_KEYWORD_HARD_CAP total is hit."""
+    for. Stops paginating for a keyword once a page's oldest entry falls
+    before the cutoff, OpenAlex returns fewer than a full page (no more
+    results), or a hard cap of MAX_RESULTS_PER_KEYWORD_HARD_CAP total is
+    hit.
+
+    A deep backfill pages through a LOT of requests (page=14+ for one
+    keyword alone isn't unusual), and OpenAlex's default anonymous rate
+    limit is tight enough that a sustained backfill routinely trips 429s
+    — which was the actual, direct explanation for citation counts
+    looking all-zero: most requests were failing outright, not being
+    filtered, so almost nothing from OpenAlex was ever actually stored.
+    Two mitigations, both from OpenAlex's own documented recommendations:
+    `mailto` (optional — pass your email via sources.papers.mailto in
+    config.yaml) joins their "polite pool," a meaningfully higher and
+    more reliable rate limit than anonymous requests get; and a real
+    User-Agent identifies the client instead of the requests-library
+    default. Combined with retry-with-backoff on a 429 (same pattern as
+    arxiv_scraper's fix), this should get a deep backfill through without
+    the sustained failure cascade you'd get from hammering the anonymous
+    pool with no pacing at all."""
     cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days_back)).date()
     cutoff = cutoff_date.isoformat()
     items: list[Item] = []
@@ -81,12 +92,27 @@ def fetch(config, days_back: int, max_results_per_keyword: int) -> list[Item]:
                 "per-page": max_results_per_keyword,
                 "page": page,
             }
-            try:
-                resp = requests.get(OPENALEX_WORKS_API, params=params, timeout=20)
-                resp.raise_for_status()
-                data = resp.json()
-            except (requests.RequestException, ValueError) as e:
-                print(f"[papers] OpenAlex request failed for '{keyword}' (page={page}): {e}")
+            if mailto:
+                params["mailto"] = mailto  # joins OpenAlex's "polite pool" — see fetch()'s docstring
+            headers = {"User-Agent": f"besseleth/1.0 (industry-briefing tool{f'; mailto:{mailto}' if mailto else ''})"}
+
+            data = None
+            for attempt in range(3):
+                try:
+                    resp = requests.get(OPENALEX_WORKS_API, params=params, headers=headers, timeout=20)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    break
+                except (requests.RequestException, ValueError) as e:
+                    is_rate_limited = getattr(e, "response", None) is not None and e.response.status_code == 429
+                    if attempt == 2:
+                        print(f"[papers] OpenAlex request failed for '{keyword}' (page={page}) after 3 attempts: {e}")
+                        data = None
+                        break
+                    backoff = 15 * (attempt + 1) if is_rate_limited else 5 * (attempt + 1)
+                    print(f"[papers] OpenAlex request failed for '{keyword}' (page={page}): {e} — retrying in {backoff}s")
+                    time.sleep(backoff)
+            if data is None:
                 break
 
             results = data.get("results", [])

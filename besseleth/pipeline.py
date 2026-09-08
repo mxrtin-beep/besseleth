@@ -79,6 +79,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
             config,
             days_back=_days_back(papers_cfg.get("days_back", 8), since),
             max_results_per_keyword=papers_cfg.get("max_results_per_keyword", 15),
+            mailto=papers_cfg.get("mailto"),
         )
         results["papers"] += _dedupe_and_store(items, db)
     _tick("Papers (OpenAlex)")

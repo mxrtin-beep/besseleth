@@ -80,6 +80,14 @@ sources:
     enabled: true
     max_results_per_keyword: 15
     days_back: 8
+    # Optional, but recommended especially for a deep backfill: your
+    # email, sent as OpenAlex's documented `mailto` param. Joins their
+    # "polite pool" — a meaningfully higher, more reliable rate limit
+    # than anonymous requests get. A backfill pages through a lot of
+    # requests (page 14+ for one keyword alone isn't unusual), so this
+    # is the difference between that finishing cleanly and hitting
+    # sustained 429s partway through. Never sent anywhere else.
+    # mailto: "you@example.com"
 
   news:
     enabled: true
