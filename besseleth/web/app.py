@@ -168,6 +168,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             active_job_counts = db.active_job_counts_by_org()
             added_job_counts = db.job_postings_added_by_org()
             publication_counts = db.publication_counts_by_org()
+            external_metrics = db.external_metrics_by_org()
         finally:
             db.close()
         return jsonify(
@@ -194,6 +195,9 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
                     "active_job_postings": active_job_counts.get(c.name, 0),
                     "job_postings_added_30d": added_job_counts.get(c.name, 0),
                     "publication_count": publication_counts.get(c.name, 0),
+                    **{
+                        k: v for k, v in external_metrics.get(c.name, {}).items()
+                    },
                 }
                 for c in companies
             ]

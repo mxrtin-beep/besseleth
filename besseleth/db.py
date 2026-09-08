@@ -129,7 +129,18 @@ CREATE TABLE IF NOT EXISTS companies (
 # same auto-migration idiom as ENRICHMENT_COLUMNS, for the same reason:
 # a new metric shouldn't require anyone to re-copy an example file.
 DEVICE_COLUMNS: dict[str, str] = {}
-COMPANY_COLUMNS: dict[str, str] = {}
+COMPANY_COLUMNS: dict[str, str] = {
+    # ClinicalTrials.gov (clinicaltrials_scraper.py) — cumulative across
+    # every trial found with this org as sponsor, not just the latest one.
+    "clinical_trial_count": "INTEGER",
+    "clinical_trial_enrollment_total": "INTEGER",  # total enrolled patients, summed across those trials
+    "clinical_trials_checked_at": "TEXT",
+    # NIH RePORTER (grants_scraper.py) — cumulative award total across
+    # every grant found with this org as the recipient institution.
+    "nih_grant_count": "INTEGER",
+    "nih_grant_total_usd": "REAL",
+    "nih_grants_checked_at": "TEXT",
+}
 
 # Columns added after the initial release — migrated in with ALTER TABLE
 # (each guarded individually so an existing DB upgrades in place).
@@ -994,6 +1005,28 @@ class DB:
         self.conn.row_factory = sqlite3.Row
         return list(self.conn.execute("SELECT * FROM companies ORDER BY name").fetchall())
 
+    def external_metrics_by_org(self) -> dict[str, dict]:
+        """clinical_trial_*/nih_grant_* columns keyed by org name — these
+        were added to `companies` via COMPANY_COLUMNS after the Company
+        dataclass (trends/store.py) was already fixed-shape, so
+        load_companies()'s normal path doesn't surface them; read
+        directly here instead of widening that dataclass for two
+        scrapers' worth of fields."""
+        self.conn.row_factory = sqlite3.Row
+        rows = self.conn.execute(
+            "SELECT name, clinical_trial_count, clinical_trial_enrollment_total, "
+            "nih_grant_count, nih_grant_total_usd FROM companies"
+        ).fetchall()
+        return {
+            row["name"]: {
+                "clinical_trial_count": row["clinical_trial_count"],
+                "clinical_trial_enrollment_total": row["clinical_trial_enrollment_total"],
+                "nih_grant_count": row["nih_grant_count"],
+                "nih_grant_total_usd": row["nih_grant_total_usd"],
+            }
+            for row in rows
+        }
+
     def get_company(self, name: str) -> sqlite3.Row | None:
         self.conn.row_factory = sqlite3.Row
         return self.conn.execute("SELECT * FROM companies WHERE lower(name) = lower(?)", (name,)).fetchone()
@@ -1012,6 +1045,50 @@ class DB:
         )
         self.conn.commit()
         return True
+
+    def set_clinical_trial_stats(self, org: str, count: int, enrollment_total: int) -> None:
+        """Refreshes an org's ClinicalTrials.gov numbers — unlike
+        add_company's never-overwrite semantics (right for a one-off fact
+        like a funding round, where two news reports could disagree and
+        the first one shouldn't get silently clobbered), this is a live
+        external count that's meant to be replaced wholesale on every
+        re-check: there's one true current answer for 'how many trials/
+        patients has this sponsor got right now,' not a set of
+        potentially-conflicting historical reports to preserve. Inserts a
+        bare row if the org isn't in `companies` yet."""
+        now = datetime.now(timezone.utc).isoformat()
+        if not self.add_company(
+            name=org, stock_ticker="", stock_price=None, stock_price_updated_at="",
+            funding_total_usd=None, last_funding_round="", last_funding_date="",
+            ipo_date="", stock_exchange="", is_public=0, source_url="",
+            notes="", auto_extracted=1,
+            clinical_trial_count=count, clinical_trial_enrollment_total=enrollment_total,
+            clinical_trials_checked_at=now,
+        ):
+            self.conn.execute(
+                "UPDATE companies SET clinical_trial_count = ?, clinical_trial_enrollment_total = ?, "
+                "clinical_trials_checked_at = ? WHERE lower(name) = lower(?)",
+                (count, enrollment_total, now, org),
+            )
+            self.conn.commit()
+
+    def set_nih_grant_stats(self, org: str, count: int, total_usd: float) -> None:
+        """Same refresh-wholesale semantics as set_clinical_trial_stats,
+        for NIH RePORTER grant data."""
+        now = datetime.now(timezone.utc).isoformat()
+        if not self.add_company(
+            name=org, stock_ticker="", stock_price=None, stock_price_updated_at="",
+            funding_total_usd=None, last_funding_round="", last_funding_date="",
+            ipo_date="", stock_exchange="", is_public=0, source_url="",
+            notes="", auto_extracted=1,
+            nih_grant_count=count, nih_grant_total_usd=total_usd, nih_grants_checked_at=now,
+        ):
+            self.conn.execute(
+                "UPDATE companies SET nih_grant_count = ?, nih_grant_total_usd = ?, nih_grants_checked_at = ? "
+                "WHERE lower(name) = lower(?)",
+                (count, total_usd, now, org),
+            )
+            self.conn.commit()
 
     def set_company_ipo(self, name: str, ipo_date: str, stock_exchange: str) -> None:
         """Records that a company went public — inserts a bare row if

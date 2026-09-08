@@ -10,8 +10,10 @@ from .personalize import flag_interests, personalize_items
 from .scrapers import (
     arxiv_scraper,
     blog_scraper,
+    clinicaltrials_scraper,
     conference_scraper,
     events_scraper,
+    grants_scraper,
     jobs_scraper,
     linkedin_scraper,
     news_scraper,
@@ -152,6 +154,22 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
         f"[pipeline] Jobs: {jobs_result['orgs_with_board']}/{jobs_result['orgs_checked']} orgs have a known "
         f"board, {jobs_result['active_postings']} posting(s) currently active."
     )
+
+    # Same "runs after enrichment, needs db.orgs()" shape as jobs sync
+    # above — both free/keyless APIs, both self-limit to orgs not
+    # rechecked recently rather than re-querying every org on every fetch.
+    known_orgs = [row["org"] for row in db.orgs()]
+    trials_cfg = config.raw.get("trends", {}).get("clinical_trials", {})
+    if trials_cfg.get("enabled", True) and known_orgs:
+        print("[pipeline] Syncing clinical trial stats for known orgs...")
+        trials_result = clinicaltrials_scraper.sync_all(db, known_orgs, recheck_days=trials_cfg.get("recheck_days", 7))
+        print(f"[pipeline] Clinical trials: checked {trials_result['orgs_checked']}, skipped {trials_result['orgs_skipped']} (recently checked).")
+
+    grants_cfg = config.raw.get("trends", {}).get("nih_grants", {})
+    if grants_cfg.get("enabled", True) and known_orgs:
+        print("[pipeline] Syncing NIH grant stats for known orgs...")
+        grants_result = grants_scraper.sync_all(db, known_orgs, recheck_days=grants_cfg.get("recheck_days", 7))
+        print(f"[pipeline] NIH grants: checked {grants_result['orgs_checked']}, skipped {grants_result['orgs_skipped']} (recently checked).")
 
     # Persisted here (not just by the scheduler's own wrapper) so `cli
     # fetch`/`cli run` update this too — previously only a scheduled run

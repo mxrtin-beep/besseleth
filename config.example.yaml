@@ -82,6 +82,23 @@ industry:
       label: "Publications"
       unit: "papers"
       type: "numeric"
+    # ClinicalTrials.gov + NIH RePORTER — refreshed periodically under
+    # trends.clinical_trials/trends.nih_grants, not on every fetch.
+    # Coverage is partial (org-name text matching), so 0 can mean
+    # "genuinely none found" OR "no name match" — a real number is
+    # signal, a zero isn't a confirmed absence.
+    - key: "clinical_trial_enrollment_total"
+      label: "Clinical trial enrollment (total)"
+      unit: "patients"
+      type: "numeric"
+    - key: "clinical_trial_count"
+      label: "Clinical trials"
+      unit: "trials"
+      type: "numeric"
+    - key: "nih_grant_total_usd"
+      label: "NIH grant funding (total)"
+      unit: "USD"
+      type: "numeric"
 
 sources:
   arxiv:
@@ -366,6 +383,17 @@ trends:
   devices_path: "devices.yaml"
   companies_path: "companies.yaml"
   charts_dir: "reports/trends"
+  # External per-org metrics, refreshed after enrichment on each fetch
+  # (skipped per-org until recheck_days has passed since its last check).
+  # Both are free, keyless APIs — see the scraper modules' own
+  # docstrings for exactly what's queried and their honest caveats
+  # (org-name text matching, not a guaranteed-exact lookup).
+  clinical_trials:
+    enabled: true
+    recheck_days: 7
+  nih_grants:
+    enabled: true
+    recheck_days: 7
 
 reports:
   # How report files pile up in report.output_dir. `report_cron` (above,
