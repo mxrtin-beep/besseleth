@@ -35,6 +35,7 @@ from ..contacts_store import Contact, add_contact, import_linkedin_csv, load_con
 from ..db import DB
 from ..feeds_store import add_feed, load_feeds, remove_feed
 from ..interests_store import load_interests, save_interests
+from ..pipeline import SOURCES as ALL_ITEM_SOURCES
 from ..pipeline import fetch_all
 from ..scheduler import SchedulerStatus, run_now, start_scheduler
 from ..scrapers.manual_drop import add_smart_item
@@ -254,15 +255,20 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         # Renamed "Sources" in the UI — this used to default to just
         # arxiv/news/blog, which silently hid manually-pasted LinkedIn/
         # social/event clips from the table entirely. Now it shows every
-        # source by default; the source filter dropdown narrows it down
-        # to just arXiv (or whatever) if that's all you want.
+        # source, unconditionally — this is a browsable index of
+        # everything stored, not scoped to what enrichment happens to be
+        # configured to touch. (A previous version of this endpoint read
+        # enrichment.sources as the display list here, which is a
+        # different concern that just happens to share a config key —
+        # with enrichment.sources customized down to its own default of
+        # ["papers", "news", "blog"], that silently hid linkedin/social/
+        # event/clip/conference from this table even when they had real
+        # data, which looked exactly like "nothing ever gets fetched for
+        # those sources" from the dashboard alone.) The source filter
+        # dropdown narrows it down to just one if that's all you want.
         db = DB(config.db_path)
         try:
-            rows = db.papers(
-                config.raw.get("enrichment", {}).get(
-                    "sources", ["papers", "news", "blog", "linkedin", "social", "event", "clip"]
-                )
-            )
+            rows = db.papers(ALL_ITEM_SOURCES)
         finally:
             db.close()
         return jsonify(

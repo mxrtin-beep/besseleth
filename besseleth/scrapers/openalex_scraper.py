@@ -68,6 +68,8 @@ def fetch(config, days_back: int, max_results_per_keyword: int) -> list[Item]:
     cutoff = cutoff_date.isoformat()
     items: list[Item] = []
     seen_ids: set[str] = set()
+    total_seen = 0
+    skipped_had_abstract = 0  # rejected by the keyword recheck WITH an abstract present to check — the real noise case
 
     for keyword in config.keywords:
         page = 1
@@ -108,6 +110,7 @@ def fetch(config, days_back: int, max_results_per_keyword: int) -> list[Item]:
                     continue
 
                 abstract = _reconstruct_abstract(work.get("abstract_inverted_index"))
+                total_seen += 1
 
                 # OpenAlex's `search` param is a fuzzy, relevance-ranked
                 # full-text search — it does NOT require the keyword phrase to
@@ -119,9 +122,26 @@ def fetch(config, days_back: int, max_results_per_keyword: int) -> list[Item]:
                 # result outright if none of our actual keywords are in there
                 # — don't just fall back to tagging it with the searched
                 # keyword regardless, which is what let this noise through.
+                #
+                # BUT only enforce this when there's an abstract to check
+                # against: a large share of OpenAlex works have no abstract
+                # at all (abstract_inverted_index null — many publishers
+                # don't share it with OpenAlex), and a paper's TITLE alone
+                # very often doesn't happen to contain a full keyword phrase
+                # verbatim even when the paper is genuinely on-topic. Without
+                # this carve-out, the anti-noise check above was rejecting a
+                # large fraction of real, relevant results for having "only"
+                # a title to verify against — trading the original noise
+                # problem for a much worse recall problem (citation_count
+                # data essentially never showing up because nothing from
+                # OpenAlex was surviving the recheck). With no abstract, we
+                # trust OpenAlex's own relevance search instead of demanding
+                # local proof we don't have enough text to produce.
                 hits = text_matches_keywords(f"{title} {abstract}", config.keywords)
-                if not hits:
+                if not hits and abstract:
+                    skipped_had_abstract += 1
                     continue
+                hits = hits or [keyword]
 
                 authors = ", ".join(
                     name for a in work.get("authorships", [])
@@ -154,4 +174,9 @@ def fetch(config, days_back: int, max_results_per_keyword: int) -> list[Item]:
             if reached_cutoff or len(results) < max_results_per_keyword or page * max_results_per_keyword >= MAX_RESULTS_PER_KEYWORD_HARD_CAP:
                 break
 
+    print(
+        f"[papers] OpenAlex: saw {total_seen} candidate(s) across {len(config.keywords)} keyword(s), "
+        f"kept {len(items)}, rejected {skipped_had_abstract} by the keyword recheck (had an abstract that didn't "
+        f"match — the rest of the gap between seen/kept is duplicates across keywords, not rejections)."
+    )
     return items
