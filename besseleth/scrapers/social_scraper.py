@@ -47,6 +47,12 @@ def fetch_bluesky(config, source_cfg: dict, days_back: int) -> list[Item]:
             resp = requests.get(
                 BLUESKY_SEARCH_URL,
                 params={"q": keyword, "limit": limit, "sort": "latest"},
+                # Bluesky's public API started rejecting requests with no
+                # (or a generic library-default) User-Agent as a blanket
+                # 403 — a common anti-bot measure, unrelated to auth (this
+                # endpoint is still genuinely keyless/public). A real,
+                # descriptive User-Agent is enough to get past it.
+                headers={"User-Agent": "besseleth/1.0 (industry-briefing tool; +https://github.com/)"},
                 timeout=20,
             )
             resp.raise_for_status()

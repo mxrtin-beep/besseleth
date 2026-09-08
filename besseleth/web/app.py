@@ -512,7 +512,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
     def api_enrich_stats():
         # Read-only — for the dashboard to show enrichment progress on
         # page load, without triggering a run.
-        from .enrich import DEFAULT_SOURCES
+        from ..enrich import DEFAULT_SOURCES
 
         sources = config.raw.get("enrichment", {}).get("sources", DEFAULT_SOURCES)
         db = DB(config.db_path)
