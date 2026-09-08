@@ -14,6 +14,11 @@ from . import summarizer
 MD_TEMPLATE = """# {{ industry }} — Weekly Briefing
 _{{ date_range }}_
 
+{% if top_findings_lines %}
+## 🏆 Most surprising / important this week
+{{ top_findings_lines }}
+
+{% endif %}
 {% if personalized_lines %}
 ## 🔔 For you
 {{ personalized_lines }}
@@ -91,6 +96,42 @@ def _paper_lines(items: list[Item]) -> str:
     return "\n".join(lines) or "_None this week._"
 
 
+_SOURCE_LABELS = {
+    "papers": "paper", "news": "news", "blog": "blog", "conference": "conference",
+    "conference_news": "conference news", "event": "event", "social": "social", "linkedin": "LinkedIn", "clip": "clipped",
+}
+
+
+def _top_findings_lines(all_items: list[Item], min_score: int, max_count: int) -> str:
+    """The report's lead section: whatever scored highest on novelty this
+    week, with the LLM's own one-sentence rationale for why (already
+    computed during enrichment — see enrich.py's novelty_score/
+    novelty_rationale, now grounded against cross-source context and your
+    actual accumulated device-metric benchmarks, not just this section
+    dressing up a number that was already there). Deliberately NOT every
+    item sorted by score: below `min_score`, nothing this week actually
+    stood out, and forcing a middling item into a "most important"
+    section just because it's the least-unremarkable thing available
+    would be worse than admitting a quiet week. Ties broken by
+    citation_count then published_at so a stronger paper/more recent item
+    wins among equally-scored ones."""
+    candidates = [i for i in all_items if (i.novelty_score or 0) >= min_score]
+    if not candidates:
+        return (
+            f"_Nothing this week scored {min_score}+ on novelty (out of 5) — a quiet week for genuinely surprising "
+            "findings, not a gap in coverage. See the full sections below for everything that came in._"
+        )
+    candidates.sort(key=lambda i: (i.novelty_score or 0, i.citation_count or 0, i.published_at or ""), reverse=True)
+    lines = []
+    for i in candidates[:max_count]:
+        label = _SOURCE_LABELS.get(i.source, i.source)
+        title = f"[{i.title}]({i.url})" if i.url else i.title
+        lines.append(f"- **{title}** _{label}, novelty {i.novelty_score}/5_")
+        if i.novelty_rationale:
+            lines.append(f"  {i.novelty_rationale}")
+    return "\n".join(lines)
+
+
 def _linkedin_lines(items: list[Item], summarizer_cfg: dict) -> str:
     """Just the basics (role, company, location) per pasted post, not the
     raw pasted text — see summarizer.summarize_linkedin_item's docstring."""
@@ -121,6 +162,8 @@ def build_report(
     summarizer_cfg: dict,
     clip_items: list[Item] | None = None,
     history: dict | None = None,
+    top_findings_min_novelty: int = 3,
+    top_findings_max_count: int = 5,
 ) -> tuple[str, str]:
     """Returns (report_id, rendered_markdown). `history` (from
     DB.accumulated_knowledge_stats()) is everything besseleth knows from
@@ -177,10 +220,12 @@ def build_report(
         *clip_items,
     ]
     context_summary = summarizer.summarize_context(all_new_items, history, industry_name, summarizer_cfg)
+    top_findings_lines = _top_findings_lines(all_new_items, top_findings_min_novelty, top_findings_max_count)
 
     context = {
         "industry": industry_name,
         "date_range": date_range,
+        "top_findings_lines": top_findings_lines,
         "personalized_lines": personalized_lines,
         "paper_lines": _paper_lines(papers_items),
         "news_summary": news_summary or "No notable news this week.",

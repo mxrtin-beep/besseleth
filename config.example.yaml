@@ -300,6 +300,13 @@ report:
   output_dir: "reports"
   format: "markdown"         # "markdown" or "html"
   max_items_per_section: 12
+  # The report's lead "Most surprising / important" section — every item
+  # that scored at least top_findings_min_novelty (1-5) on novelty_score,
+  # highest first, capped at top_findings_max_count. A quiet week (nothing
+  # meets the threshold) shows an honest "nothing stood out" note instead
+  # of forcing a middling item in just to fill the section.
+  top_findings_min_novelty: 3
+  top_findings_max_count: 5
   email:
     enabled: false
     smtp_host: "smtp.gmail.com"

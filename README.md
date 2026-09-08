@@ -727,8 +727,23 @@ Every report is built fresh from scratch: it pulls everything in the last
 what a previous report already showed. Re-running — while developing, or
 because something new got scraped or pasted — always reflects the current
 window exactly as if no report had ever run before; it never skips an
-item just because an earlier report already included it. The report's
-closing **🧠 Big picture** section is the one place that does look back
+item just because an earlier report already included it.
+
+The report opens with **🏆 Most surprising / important this week** —
+every item that scored at least `report.top_findings_min_novelty` (1-5,
+default 3) on `novelty_score`, ranked highest first and capped at
+`report.top_findings_max_count` (default 5), each with the LLM's own
+one-sentence rationale for the score (already computed during enrichment
+— see the `novelty_score`/`novelty_rationale` reference above; this
+section is just surfacing it prominently, not a new LLM call). The point
+is leading with what actually matters instead of a flat chronological
+dump — a quiet week where nothing clears the threshold says so honestly
+("nothing stood out") rather than promoting a middling item just to fill
+the section. Every item in this section is also guaranteed to appear
+again in its own section further down (it's ranked from the same
+per-section-capped pool `max_items_per_section` already selected, not a
+separate wider search), so nothing here is only mentioned once with no
+way to find the fuller context. The report's closing **🧠 Big picture** section is the one place that does look back
 further, across everything besseleth has ever accumulated (item counts,
 most-active organizations, how far back its knowledge goes) to say what
 this run's items mean in that larger context — a trend continuing, a

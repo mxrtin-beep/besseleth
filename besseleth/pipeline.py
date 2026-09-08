@@ -201,6 +201,8 @@ def generate_weekly_report(config: Config, db: DB, progress_cb=None) -> str:
                 org=row["org"],  # already-enriched org, if any — used only by the report's "Big picture" section
                 authors=row["authors"],
                 citation_count=row["citation_count"],
+                novelty_score=row["novelty_score"],  # already-enriched, if any — powers the "Top findings" section
+                novelty_rationale=row["novelty_rationale"],
                 # Deliberately NOT carried over from the row: matched_contact/
                 # matched_company/matched_reason get recomputed fresh below,
                 # every run, against the *current* contacts/interests config.
@@ -269,6 +271,8 @@ def generate_weekly_report(config: Config, db: DB, progress_cb=None) -> str:
         personalized_items=personalized,
         summarizer_cfg=config.summarizer,
         history=db.accumulated_knowledge_stats(),
+        top_findings_min_novelty=report_cfg.get("top_findings_min_novelty", 3),
+        top_findings_max_count=report_cfg.get("top_findings_max_count", 5),
     )
 
     path = report_mod.save_report(markdown, report_id, report_cfg.get("output_dir", "reports"))
