@@ -57,11 +57,34 @@ def fetch(config, days_back: int, max_results_per_keyword: int) -> list[Item]:
                 "start": start,
                 "max_results": max_results_per_keyword,
             }
-            try:
-                resp = requests.get(ARXIV_API, params=params, timeout=20)
-                resp.raise_for_status()
-            except requests.RequestException as e:
-                print(f"[arxiv] request failed for '{keyword}' (start={start}): {e}")
+            # Both a 429 and a read timeout here are almost always
+            # transient (arXiv rate-limiting a burst, or momentary load —
+            # not "this query is broken"), and a long backfill makes many
+            # requests back to back, so hitting one isn't rare. Retrying
+            # with backoff recovers most of these; giving up outright on
+            # the first failure (the original behavior) meant one
+            # transient hiccup silently dropped that entire keyword's
+            # results for the rest of the run, and — worse — immediately
+            # firing the NEXT keyword's request with no pause at all was
+            # exactly the kind of burst that provokes the 429 in the
+            # first place, compounding into a cascade of failures for
+            # every keyword after the first one.
+            resp = None
+            for attempt in range(3):
+                try:
+                    resp = requests.get(ARXIV_API, params=params, timeout=20)
+                    resp.raise_for_status()
+                    break
+                except requests.RequestException as e:
+                    is_rate_limited = getattr(e, "response", None) is not None and e.response.status_code == 429
+                    if attempt == 2:
+                        print(f"[arxiv] request failed for '{keyword}' (start={start}) after 3 attempts: {e}")
+                        resp = None
+                        break
+                    backoff = 15 * (attempt + 1) if is_rate_limited else 5 * (attempt + 1)
+                    print(f"[arxiv] request failed for '{keyword}' (start={start}): {e} — retrying in {backoff}s")
+                    time.sleep(backoff)
+            if resp is None:
                 break
 
             feed = feedparser.parse(resp.text)
