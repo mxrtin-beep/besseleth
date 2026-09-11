@@ -382,6 +382,17 @@ _SPECIFIC_UNIT_RE = re.compile(
     r"\b(lab|labs|laboratory|institute|center|centre|group|department|dept|program|initiative)\b",
     re.IGNORECASE,
 )
+# "Stanford-affiliated research group", "a Berkeley-affiliated research
+# lab" — names an institution but, just like a bare university name
+# alone, no actual specific lab/PI — the word "group"/"lab" here doesn't
+# save it from being too coarse the way it would for _SPECIFIC_UNIT_RE's
+# purpose elsewhere (that check assumes the specific-sounding word means
+# a REAL unit was named; "research group" here is exactly as generic as
+# "the university" itself, not a name).
+_AFFILIATED_GROUP_RE = re.compile(
+    r"-affiliated\s+research\s+(group|team|lab|labs|laboratory|center|centre)s?\s*$",
+    re.IGNORECASE,
+)
 
 
 def _is_bare_university(org: str) -> bool:
@@ -495,11 +506,14 @@ def _match_known_lab(text: str, config: Config) -> str | None:
     """Deterministic override using labs.yaml (see labs_store.py) — real
     ground truth you supplied, not an LLM guess. If `text` mentions a
     listed PI's surname, AND (when the entry gives one) their university,
-    returns the canonical "<PI> Lab at <University>" form directly;
-    checked BEFORE the LLM's own org extraction is used, so a listed lab
-    is never subject to however the LLM's phrasing or normalization
-    happens to shake out. Requiring the university too (when given) is
-    what keeps a common surname from matching every item that happens to
+    returns the canonical "<University>, <PI> Lab" form directly (same
+    format _normalize_lab_name produces — routed through it here too, so
+    labs.yaml-sourced and LLM-extracted orgs for the same lab always
+    match exactly rather than merely being squash-equivalent); checked
+    BEFORE the LLM's own org extraction is used, so a listed lab is
+    never subject to however the LLM's phrasing or normalization happens
+    to shake out. Requiring the university too (when given) is what
+    keeps a common surname from matching every item that happens to
     share it — "Chen" alone proves nothing, "Chen" + "USC" is specific.
     None if nothing in labs.yaml matches (falls through to the LLM's own
     extraction, exactly as before labs.yaml existed)."""
@@ -513,7 +527,7 @@ def _match_known_lab(text: str, config: Config) -> str | None:
         university = lab["university"]
         if university and not re.search(rf"\b{re.escape(university)}\b", text, re.IGNORECASE):
             continue
-        return f"{pi} Lab at {university}" if university else f"{pi} Lab"
+        return _normalize_lab_name(f"{pi} Lab at {university}" if university else f"{pi} Lab")
     return None
 
 
@@ -559,6 +573,8 @@ def _looks_like_a_named_org(org: str, config: Config) -> bool:
     if normalized in _COUNTRIES or _COUNTRY_POSSESSIVE_RE.match(org.strip()):
         return False
     if _is_bare_university(org):
+        return False
+    if _AFFILIATED_GROUP_RE.search(org.strip()):
         return False
     if _LOOKS_LIKE_A_DOMAIN_RE.match(org.strip()):
         return False
@@ -630,17 +646,29 @@ _INSTITUTION_FIRST_LAB_RE = re.compile(
 )
 
 
+UNDETERMINED_LAB_INSTITUTION = "Undetermined"
+
+
 def _normalize_lab_name(org: str) -> str:
     """Collapses the handful of ways a PI-named lab gets phrased — "the
     Shenoy Lab at Stanford", "Shenoy's lab at Stanford", "Shenoy Lab",
     "the Shenoy Laboratory", "Shenoy Lab (Stanford)", "Shenoy Lab,
     Stanford", "Stanford University, Shenoy Lab", "Stanford University's
-    Shenoy Lab" — into one consistent "<PI> Lab[ at <institution>]" form,
-    so the same lab doesn't fork into multiple Orgs-table rows just
-    because the LLM (or the source text) phrased it differently from one
-    item to the next. A no-op (returns `org` unchanged) for anything
-    that doesn't match either shape — never guesses at a name it isn't
-    confident is a PI-named lab."""
+    Shenoy Lab" — into ONE consistent "<Institution>, <PI> Lab" form,
+    institution always first, so the same lab doesn't fork into multiple
+    Orgs-table rows just because the LLM (or the source text) phrased it
+    differently from one item to the next — and so every lab org reads
+    the same shape at a glance instead of some being "X Lab at Y" and
+    others "Y, X Lab". When no institution was ever given, that segment
+    becomes the literal word "Undetermined" (see
+    UNDETERMINED_LAB_INSTITUTION) rather than being dropped — "Shenoy
+    Lab" alone is ambiguous with every other Shenoy across every
+    university; "Undetermined, Shenoy Lab" says plainly that the
+    institution just hasn't been established yet, and is one exact
+    string away from being merged into the real thing once it is
+    (rename_org/merge_org, same as any other org). A no-op (returns
+    `org` unchanged) for anything that doesn't match either lab shape —
+    never guesses at a name it isn't confident is a PI-named lab."""
     stripped = org.strip()
     match = _LAB_NAME_RE.match(stripped)
     inst = None
@@ -655,11 +683,8 @@ def _normalize_lab_name(org: str) -> str:
         inst = match.group("inst")
     if pi.islower() or pi.isupper():
         pi = pi.capitalize()  # leaves mixed-case names ("McCarthy") alone
-    inst = re.sub(r"\s+", " ", (inst or "").strip()).rstrip(".")
-    canonical = f"{pi} Lab"
-    if inst:
-        canonical += f" at {inst}"
-    return canonical
+    inst = re.sub(r"\s+", " ", (inst or "").strip()).rstrip(".") or UNDETERMINED_LAB_INSTITUTION
+    return f"{inst}, {pi} Lab"
 
 
 def _institution_for_geocoding(org: str) -> str | None:
@@ -671,10 +696,14 @@ def _institution_for_geocoding(org: str) -> str | None:
     routinely fails and falls through to the slower/less reliable web-
     search-plus-LLM tier for something that has one well-known, easy-to-
     find physical location. None if `org` isn't a normalizable lab name,
-    or normalizes to one with no institution part."""
+    or normalizes to one with no real (established) institution part —
+    "Undetermined, ... Lab" included, since geocoding the literal word
+    "Undetermined" would be worse than not trying at all."""
     canonical = _normalize_lab_name(org)
-    match = re.match(r"^.+ Lab at (.+)$", canonical)
-    return match.group(1).strip() if match else None
+    match = re.match(r"^(.+), .+ Lab$", canonical)
+    if not match or match.group(1) == UNDETERMINED_LAB_INSTITUTION:
+        return None
+    return match.group(1).strip()
 
 
 def _canonicalize_new_org(org: str, db: DB) -> str:
