@@ -89,6 +89,34 @@ def ollama_status(summarizer_cfg: dict) -> tuple[bool, str]:
     return True, f"Ollama reachable at {ollama_url}, model {model!r} available."
 
 
+def llm_status(summarizer_cfg: dict) -> tuple[bool, str]:
+    """Same idea as ollama_status, generalized to whichever backend is
+    actually configured. For "groq" (the default), just checks a key is
+    present — not worth spending a real API call (and a slice of the
+    free tier's per-minute quota) on a reachability probe before every
+    enrich batch, so a bad/expired key or an actual Groq outage is
+    caught by the per-item call itself (which falls back to Ollama, if
+    configured, automatically — see summarizer._llm_generate) rather
+    than here."""
+    backend = summarizer_cfg.get("backend", "groq")
+    if backend == "groq":
+        import os
+
+        if summarizer_cfg.get("groq_api_key") or os.environ.get("GROQ_API_KEY"):
+            return True, "Groq API key configured."
+        if summarizer_cfg.get("groq_fallback_to_ollama", True):
+            # No key, but Ollama fallback is on — fine as long as Ollama
+            # itself is actually reachable.
+            return ollama_status(summarizer_cfg)
+        return False, (
+            "No Groq API key configured (summarizer.groq_api_key or GROQ_API_KEY env var) and "
+            "groq_fallback_to_ollama is off — nothing to enrich with."
+        )
+    if backend == "ollama":
+        return ollama_status(summarizer_cfg)
+    return False, f"summarizer.backend is {backend!r} — no LLM configured."
+
+
 def _build_prompt(row, config: Config, context: str, author_affiliations: str = "", known_benchmarks: str = "") -> str:
     metric_keys = ", ".join(f"{m['key']} ({m.get('unit', '')})" for m in config.trend_metrics if m.get("type", "numeric") == "numeric")
     categorical_keys = ", ".join(m["key"] for m in config.trend_metrics if m.get("type") == "categorical")
@@ -728,15 +756,11 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
     known_benchmarks = _known_benchmarks_block(config, db)
 
     prompt = _build_prompt(row, config, context, author_affiliations, known_benchmarks)
-    result = summarizer_mod._ollama_generate(
-        prompt,
-        summarizer_cfg.get("ollama_url", "http://localhost:11434"),
-        summarizer_cfg.get("model", "llama3.1"),
-        timeout=60,
-        num_thread=summarizer_cfg.get("num_thread"),
+    result = summarizer_mod._llm_generate(
+        prompt, summarizer_cfg, timeout=60, num_thread=summarizer_cfg.get("num_thread"),
     )
     if result is None:
-        return False  # Ollama unreachable — retry next time
+        return False  # no LLM backend reachable — retry next time
 
     data = _extract_json(result) or {}
     novelty = data.get("novelty_score")
@@ -889,11 +913,11 @@ def _search_org_location(org: str, summarizer_cfg: dict) -> tuple[str, float, fl
     read the results, for an org Wikidata doesn't know about — covers
     the small/early-stage companies tier 1 misses, at the cost of an
     LLM call, so this only runs after that one comes back empty.
-    Requires Ollama; returns None on any failure at any step (no
-    results, Ollama unreachable, the model saying it can't tell, or a
+    Requires an LLM backend; returns None on any failure at any step (no
+    results, backend unreachable, the model saying it can't tell, or a
     location that fails the same validity check as the LLM's own item-
     level extraction)."""
-    if summarizer_cfg.get("backend") != "ollama":
+    if summarizer_cfg.get("backend", "groq") not in summarizer_mod.LLM_BACKENDS:
         return None
     snippets = web_lookup.duckduckgo_search(f"{org} headquarters location city")
     if not snippets:
@@ -904,13 +928,7 @@ def _search_org_location(org: str, summarizer_cfg: dict) -> tuple[str, float, fl
         f'office in? Respond with ONLY "City, Country" (e.g. "San Francisco, USA"), or exactly "unknown" if the '
         f"snippets don't make it clear — never guess.\n\nSnippets:\n" + "\n".join(f"- {s}" for s in snippets)
     )
-    result = summarizer_mod._ollama_generate(
-        prompt,
-        summarizer_cfg.get("ollama_url", "http://localhost:11434"),
-        summarizer_cfg.get("model", "llama3.1"),
-        timeout=30,
-        num_thread=summarizer_cfg.get("num_thread"),
-    )
+    result = summarizer_mod._llm_generate(prompt, summarizer_cfg, timeout=30, num_thread=summarizer_cfg.get("num_thread"))
     if not result:
         return None
 
@@ -965,12 +983,13 @@ def _backfill_org_locations(config: Config, db: DB, max_lookups_override: int | 
             db.set_org_location(org, label, lat, lon)
             db.set_org_location_cache(org, found=True, location_text=label, lat=lat, lon=lon)
             filled += 1
-        elif config.summarizer.get("backend") == "ollama":
+        elif config.summarizer.get("backend", "groq") in summarizer_mod.LLM_BACKENDS:
             # Only cache a miss once tier 3 (the LLM-read web search) got
-            # a genuine shot — with backend != "ollama", _search_org_location
-            # returns None immediately without trying, so caching that as
-            # "not found" would wrongly lock the org out of a real check
-            # for location_recheck_days once Ollama is actually available.
+            # a genuine shot — with no LLM backend configured,
+            # _search_org_location returns None immediately without
+            # trying, so caching that as "not found" would wrongly lock
+            # the org out of a real check for location_recheck_days once
+            # a backend is actually available.
             db.set_org_location_cache(org, found=False)
 
     return filled
@@ -1014,7 +1033,7 @@ def _backfill_contact_locations(config: Config, db: DB, max_lookups_override: in
             label, lat, lon = result
             db.set_org_location_cache(org, found=True, location_text=label, lat=lat, lon=lon)
             filled += 1
-        elif config.summarizer.get("backend") == "ollama":
+        elif config.summarizer.get("backend", "groq") in summarizer_mod.LLM_BACKENDS:
             db.set_org_location_cache(org, found=False)  # see _backfill_org_locations's comment on this condition
 
     return filled
@@ -1325,11 +1344,11 @@ def enrich_items_detailed(
     # so "not found" wasn't a real answer — see the comment where this is
     # now guarded against in _backfill_org_locations). Gated on a meta
     # flag so this only ever runs once, not every enrich call.
-    if config.summarizer.get("backend") == "ollama" and not db.get_meta("location_cache_backend_fix_applied"):
+    if config.summarizer.get("backend", "groq") in summarizer_mod.LLM_BACKENDS and not db.get_meta("location_cache_backend_fix_applied"):
         reset = db.clear_negative_location_cache()
         db.set_meta("location_cache_backend_fix_applied", "1")
         if reset:
-            print(f"[enrich] Reset {reset} cached 'not found' location(s) so they get a real check now that Ollama is available.")
+            print(f"[enrich] Reset {reset} cached 'not found' location(s) so they get a real check now that an LLM backend is available.")
 
     invalid_locations = [loc for loc in db.distinct_locations() if not _looks_like_a_real_location(loc)]
     locations_cleared = db.clear_location_matches(invalid_locations)
@@ -1398,7 +1417,7 @@ def enrich_items_detailed(
             "backend": backend,
         }
 
-    if backend != "ollama":
+    if backend not in summarizer_mod.LLM_BACKENDS:
         rows = first_rows
         for row in rows:
             db.save_enrichment(
@@ -1406,14 +1425,14 @@ def enrich_items_detailed(
                 therapeutic_target="unknown", novelty_score=None, novelty_rationale=None,
             )
         msg = (
-            f"summarizer.backend is {backend!r}, not 'ollama' — marked {len(rows)} item(s) 'unknown' rather than "
-            f"leaving them pending. Set summarizer.backend: \"ollama\" in config.yaml and have Ollama running to "
+            f"summarizer.backend is {backend!r} — marked {len(rows)} item(s) 'unknown' rather than leaving them "
+            f'pending. Set summarizer.backend to "groq" (default — free, hosted, no install) or "ollama" to '
             f"actually extract org/modality/location/etc.{location_note}"
         )
         print(f"[enrich] {msg}")
         return {"processed": len(rows), "message": msg, "backend": backend}
 
-    ok, status_msg = ollama_status(summarizer_cfg)
+    ok, status_msg = llm_status(summarizer_cfg)
     if not ok:
         status_msg += location_note
         print(f"[enrich] {status_msg}")
@@ -1472,7 +1491,7 @@ def enrich_items_detailed(
             progress_total = total_attempted + len(rows)
         if rows:
             print(f"[enrich] Batch done ({total_processed} so far) — {len(rows)}+ item(s) left, continuing...")
-            ok, status_msg = ollama_status(summarizer_cfg)
+            ok, status_msg = llm_status(summarizer_cfg)
             if not ok:
                 print(f"[enrich] Stopping: {status_msg}")
                 break

@@ -428,6 +428,58 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             }
         )
 
+    @app.get("/api/metrics-table")
+    def api_metrics_table():
+        # Every numeric value besseleth has extracted, flattened to one
+        # row each — the point being ATTRIBUTION: a bare number like "3
+        # year lifespan" is useless without knowing which device/company
+        # it's about, so every row here always names its subject (device
+        # name + org, or just org for a company metric), not just the
+        # value. This is the troubleshooting view for "is extraction
+        # actually pulling out the right numbers" — cross-check a value
+        # here against its source_url rather than trusting the chart.
+        metric_units = {m["key"]: m.get("unit", "") for m in config.trend_metrics}
+        metric_units.update({m["key"]: m.get("unit", "") for m in config.company_metrics})
+
+        rows = []
+        for d in load_devices(config.devices_path, config.legacy_devices_yaml_path):
+            for key, value in d.metrics.items():
+                if not isinstance(value, (int, float)):
+                    continue  # categorical (e.g. fda_status/device_type) — not a number to audit here
+                rows.append({
+                    "subject_type": "device",
+                    "subject": d.name,
+                    "org": d.org,
+                    "metric": key,
+                    "value": value,
+                    "unit": metric_units.get(key, ""),
+                    "date": d.date_reported,
+                    "source_url": d.source_url,
+                    "auto_extracted": d.auto_extracted,
+                })
+        company_numeric_keys = {
+            "funding_total_usd": ("USD", "last_funding_date"),
+            "stock_price": ("", "stock_price_updated_at"),
+        }
+        for c in load_companies(config.companies_path, config.legacy_companies_yaml_path):
+            for key, (unit, date_field) in company_numeric_keys.items():
+                value = getattr(c, key)
+                if value is None:
+                    continue
+                rows.append({
+                    "subject_type": "company",
+                    "subject": c.name,
+                    "org": c.name,
+                    "metric": key,
+                    "value": value,
+                    "unit": unit,
+                    "date": getattr(c, date_field, "") or "",
+                    "source_url": c.source_url,
+                    "auto_extracted": c.auto_extracted,
+                })
+        rows.sort(key=lambda r: r["date"] or "", reverse=True)
+        return jsonify(rows)
+
     @app.get("/reports/<path:filename>")
     def report_assets(filename):
         # Serves matplotlib PNGs etc. referenced by older report renders,
@@ -556,14 +608,11 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         # — so "why is everything null/unknown" is answerable by looking
         # at this tab instead of reading server logs or config.yaml by
         # hand. Read-only, no run triggered.
-        from ..enrich import ollama_status
+        from ..enrich import llm_status
 
         summarizer_cfg = config.summarizer
-        backend = summarizer_cfg.get("backend", "none")
-        if backend == "ollama":
-            ok, ollama_message = ollama_status(summarizer_cfg)
-        else:
-            ok, ollama_message = False, ""
+        backend = summarizer_cfg.get("backend", "groq")
+        ok, status_message = llm_status(summarizer_cfg)
 
         db = DB(config.db_path)
         try:
@@ -574,10 +623,10 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
 
         return jsonify({
             "backend": backend,
-            "model": summarizer_cfg.get("model", "llama3.1"),
+            "model": summarizer_cfg.get("groq_model", "llama-3.3-70b-versatile") if backend == "groq" else summarizer_cfg.get("model", "llama3.1"),
             "ollama_url": summarizer_cfg.get("ollama_url", "http://localhost:11434"),
             "ollama_ok": ok,
-            "ollama_message": ollama_message,
+            "ollama_message": status_message,
             "stats": stats,
             "items": [
                 {

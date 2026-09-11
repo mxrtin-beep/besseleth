@@ -232,7 +232,7 @@
   <div id="trendsPane" style="display:none">
     <div class="controls">
       <div class="dataset-toggle">
-        <button id="dsDevices" class="active">Devices</button><button id="dsCompanies">Companies</button><button id="dsFdaTimeline">FDA timeline</button><button id="dsIpoTimeline">IPO timeline</button><button id="dsEventsTimeline">Events timeline</button><button id="dsStockChart">Stock chart</button>
+        <button id="dsDevices" class="active">Devices</button><button id="dsCompanies">Companies</button><button id="dsFdaTimeline">FDA timeline</button><button id="dsIpoTimeline">IPO timeline</button><button id="dsEventsTimeline">Events timeline</button><button id="dsStockChart">Stock chart</button><button id="dsMetricsTable">Metrics table</button>
       </div>
       <div id="axisControls">
         <div>
@@ -1540,11 +1540,11 @@ async function loadEnrichLog() {
 
   const statusEl = document.getElementById('enrichLogStatus');
   let statusHtml = `<p><strong>backend:</strong> ${data.backend} &nbsp; <strong>model:</strong> ${data.model} `
-    + `&nbsp; <strong>ollama_url:</strong> ${data.ollama_url}</p>`;
-  if (data.backend !== 'ollama') {
-    statusHtml += `<p style="color:#c0392b">summarizer.backend is "${data.backend}", not "ollama" — every item `
-      + `gets marked "unknown" rather than actually extracted. Set <code>summarizer.backend: "ollama"</code> in `
-      + `config.yaml and restart besseleth.</p>`;
+    + (data.backend === 'ollama' ? `&nbsp; <strong>ollama_url:</strong> ${data.ollama_url}` : '') + `</p>`;
+  if (data.backend !== 'groq' && data.backend !== 'ollama') {
+    statusHtml += `<p style="color:#c0392b">summarizer.backend is "${data.backend}" — every item gets marked `
+      + `"unknown" rather than actually extracted. Set <code>summarizer.backend: "groq"</code> (default — free, `
+      + `hosted, no install) or <code>"ollama"</code> in config.yaml and restart besseleth.</p>`;
   } else if (data.ollama_ok) {
     statusHtml += `<p style="color:#2a7d2a">✓ ${data.ollama_message}</p>`;
   } else {
@@ -1589,11 +1589,12 @@ let currentDataset = 'devices';
 let possibleDupes = [];
 let companyEvents = [];
 let stockHistory = {};
+let metricsTable = [];
 
 async function loadTrends() {
-  const [metricsRes, devicesRes, companiesRes, stagesRes, dupesRes, eventsRes] = await Promise.all([
+  const [metricsRes, devicesRes, companiesRes, stagesRes, dupesRes, eventsRes, metricsTableRes] = await Promise.all([
     fetch('/api/metrics'), fetch('/api/devices'), fetch('/api/companies'), fetch('/api/trends/fda-stages'),
-    fetch('/api/companies/possible-duplicates'), fetch('/api/company-events'),
+    fetch('/api/companies/possible-duplicates'), fetch('/api/company-events'), fetch('/api/metrics-table'),
   ]);
   metricsData = await metricsRes.json();
   devices = await devicesRes.json();
@@ -1601,6 +1602,7 @@ async function loadTrends() {
   fdaStages = await stagesRes.json();
   possibleDupes = await dupesRes.json();
   companyEvents = await eventsRes.json();
+  metricsTable = await metricsTableRes.json();
 
   document.getElementById('dsDevices').onclick = () => switchDataset('devices');
   document.getElementById('dsCompanies').onclick = () => switchDataset('companies');
@@ -1608,6 +1610,7 @@ async function loadTrends() {
   document.getElementById('dsIpoTimeline').onclick = () => switchDataset('ipo_timeline');
   document.getElementById('dsEventsTimeline').onclick = () => switchDataset('events_timeline');
   document.getElementById('dsStockChart').onclick = () => switchDataset('stock_chart');
+  document.getElementById('dsMetricsTable').onclick = () => switchDataset('metrics_table');
   switchDataset('devices');
 }
 
@@ -1618,6 +1621,7 @@ const TRENDS_HINTS = {
   ipo_timeline: 'One point per company that has gone public, plotted at its IPO date. Hover for the exchange/ticker; click to open the source that reported it.',
   events_timeline: 'Every org milestone besseleth has recorded — funding rounds, IPOs, regulatory approvals, mergers/acquisitions, leadership changes, and notably novel papers — one row per org, one marker per event, colored by type. Hover for the title/description; click to open the source.',
   stock_chart: 'Daily closing price for the companies you pick below (only companies with a stock_ticker set are eligible) — pulled free from Stooq, backfilled once per ticker then appended to on every stock refresh (dashboard header, or `cli company-refresh-stock`).',
+  metrics_table: 'Every numeric value besseleth has extracted, one row each, with its unit, its subject (which device or company it\'s actually ABOUT — a number is useless without this), and its source — a "3 year lifespan" is only trustworthy once you can see it\'s attributed to the right device and check the source it came from. This is the troubleshooting view for whether extraction is pulling out the right numbers, not a chart.',
 };
 
 function switchDataset(which) {
@@ -1628,12 +1632,14 @@ function switchDataset(which) {
   document.getElementById('dsIpoTimeline').classList.toggle('active', which === 'ipo_timeline');
   document.getElementById('dsEventsTimeline').classList.toggle('active', which === 'events_timeline');
   document.getElementById('dsStockChart').classList.toggle('active', which === 'stock_chart');
+  document.getElementById('dsMetricsTable').classList.toggle('active', which === 'metrics_table');
   document.getElementById('trendsHint').textContent = TRENDS_HINTS[which];
 
-  const isTimeline = which === 'fda_timeline' || which === 'ipo_timeline' || which === 'events_timeline' || which === 'stock_chart';
+  const isTimeline = which === 'fda_timeline' || which === 'ipo_timeline' || which === 'events_timeline' || which === 'stock_chart' || which === 'metrics_table';
   document.getElementById('axisControls').style.display = isTimeline ? 'none' : 'flex';
   document.getElementById('colorByWrap').style.display = which === 'devices' ? 'block' : 'none';
   document.getElementById('stockPickerWrap').style.display = which === 'stock_chart' ? 'block' : 'none';
+  document.getElementById('chart').style.display = which === 'metrics_table' ? 'none' : '';
 
   if (which === 'stock_chart') {
     const picker = document.getElementById('stockPicker');
@@ -1724,6 +1730,7 @@ function renderChart() {
   if (currentDataset === 'ipo_timeline') return renderIpoTimeline();
   if (currentDataset === 'events_timeline') return renderEventsTimeline();
   if (currentDataset === 'stock_chart') return renderStockChart();
+  if (currentDataset === 'metrics_table') return; // table-only, no chart
 
   const xKey = document.getElementById('xAxis').value;
   const yKey = document.getElementById('yAxis').value;
@@ -2039,6 +2046,32 @@ function renderTable() {
           <td>${pts[pts.length - 1].close}</td>
         </tr>`).join('')}</tbody>`;
     makeTableResizable(table, 'dataTable:stock_chart');
+    return;
+  }
+  if (currentDataset === 'metrics_table') {
+    const filter = (document.getElementById('metricsFilter') || {}).value || '';
+    const filtered = filter
+      ? metricsTable.filter(r => `${r.metric} ${r.subject} ${r.org}`.toLowerCase().includes(filter.toLowerCase()))
+      : metricsTable;
+    table.innerHTML = `
+      <p style="margin:.4rem 0;"><input type="text" id="metricsFilter" placeholder="Filter by metric/device/org…" value="${filter}" style="padding:.3rem .5rem; width:260px;"></p>
+      <thead><tr><th>Metric</th><th>Value</th><th>Unit</th><th>Subject (device/company)</th><th>Org</th><th>Date</th><th>Auto-extracted?</th><th>Source</th></tr></thead>
+      <tbody>${filtered.map(r => `
+        <tr>
+          <td>${r.metric}</td>
+          <td>${typeof r.value === 'number' ? r.value.toLocaleString() : r.value}</td>
+          <td>${r.unit || ''}</td>
+          <td>${r.subject}${r.subject_type === 'device' ? ' <span class="hint">(device)</span>' : ''}</td>
+          <td>${r.org}</td>
+          <td>${r.date || ''}</td>
+          <td>${r.auto_extracted ? 'yes — verify' : 'no (hand-entered)'}</td>
+          <td>${r.source_url ? `<a href="${r.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
+        </tr>`).join('')}</tbody>`;
+    makeTableResizable(table, 'dataTable:metrics_table');
+    const filterInput = document.getElementById('metricsFilter');
+    filterInput.focus();
+    filterInput.setSelectionRange(filter.length, filter.length);
+    filterInput.oninput = () => renderTable();
     return;
   }
   if (currentDataset === 'devices') {
