@@ -12,6 +12,7 @@ from typing import Iterable
 import feedparser
 import requests
 
+from ..cancel import check_cancelled
 from ..db import Item
 from .util import stable_id, strip_html, text_matches_keywords
 
@@ -29,7 +30,7 @@ def _search_query(keyword: str, categories: list[str]) -> str:
 MAX_RESULTS_PER_KEYWORD_HARD_CAP = 1000  # backfill safety valve — see fetch()'s docstring
 
 
-def fetch(config, days_back: int, max_results_per_keyword: int) -> list[Item]:
+def fetch(config, days_back: int, max_results_per_keyword: int, cancel_event=None) -> list[Item]:
     """Fetches papers matching each configured keyword, newest first,
     stopping once results fall outside the `days_back` window.
 
@@ -50,6 +51,7 @@ def fetch(config, days_back: int, max_results_per_keyword: int) -> list[Item]:
     for keyword in config.keywords:
         start = 0
         while True:
+            check_cancelled(cancel_event)  # between pages/keywords — a deep backfill or a rate-limit backoff can take a while
             params = {
                 "search_query": _search_query(keyword, config.arxiv_categories),
                 "sortBy": "submittedDate",

@@ -30,6 +30,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from .cancel import FetchCancelled
 from .config import Config
 from .db import DB
 from .pipeline import fetch_all, generate_weekly_report
@@ -44,6 +45,7 @@ class SchedulerStatus:
     last_report_at: str | None = None
     last_report_path: str | None = None
     last_error: str | None = None
+    last_fetch_cancelled: bool = False
     next_fetch_at: str | None = None
     next_report_at: str | None = None
     # A very basic progress indicator for whatever run_now/fetch/enrich
@@ -63,10 +65,17 @@ class SchedulerStatus:
     # has to be picked up on the next status poll instead).
     last_enrich_result: dict | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # Cooperative cancellation for a running fetch (see cancel.py) — a
+    # threading.Event isn't JSON-serializable, so this stays private
+    # (leading underscore keeps it out of as_dict()); `cancel_requested`
+    # below is the plain-bool version the dashboard actually polls.
+    _cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def as_dict(self) -> dict:
         with self._lock:
-            return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
+            data = {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
+        data["cancel_requested"] = self._cancel_event.is_set()
+        return data
 
     def set_progress(self, label: str | None, current: int | None = None, total: int | None = None):
         with self._lock:
@@ -74,14 +83,31 @@ class SchedulerStatus:
             self.progress_current = current
             self.progress_total = total
 
+    def request_cancel(self) -> None:
+        """Called from the dashboard's Cancel button — the running
+        fetch notices at its next checkpoint (between scrapers, between
+        paginated pages) and stops there, per cancel.py's docstring."""
+        self._cancel_event.set()
+
+    def clear_cancel(self) -> None:
+        """Reset before each new run starts, so a cancel from a PREVIOUS
+        run doesn't immediately cancel the next one."""
+        self._cancel_event.clear()
+
+    @property
+    def cancel_event(self) -> threading.Event:
+        return self._cancel_event
+
 
 def _run_fetch(config: Config, status: SchedulerStatus):
+    status.clear_cancel()  # a stale cancel from a previous run must not kill this new one immediately
     with status._lock:
         status.running_now = True
+        status.last_fetch_cancelled = False
     try:
         db = DB(config.db_path)
         try:
-            results = fetch_all(config, db, progress_cb=status.set_progress)
+            results = fetch_all(config, db, progress_cb=status.set_progress, cancel_event=status.cancel_event)
             # fetch_all() itself persists last_fetch_at now (so cli fetch
             # updates it too, not just this scheduled/Run-now path) —
             # read it back rather than writing it a second time here.
@@ -92,12 +118,21 @@ def _run_fetch(config: Config, status: SchedulerStatus):
             status.last_fetch_at = fetch_finished_at
             status.last_fetch_counts = {k: len(v) for k, v in results.items()}
             status.last_error = None
+    except FetchCancelled:
+        # Not a failure — whatever scraper had already finished and been
+        # stored before the cancel checkpoint hit stays stored (see
+        # cancel.py's docstring); this just stops the rest of the run.
+        print("[scheduler] fetch cancelled.")
+        with status._lock:
+            status.last_error = "Fetch cancelled."
+            status.last_fetch_cancelled = True
     except Exception as e:
         print(f"[scheduler] fetch job failed: {e}")
         traceback.print_exc()
         with status._lock:
             status.last_error = f"fetch: {e}"
     finally:
+        status.clear_cancel()
         with status._lock:
             status.running_now = False
 
@@ -135,6 +170,11 @@ def _run_report(config: Config, status: SchedulerStatus):
 def run_now(config: Config, status: SchedulerStatus):
     """Fetch + report immediately, e.g. from a dashboard 'Run now' button."""
     _run_fetch(config, status)
+    if status.last_fetch_cancelled:
+        # Cancelling a run-now means "stop the whole thing", not just the
+        # fetch half — report generation only runs after a fetch that
+        # actually completed.
+        return
     _run_report(config, status)
 
 

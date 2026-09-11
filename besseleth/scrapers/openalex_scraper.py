@@ -24,6 +24,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import requests
 
+from ..cancel import check_cancelled
 from ..db import Item
 from .util import stable_id, text_matches_keywords
 
@@ -73,7 +74,7 @@ def _work_to_item(work: dict, openalex_id: str, title: str, abstract: str, pub_d
     )
 
 
-def fetch(config, days_back: int, max_results_per_keyword: int, mailto: str | None = None) -> list[Item]:
+def fetch(config, days_back: int, max_results_per_keyword: int, mailto: str | None = None, cancel_event=None) -> list[Item]:
     """Fetches papers matching each configured keyword, newest first,
     stopping once results fall outside the `days_back` window.
 
@@ -113,6 +114,7 @@ def fetch(config, days_back: int, max_results_per_keyword: int, mailto: str | No
     for keyword in config.keywords:
         page = 1
         while True:
+            check_cancelled(cancel_event)
             params = {
                 "search": keyword,
                 "filter": f"from_publication_date:{cutoff},type:article",
@@ -355,7 +357,9 @@ def _resolve_author_id(db, pi: str, university: str, mailto: str | None, headers
     return None
 
 
-def fetch_known_lab_papers(config, db, days_back: int, max_results_per_author: int = 25, mailto: str | None = None) -> list[Item]:
+def fetch_known_lab_papers(
+    config, db, days_back: int, max_results_per_author: int = 25, mailto: str | None = None, cancel_event=None
+) -> list[Item]:
     """Pulls a labs.yaml-listed PI's own papers directly from OpenAlex
     by AUTHOR, not by your keyword list — the actual fix for "a lab I
     know is active isn't showing up": fetch()'s keyword search only ever
@@ -388,6 +392,7 @@ def fetch_known_lab_papers(config, db, days_back: int, max_results_per_author: i
     items: list[Item] = []
     seen_ids: set[str] = set()
     for lab in config.labs:
+        check_cancelled(cancel_event)  # between labs — could be a long list
         pi, university = lab.get("pi"), lab.get("university")
         if not pi or not university:
             continue
@@ -397,6 +402,7 @@ def fetch_known_lab_papers(config, db, days_back: int, max_results_per_author: i
 
         page = 1
         while True:
+            check_cancelled(cancel_event)
             params = {
                 "filter": f"author.id:{author_id},from_publication_date:{cutoff},type:article",
                 "sort": "publication_date:desc",

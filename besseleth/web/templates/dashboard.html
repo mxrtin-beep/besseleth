@@ -126,6 +126,7 @@
   <div id="progressBar" style="display:none; align-items:center; gap:.6rem; padding:.4rem 1rem; margin:-0.6rem 0 1rem;">
     <progress id="progressBarEl" style="flex:1 1 auto; height:.6rem;"></progress>
     <span id="progressBarLabel" class="hint" style="white-space:nowrap"></span>
+    <button class="btn" id="cancelRunBtn" style="padding:.2rem .7rem; font-size:.85rem;" title="Stops at the next checkpoint (between sources) — not instant">Cancel</button>
   </div>
 
   <div class="tabs">
@@ -590,6 +591,7 @@ const backfillDate = document.getElementById('backfillDate');
 const progressBar = document.getElementById('progressBar');
 const progressBarEl = document.getElementById('progressBarEl');
 const progressBarLabel = document.getElementById('progressBarLabel');
+const cancelRunBtn = document.getElementById('cancelRunBtn');
 let fastPoll = false; // true while something's running, so the bar tracks it closely
 
 function fmtAgo(iso) {
@@ -632,7 +634,20 @@ function updateProgressBar(s) {
     progressBarEl.removeAttribute('value');
     progressBarLabel.textContent = s.progress_label;
   }
+  cancelRunBtn.disabled = !!s.cancel_requested;
+  cancelRunBtn.textContent = s.cancel_requested ? 'Cancelling…' : 'Cancel';
 }
+
+cancelRunBtn.onclick = async () => {
+  cancelRunBtn.disabled = true;
+  cancelRunBtn.textContent = 'Cancelling…';
+  try {
+    await fetch('/api/cancel-run', { method: 'POST' });
+  } catch (e) {
+    cancelRunBtn.disabled = false;
+    cancelRunBtn.textContent = 'Cancel';
+  }
+};
 
 async function pollStatus() {
   try {

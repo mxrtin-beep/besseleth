@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from .cancel import check_cancelled
 from .config import Config
 from .db import DB, Item
 from .personalize import flag_interests, personalize_items
@@ -36,7 +37,9 @@ def _days_back(configured: int, since: date | None) -> int:
     return max(configured, (date.today() - since).days)
 
 
-def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=None) -> dict[str, list[Item]]:
+def fetch_all(
+    config: Config, db: DB, since: date | None = None, progress_cb=None, cancel_event=None
+) -> dict[str, list[Item]]:
     """Runs every enabled scraper, dedupes against the DB, and returns the
     newly-seen items grouped by source (existing items are not
     re-included). Pass `since` to backfill further back than each
@@ -47,7 +50,14 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
     fetch phase below (a fixed 9-step sequence — disabled sources still
     advance the counter, just near-instantly, since there's no fetch to
     wait on) — a very basic "step N of 9: <label>" indicator, not a
-    precise item-level progress bar."""
+    precise item-level progress bar.
+
+    cancel_event, if given, is checked (see cancel.py) before each
+    scraper below and threaded into arxiv/openalex's own pagination
+    loops (the two slow enough — deep backfill, rate-limit backoff — for
+    a mid-scraper checkpoint to actually matter, not just a between-
+    scrapers one). Raises FetchCancelled the moment it's set; whatever
+    scraper already finished and got stored before that stays stored."""
     results: dict[str, list[Item]] = {s: [] for s in SOURCES}
     _TOTAL_FETCH_STEPS = 9  # arXiv, Papers, News, Blogs, Conferences, Events, Social, LinkedIn, Enrichment+Jobs
     _step = [0]  # mutable cell, closed over below — a plain int can't be reassigned from the closure
@@ -63,6 +73,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
     # bucket: to you these are the same thing (research papers), just
     # from two complementary feeds with different tradeoffs, not two
     # separate report sections to compare.
+    check_cancelled(cancel_event)
     arxiv_cfg = config.source("arxiv")
     if arxiv_cfg.get("enabled"):
         print("[pipeline] Fetching arXiv...")
@@ -70,10 +81,12 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
             config,
             days_back=_days_back(arxiv_cfg.get("days_back", 8), since),
             max_results_per_keyword=arxiv_cfg.get("max_results_per_keyword", 15),
+            cancel_event=cancel_event,
         )
         results["papers"] += _dedupe_and_store(items, db)
     _tick("arXiv")
 
+    check_cancelled(cancel_event)
     papers_cfg = config.source("papers")
     if papers_cfg.get("enabled"):
         print("[pipeline] Fetching published papers (OpenAlex)...")
@@ -82,6 +95,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
             days_back=_days_back(papers_cfg.get("days_back", 8), since),
             max_results_per_keyword=papers_cfg.get("max_results_per_keyword", 15),
             mailto=papers_cfg.get("mailto"),
+            cancel_event=cancel_event,
         )
         results["papers"] += _dedupe_and_store(items, db)
 
@@ -96,6 +110,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
                 config, db,
                 days_back=_days_back(papers_cfg.get("days_back", 8), since),
                 mailto=papers_cfg.get("mailto"),
+                cancel_event=cancel_event,
             )
             results["papers"] += _dedupe_and_store(lab_items, db)
     _tick("Papers (OpenAlex)")
@@ -105,6 +120,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
     # into config.yaml itself — see feeds_store.py's docstring for why.
     submitted = load_feeds(config.feeds_path)
 
+    check_cancelled(cancel_event)
     news_cfg = config.source("news")
     if news_cfg.get("enabled"):
         print("[pipeline] Fetching news...")
@@ -113,6 +129,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
         results["news"] = _dedupe_and_store(items, db)
     _tick("News")
 
+    check_cancelled(cancel_event)
     blog_cfg = config.source("blogs")
     if blog_cfg.get("enabled"):
         print("[pipeline] Fetching blogs...")
@@ -121,6 +138,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
         results["blog"] = _dedupe_and_store(items, db)
     _tick("Blogs")
 
+    check_cancelled(cancel_event)
     conf_cfg = config.source("conferences")
     if conf_cfg.get("enabled"):
         print("[pipeline] Fetching conference watchlist...")
@@ -133,6 +151,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
         results["conference_news"] = _dedupe_and_store(news_items, db)
     _tick("Conferences")
 
+    check_cancelled(cancel_event)
     events_cfg = config.source("events")
     if events_cfg.get("enabled"):
         print("[pipeline] Fetching events...")
@@ -140,6 +159,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
         results["event"] = _dedupe_and_store(items, db)
     _tick("Events")
 
+    check_cancelled(cancel_event)
     social_cfg = config.source("social")
     if social_cfg.get("enabled"):
         print("[pipeline] Fetching social (Bluesky/X)...")
@@ -147,6 +167,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
         results["social"] = _dedupe_and_store(items, db)
     _tick("Social")
 
+    check_cancelled(cancel_event)
     linkedin_cfg = config.source("linkedin")
     if linkedin_cfg.get("enabled"):
         print("[pipeline] Fetching LinkedIn source...")
@@ -154,6 +175,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
         results["linkedin"] = _dedupe_and_store(items, db)
     _tick("LinkedIn")
 
+    check_cancelled(cancel_event)
     print("[pipeline] Enriching papers/news/blog items (org, modality, therapeutic target, novelty)...")
     if progress_cb:
         progress_cb("Enriching newly-fetched items...", None, None)

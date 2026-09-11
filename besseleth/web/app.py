@@ -694,8 +694,16 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # while (LLM calls, network) — so this returns immediately and the
         # dashboard polls /api/status for progress_label/current/total and
         # running_now instead of blocking on the request.
+        #
+        # clear_cancel() happens HERE, atomically with running_now flipping
+        # to True — not just inside _run_fetch, which runs moments later on
+        # the background thread. Without this, a Cancel click landing in
+        # that gap (running_now already true and polled, _run_fetch hasn't
+        # reached its own clear_cancel() yet) would get silently wiped the
+        # instant the thread catches up, instead of actually cancelling.
         with status._lock:
             status.running_now = True
+        status.clear_cancel()
         status.set_progress("Starting run...")
 
         def _work():
@@ -708,6 +716,18 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
         threading.Thread(target=_work, daemon=True).start()
         return jsonify({"ok": True, "message": "Started."})
+
+    @app.post("/api/cancel-run")
+    def api_cancel_run():
+        # Cooperative — see cancel.py. Not instant: the running fetch
+        # stops at its next checkpoint (between scrapers, between
+        # paginated pages), not mid-request. A no-op (not an error) if
+        # nothing is running — the button just does nothing useful then.
+        status = app.config["BESSELETH_STATUS"]
+        if not status.running_now:
+            return jsonify({"ok": True, "message": "Nothing is running."})
+        status.request_cancel()
+        return jsonify({"ok": True, "message": "Cancelling — stops at the next checkpoint, may take a few seconds."})
 
     @app.post("/api/enrich")
     def api_enrich():
