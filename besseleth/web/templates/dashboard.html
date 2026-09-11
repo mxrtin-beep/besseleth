@@ -122,11 +122,11 @@
     <input type="date" id="backfillDate">
     <button class="btn" id="backfillBtn">Backfill</button>
     <button class="btn" id="runNowBtn">Run now</button>
+    <button class="btn" id="cancelRunBtn" style="display:none; border-color:#c0392b; color:#c0392b;" title="Cancels whatever's running — fetch, backfill, enrich, or report generation — at its next checkpoint, not instantly">Cancel</button>
   </div>
   <div id="progressBar" style="display:none; align-items:center; gap:.6rem; padding:.4rem 1rem; margin:-0.6rem 0 1rem;">
     <progress id="progressBarEl" style="flex:1 1 auto; height:.6rem;"></progress>
     <span id="progressBarLabel" class="hint" style="white-space:nowrap"></span>
-    <button class="btn" id="cancelRunBtn" style="padding:.2rem .7rem; font-size:.85rem;" title="Cancels whatever's running — fetch, backfill, enrich, or report generation — at its next checkpoint, not instantly">Cancel</button>
   </div>
 
   <div class="tabs">
@@ -617,7 +617,16 @@ function fmtUntil(iso) {
 }
 
 function updateProgressBar(s) {
-  // A very basic bar: shown whenever something's running and the backend
+  // Cancel button: next to Run now in the main status bar, visible any
+  // time something's running (fetch/backfill/enrich/report) — NOT tied
+  // to the progress bar's own visibility below, so it's in the same
+  // place every time rather than only showing up once a progress label
+  // happens to be set.
+  cancelRunBtn.style.display = s.running_now ? '' : 'none';
+  cancelRunBtn.disabled = !!s.cancel_requested;
+  cancelRunBtn.textContent = s.cancel_requested ? 'Cancelling…' : 'Cancel';
+
+  // The bar itself: shown whenever something's running and the backend
   // has a label for it. current/total may be null (a step that doesn't
   // have a real fraction, e.g. a single fetch source) — an indeterminate
   // <progress> (no `value`) covers that case.
@@ -634,8 +643,6 @@ function updateProgressBar(s) {
     progressBarEl.removeAttribute('value');
     progressBarLabel.textContent = s.progress_label;
   }
-  cancelRunBtn.disabled = !!s.cancel_requested;
-  cancelRunBtn.textContent = s.cancel_requested ? 'Cancelling…' : 'Cancel';
 }
 
 cancelRunBtn.onclick = async () => {
