@@ -470,17 +470,29 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
     @app.post("/api/papers/refresh-citations")
     def api_refresh_citations():
         # One-time-or-whenever action (Settings tab) — citation_count is
-        # only ever set once at scrape time (see db.papers_with_doi's
-        # docstring), so this is the only way an already-stored paper's
-        # count ever gets updated. Batched (50 DOIs/request), so this is
-        # fast even for a large backlog — safe to run synchronously.
+        # only ever set once at scrape time (see
+        # db.papers_refreshable_for_citations's docstring), so this is
+        # the only way an already-stored paper's count ever gets updated.
+        # Batched (50 identifiers/request), so this is fast even for a
+        # large backlog — safe to run synchronously.
         from ..scrapers.openalex_scraper import refresh_citation_counts
 
         db = DB(config.db_path)
         try:
             result = refresh_citation_counts(db, mailto=config.source("papers").get("mailto"))
+            # "checked" only ever covers rows besseleth can actually
+            # match back to OpenAlex (a stored openalex_id, or — for
+            # older rows — a DOI-shaped url); this surfaces how much of
+            # the total papers table that is, so "checked: 12" against
+            # "312 total" reads as "most of your backlog predates the
+            # openalex_id column and can't be refreshed this way — only
+            # re-fetching gets those a real count" instead of looking
+            # like the action barely did anything for no clear reason.
+            total_papers = db.count_items(["papers"])
         finally:
             db.close()
+        result["total_papers"] = total_papers
+        result["not_refreshable"] = total_papers - result["checked"]
         return jsonify({"ok": True, **result})
 
     @app.post("/api/companies/refresh-stock")

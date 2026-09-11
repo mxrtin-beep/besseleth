@@ -190,6 +190,7 @@ def fetch(config, days_back: int, max_results_per_keyword: int, mailto: str | No
                         matched_keywords=hits,
                         authors=authors or None,
                         citation_count=work.get("cited_by_count"),
+                        openalex_id=openalex_id or None,
                     )
                 )
                 seen_ids.add(openalex_id)
@@ -211,36 +212,20 @@ def fetch(config, days_back: int, max_results_per_keyword: int, mailto: str | No
 _CITATION_REFRESH_BATCH_SIZE = 50  # OpenAlex's filter=doi:a|b|c... accepts up to 50 OR'd values per request
 
 
-def refresh_citation_counts(db, mailto: str | None = None) -> dict:
-    """One-time (or run-whenever) refresh of citation_count for every
-    already-stored paper with a DOI url — see db.papers_with_doi()'s
-    docstring for why this needs to exist at all: citation_count is only
-    ever set once, at scrape time, and a paper's real count only grows
-    from there.
+def _batched_refresh(rows: list, filter_key: str, extract_key_fn, db, headers: dict, mailto: str | None, result: dict) -> None:
+    """Shared batching loop for refresh_citation_counts: looks `rows` up
+    on OpenAlex `_CITATION_REFRESH_BATCH_SIZE` at a time via
+    `filter={filter_key}:a|b|c`, matches each returned work back to its
+    row via `extract_key_fn(work)`, and updates citation_count in place
+    wherever it changed. Mutates `result` (checked/updated/unchanged/
+    not_found/errors) rather than returning a fresh dict, since this
+    runs twice (once per identifier type) into one combined tally."""
+    by_key = {row["_match_key"]: row for row in rows}
+    keys = list(by_key.keys())
 
-    Batches lookups 50 DOIs at a time via OpenAlex's `filter=doi:a|b|c`
-    (one HTTP request per batch, not one per paper) — friendly to the
-    free API's rate limit and fast even for a large backlog. Returns
-    {"checked": int, "updated": int, "unchanged": int, "not_found": int,
-    "errors": [str, ...]}."""
-    def _normalize(doi_url: str) -> str:
-        # OpenAlex always returns "https://doi.org/<suffix>", lowercased —
-        # normalize what's stored the same way so a direct dict lookup
-        # works regardless of how the url was originally cased/trailed.
-        return doi_url.strip().rstrip("/").lower()
-
-    rows = db.papers_with_doi()
-    result = {"checked": len(rows), "updated": 0, "unchanged": 0, "not_found": 0, "errors": []}
-    if not rows:
-        return result
-
-    by_doi = {_normalize(row["url"]): row for row in rows}
-    dois = [row["url"].strip() for row in rows]
-    headers = {"User-Agent": f"besseleth/1.0 (industry-briefing tool{f'; mailto:{mailto}' if mailto else ''})"}
-
-    for i in range(0, len(dois), _CITATION_REFRESH_BATCH_SIZE):
-        batch = dois[i : i + _CITATION_REFRESH_BATCH_SIZE]
-        params = {"filter": "doi:" + "|".join(batch), "per_page": len(batch)}
+    for i in range(0, len(keys), _CITATION_REFRESH_BATCH_SIZE):
+        batch = keys[i : i + _CITATION_REFRESH_BATCH_SIZE]
+        params = {"filter": f"{filter_key}:" + "|".join(batch), "per_page": len(batch)}
         if mailto:
             params["mailto"] = mailto
         try:
@@ -248,12 +233,12 @@ def refresh_citation_counts(db, mailto: str | None = None) -> dict:
             resp.raise_for_status()
             works = resp.json().get("results", [])
         except requests.RequestException as e:
-            result["errors"].append(f"batch starting at {i}: {e}")
+            result["errors"].append(f"{filter_key} batch starting at {i}: {e}")
             continue
 
         matched = 0
         for work in works:
-            row = by_doi.get(_normalize(work.get("doi") or ""))
+            row = by_key.get(extract_key_fn(work))
             if not row:
                 continue
             matched += 1
@@ -267,5 +252,49 @@ def refresh_citation_counts(db, mailto: str | None = None) -> dict:
                 result["unchanged"] += 1
         result["not_found"] += len(batch) - matched
         time.sleep(1)  # be polite to OpenAlex's free API
+
+
+def refresh_citation_counts(db, mailto: str | None = None) -> dict:
+    """One-time (or run-whenever) refresh of citation_count for every
+    already-stored paper besseleth can actually look back up on OpenAlex
+    — see db.papers_refreshable_for_citations()'s docstring for why this
+    needs to exist at all (citation_count is only ever set once, at
+    scrape time) and for the two different ways a row can be matched
+    back to OpenAlex: its own openalex_id (reliable — every row scraped
+    since that column was added has one) or, only as a fallback for
+    older rows, a DOI recovered from `url` (only ever populated when
+    OpenAlex had no landing-page url to prefer instead, so this covers a
+    fraction of the older backlog, not all of it).
+
+    Batches lookups (50 identifiers per request, not one request per
+    paper) via OpenAlex's `filter=ids.openalex:a|b|c` / `filter=doi:a|b|c`
+    — friendly to the free API's rate limit and fast even for a large
+    backlog. Returns {"checked": int, "updated": int, "unchanged": int,
+    "not_found": int, "errors": [str, ...]}."""
+    all_rows = db.papers_refreshable_for_citations()
+    result = {"checked": len(all_rows), "updated": 0, "unchanged": 0, "not_found": 0, "errors": []}
+    if not all_rows:
+        return result
+
+    headers = {"User-Agent": f"besseleth/1.0 (industry-briefing tool{f'; mailto:{mailto}' if mailto else ''})"}
+
+    id_rows = [dict(row, _match_key=row["openalex_id"].rsplit("/", 1)[-1]) for row in all_rows if row["openalex_id"]]
+    if id_rows:
+        _batched_refresh(
+            id_rows, "ids.openalex",
+            lambda work: (work.get("id") or "").rsplit("/", 1)[-1],
+            db, headers, mailto, result,
+        )
+
+    doi_rows = [
+        dict(row, _match_key=row["url"].strip().rstrip("/").lower())
+        for row in all_rows if not row["openalex_id"] and row["url"] and "doi.org/" in row["url"]
+    ]
+    if doi_rows:
+        _batched_refresh(
+            doi_rows, "doi",
+            lambda work: (work.get("doi") or "").strip().rstrip("/").lower(),
+            db, headers, mailto, result,
+        )
 
     return result

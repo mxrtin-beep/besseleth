@@ -211,6 +211,10 @@ ENRICHMENT_COLUMNS = {
     "matched_reason": "TEXT",          # "company" | "school" — why matched_contact matched (see personalize.py)
     "authors": "TEXT",                 # comma-separated author names, scraped directly (papers.py/openalex_scraper.py) — not LLM-derived
     "citation_count": "INTEGER",       # from OpenAlex, for ranking non-arXiv papers by impact — NULL for sources OpenAlex doesn't cover
+    "openalex_id": "TEXT",             # OpenAlex's own work id (e.g. "https://openalex.org/W123...") — the reliable
+                                        # handle for refresh_citation_counts() to look this exact paper back up by;
+                                        # NULL for arXiv items and for anything scraped before this column existed
+                                        # (that older backlog can only get a fresh count from a re-fetch, not a refresh).
 }
 
 
@@ -238,6 +242,7 @@ class Item:
     lon: Optional[float] = None
     authors: Optional[str] = None
     citation_count: Optional[int] = None
+    openalex_id: Optional[str] = None
 
 
 class DB:
@@ -350,8 +355,8 @@ class DB:
             """INSERT INTO items
                (id, source, title, url, summary, published_at, fetched_at,
                 matched_keywords, matched_contact, matched_company, included_in_report,
-                authors, citation_count)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)""",
+                authors, citation_count, openalex_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)""",
             (
                 item.id,
                 item.source,
@@ -365,6 +370,7 @@ class DB:
                 item.matched_company,
                 item.authors,
                 item.citation_count,
+                item.openalex_id,
             ),
         )
         self.conn.commit()
@@ -995,18 +1001,29 @@ class DB:
         q = f"SELECT * FROM items WHERE source IN ({placeholders}) ORDER BY published_at DESC"
         return list(self.conn.execute(q, sources).fetchall())
 
-    def papers_with_doi(self) -> list[sqlite3.Row]:
-        """Papers items whose url is a DOI link — the subset
-        refresh_citation_counts() (openalex_scraper.py) can look back up
-        on OpenAlex by DOI to get a fresh citation count, since
-        citation_count is only ever set once, at scrape time (upsert_item
-        never updates an existing row), and never revisited after — a
-        real paper's citation count only grows over time, so this can
-        go stale (or, e.g. after a scraper bug that under-fetched it,
-        just start out wrong for everything already stored)."""
+    def papers_refreshable_for_citations(self) -> list[sqlite3.Row]:
+        """Papers items refresh_citation_counts() (openalex_scraper.py)
+        can actually look back up on OpenAlex to get a fresh
+        citation_count — either by its own openalex_id (reliable, exact —
+        stored on every OpenAlex-sourced paper scraped since that column
+        was added) or, for older rows scraped before then, a best-effort
+        fallback: a url that happens to BE a DOI link (OpenAlex's API
+        only ever gave besseleth a doi.org url as `url` when there was no
+        landing-page url to prefer instead — see openalex_scraper.py's
+        fetch() — so this only ever catches a fraction of older rows, not
+        all of them; anything with neither stays stuck at whatever
+        citation_count it got at scrape time until it's naturally
+        re-fetched, since upsert_item never updates an existing row).
+
+        citation_count is only ever set once, at scrape time — nothing
+        else ever revisits it after, so a real paper's citation count
+        (which only ever grows) or a wrong initial value (e.g. from a
+        since-fixed scraper bug) just sits stale/wrong forever without
+        this."""
         self.conn.row_factory = sqlite3.Row
         return list(self.conn.execute(
-            "SELECT id, url, citation_count FROM items WHERE source = 'papers' AND url LIKE '%doi.org/%'"
+            "SELECT id, url, citation_count, openalex_id FROM items "
+            "WHERE source = 'papers' AND (openalex_id IS NOT NULL OR url LIKE '%doi.org/%')"
         ).fetchall())
 
     def update_item_citation_count(self, item_id: str, citation_count: int) -> None:

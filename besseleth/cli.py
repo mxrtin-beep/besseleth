@@ -146,12 +146,19 @@ def main(argv=None):
         db = DB(config.db_path)
         try:
             result = refresh_citation_counts(db, mailto=config.source("papers").get("mailto"))
+            total_papers = db.count_items(["papers"])
         finally:
             db.close()
+        not_refreshable = total_papers - result["checked"]
         print(
-            f"[cli] Checked {result['checked']} paper(s) with a DOI: {result['updated']} updated, "
+            f"[cli] Checked {result['checked']}/{total_papers} paper(s): {result['updated']} updated, "
             f"{result['unchanged']} unchanged, {result['not_found']} not found on OpenAlex."
         )
+        if not_refreshable:
+            print(
+                f"[cli] {not_refreshable} paper(s) have no stored OpenAlex id or DOI (scraped before this feature "
+                f"existed, or not from OpenAlex/arXiv at all) — those can only get a real count from a re-fetch."
+            )
         for err in result["errors"]:
             print(f"[cli]   error: {err}")
         return

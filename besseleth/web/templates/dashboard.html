@@ -1064,12 +1064,13 @@ document.getElementById('refreshCitationsBtn').onclick = async () => {
   const result = document.getElementById('dataMaintenanceResult');
   const btn = document.getElementById('refreshCitationsBtn');
   btn.disabled = true;
-  result.textContent = 'Checking OpenAlex for every stored paper with a DOI… this can take a bit for a large backlog.';
+  result.textContent = 'Checking OpenAlex for every stored paper it can match by OpenAlex id or DOI… this can take a bit for a large backlog.';
   try {
     const res = await fetch('/api/papers/refresh-citations', { method: 'POST' });
     const data = await res.json();
     result.textContent = data.ok
-      ? `Checked ${data.checked} paper(s): ${data.updated} updated, ${data.unchanged} unchanged, ${data.not_found} not found on OpenAlex.`
+      ? `Checked ${data.checked}/${data.total_papers} paper(s): ${data.updated} updated, ${data.unchanged} unchanged, ${data.not_found} not found on OpenAlex.`
+        + (data.not_refreshable ? ` ${data.not_refreshable} paper(s) have no stored OpenAlex id or DOI (scraped before this feature existed, or not from OpenAlex/arXiv) — those only get a real count from a re-fetch, not a refresh.` : '')
         + (data.errors.length ? ` ${data.errors.length} batch error(s) — see server log.` : '')
       : `Failed: ${data.message}`;
   } catch (e) {
