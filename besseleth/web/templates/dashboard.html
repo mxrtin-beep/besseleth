@@ -132,7 +132,7 @@
   <div class="tabs">
     <button id="tabReport" class="active">Report</button>
     <button id="tabPapers">Sources</button>
-    <button id="tabEnrichLog">Enrich log</button>
+    <button id="tabEnrichLog">Log</button>
     <button id="tabOrgs">Orgs</button>
     <button id="tabJobs">Jobs</button>
     <button id="tabMap">Map</button>
@@ -193,10 +193,13 @@
 
   <div id="enrichLogPane" style="display:none">
     <p class="hint">
-      Troubleshooting view: your live summarizer config, whether Ollama is actually reachable
-      right now, and exactly what the most recent enrichment runs extracted per item — no run
-      triggered by opening this tab.
+      Troubleshooting view: when fetch/backfill/enrich/report last ran and how it went, your live
+      summarizer config and whether it's actually reachable right now, and exactly what the most
+      recent enrichment runs extracted per item — no run triggered by opening this tab.
     </p>
+    <h3 style="margin-top:0; font-size:1rem;">Recent activity</h3>
+    <div id="recentActivityStatus"></div>
+    <h3 style="margin-top:2rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Enrichment</h3>
     <div id="enrichLogStatus"></div>
     <p class="hint" id="enrichLogCount"></p>
     <table class="datatable" id="enrichLogTable"></table>
@@ -1005,7 +1008,7 @@ function renderContacts() {
 // this same dashboard from another machine.
 const HIDEABLE_TABS = [
   { id: 'tabPapers', label: 'Sources' },
-  { id: 'tabEnrichLog', label: 'Enrich log' },
+  { id: 'tabEnrichLog', label: 'Log' },
   { id: 'tabOrgs', label: 'Orgs' },
   { id: 'tabJobs', label: 'Jobs' },
   { id: 'tabMap', label: 'Map' },
@@ -1905,9 +1908,35 @@ document.getElementById('exportPapersBtn').onclick = () => {
   URL.revokeObjectURL(link.href);
 };
 
-// --- Enrich log (troubleshooting) ---------------------------------------
+// --- Log (troubleshooting) ------------------------------------------------
+function renderRecentActivity(s) {
+  const el = document.getElementById('recentActivityStatus');
+  const rows = [
+    {
+      label: 'Fetch / backfill', at: s.last_fetch_at, next: s.next_fetch_at,
+      detail: s.last_fetch_counts
+        ? Object.entries(s.last_fetch_counts).filter(([, n]) => n > 0).map(([src, n]) => `${src}: ${n}`).join(', ') || 'nothing new'
+        : '',
+      cancelled: s.last_fetch_cancelled,
+    },
+    {
+      label: 'Report', at: s.last_report_at, next: s.next_report_at,
+      detail: s.last_report_path ? s.last_report_path.split('/').pop() : '',
+    },
+  ];
+  el.innerHTML = rows.map(r => `
+    <p>
+      <strong>${r.label}:</strong> ${fmtAgo(r.at)}${r.next ? ` &nbsp; <span class="hint">next ${fmtUntil(r.next)}</span>` : ''}
+      ${r.detail ? ` &nbsp; <span class="hint">${r.detail}</span>` : ''}
+      ${r.cancelled ? ' &nbsp; <span style="color:#c0392b">(cancelled)</span>' : ''}
+    </p>`).join('')
+    + (s.last_error ? `<p style="color:#c0392b">⚠ ${s.last_error}</p>` : '')
+    + (s.running_now ? `<p class="hint">Running now: ${s.progress_label || '…'}</p>` : '');
+}
+
 async function loadEnrichLog() {
-  const res = await fetch('/api/enrich/log');
+  const [statusRes, res] = await Promise.all([fetch('/api/status'), fetch('/api/enrich/log')]);
+  renderRecentActivity(await statusRes.json());
   const data = await res.json();
 
   const statusEl = document.getElementById('enrichLogStatus');
