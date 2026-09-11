@@ -192,11 +192,6 @@
   </div>
 
   <div id="enrichLogPane" style="display:none">
-    <p class="hint">
-      Troubleshooting view: when fetch/backfill/enrich/report last ran and how it went, your live
-      summarizer config and whether it's actually reachable right now, and exactly what the most
-      recent enrichment runs extracted per item — no run triggered by opening this tab.
-    </p>
     <h3 style="margin-top:0; font-size:1rem;">Recent activity</h3>
     <div id="recentActivityStatus"></div>
     <h3 style="margin-top:2rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Enrichment</h3>
@@ -1931,7 +1926,11 @@ function renderRecentActivity(s) {
       ${r.cancelled ? ' &nbsp; <span style="color:#c0392b">(cancelled)</span>' : ''}
     </p>`).join('')
     + (s.last_error ? `<p style="color:#c0392b">⚠ ${s.last_error}</p>` : '')
-    + (s.running_now ? `<p class="hint">Running now: ${s.progress_label || '…'}</p>` : '');
+    + (s.running_now
+        ? `<p class="hint">Running now: ${s.progress_label || '…'}`
+          + (s.progress_current != null && s.progress_total ? ` (${s.progress_current}/${s.progress_total})` : '')
+          + `</p>`
+        : '');
 }
 
 async function loadEnrichLog() {
