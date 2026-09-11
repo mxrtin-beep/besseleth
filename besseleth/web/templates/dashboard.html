@@ -372,7 +372,33 @@
   </div>
 
   <div id="settingsPane" style="display:none">
-    <h3 style="margin-top:0; font-size:1rem;">Tabs</h3>
+    <h3 style="margin-top:0; font-size:1rem;">Industry</h3>
+    <p class="hint">The single most load-bearing setting in besseleth — keywords drive every paper/news/event search.
+      Be specific; broad single words flood the report with noise. Takes effect on the next fetch/enrich, no restart.</p>
+    <div class="controls" style="align-items:stretch; flex-wrap:wrap">
+      <div><label for="settingsIndustryName">Industry name</label><input type="text" id="settingsIndustryName" style="width:220px;"></div>
+      <div style="flex:1; min-width:300px">
+        <label for="settingsKeywords">Keywords (one per line)</label>
+        <textarea id="settingsKeywords" style="width:100%; box-sizing:border-box; min-height:100px"></textarea>
+      </div>
+      <div><button class="btn" id="saveSettingsIndustryBtn">Save</button></div>
+    </div>
+    <p class="hint" id="settingsIndustryResult"></p>
+
+    <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Schedule</h3>
+    <p class="hint">How often besseleth fetches fresh items, and when it renders the weekly report — only matters if
+      the schedule is enabled (see <code>schedule.enabled</code> in config.yaml; there's no toggle for that here
+      since disabling it mid-run doesn't stop a fetch/report already in flight). Changes re-arm the running
+      schedule immediately.</p>
+    <div class="controls" style="align-items:flex-end; flex-wrap:wrap">
+      <div><label for="settingsFetchHours">Fetch every (hours)</label><input type="number" id="settingsFetchHours" min="0.5" step="0.5" style="width:100px;"></div>
+      <div><label for="settingsReportCron">Report cron</label><input type="text" id="settingsReportCron" placeholder="0 4 * * MON" style="width:160px;"></div>
+      <div><label for="settingsTimezone">Timezone (IANA, optional)</label><input type="text" id="settingsTimezone" placeholder="America/Los_Angeles" style="width:200px;"></div>
+      <div><button class="btn" id="saveSettingsScheduleBtn">Save</button></div>
+    </div>
+    <p class="hint" id="settingsScheduleResult">Report cron is a standard 5-field cron expression (minute hour day-of-month month day-of-week), e.g. "0 4 * * MON" = 4am every Monday. Leave timezone blank to use this host's local time.</p>
+
+    <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Tabs</h3>
     <p class="hint">Hide the tabs you don't use — this is per-browser (saved locally), so it doesn't affect anyone
       else viewing this dashboard. "Report" and "Settings" itself always stay visible.</p>
     <div id="tabVisibilityList" class="controls" style="flex-wrap:wrap"></div>
@@ -978,13 +1004,60 @@ function renderTabVisibilityList() {
 
 async function loadSettings() {
   renderTabVisibilityList();
-  const res = await fetch('/api/settings/summarizer');
-  const data = await res.json();
-  document.getElementById('settingsBackend').value = data.backend;
-  document.getElementById('settingsOllamaUrl').value = data.ollama_url;
-  document.getElementById('settingsGroqKey').placeholder = data.groq_api_key_set
+
+  const [summRes, schedRes, industryRes] = await Promise.all([
+    fetch('/api/settings/summarizer'), fetch('/api/settings/schedule'), fetch('/api/settings/industry'),
+  ]);
+  const summ = await summRes.json();
+  document.getElementById('settingsBackend').value = summ.backend;
+  document.getElementById('settingsOllamaUrl').value = summ.ollama_url;
+  document.getElementById('settingsGroqKey').placeholder = summ.groq_api_key_set
     ? 'set — leave blank to keep it' : 'not set — paste your key here';
+
+  const sched = await schedRes.json();
+  document.getElementById('settingsFetchHours').value = sched.fetch_interval_hours;
+  document.getElementById('settingsReportCron').value = sched.report_cron;
+  document.getElementById('settingsTimezone').value = sched.timezone;
+
+  const industry = await industryRes.json();
+  document.getElementById('settingsIndustryName').value = industry.name;
+  document.getElementById('settingsKeywords').value = industry.keywords.join('\n');
 }
+
+document.getElementById('saveSettingsIndustryBtn').onclick = async () => {
+  const result = document.getElementById('settingsIndustryResult');
+  const name = document.getElementById('settingsIndustryName').value.trim();
+  const keywords = document.getElementById('settingsKeywords').value.split('\n').map(s => s.trim()).filter(Boolean);
+  result.textContent = 'Saving…';
+  try {
+    const res = await fetch('/api/settings/industry', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, keywords }),
+    });
+    const data = await res.json();
+    result.textContent = data.ok ? 'Saved — takes effect on the next fetch/enrich.' : `Failed: ${data.message}`;
+  } catch (e) {
+    result.textContent = 'Failed — see server log.';
+  }
+};
+
+document.getElementById('saveSettingsScheduleBtn').onclick = async () => {
+  const result = document.getElementById('settingsScheduleResult');
+  const fetch_interval_hours = document.getElementById('settingsFetchHours').value;
+  const report_cron = document.getElementById('settingsReportCron').value.trim();
+  const timezone = document.getElementById('settingsTimezone').value.trim();
+  result.textContent = 'Saving…';
+  try {
+    const res = await fetch('/api/settings/schedule', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fetch_interval_hours, report_cron, timezone }),
+    });
+    const data = await res.json();
+    result.textContent = data.ok ? 'Saved and re-armed the running schedule.' : `Failed: ${data.message}`;
+  } catch (e) {
+    result.textContent = 'Failed — see server log.';
+  }
+};
 
 document.getElementById('saveSettingsBackendBtn').onclick = async () => {
   const result = document.getElementById('settingsBackendResult');

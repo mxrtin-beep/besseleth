@@ -30,14 +30,14 @@ from pathlib import Path
 import markdown as md
 from flask import Flask, Response, abort, jsonify, render_template, request, send_from_directory
 
-from ..config import Config, load_config, update_summarizer_settings
+from ..config import Config, load_config, update_industry_settings, update_schedule_settings, update_summarizer_settings
 from ..contacts_store import Contact, add_contact, import_linkedin_csv, load_contacts, remove_contact, update_contact
 from ..db import DB
 from ..feeds_store import add_feed, load_feeds, remove_feed
 from ..interests_store import load_interests, save_interests
 from ..pipeline import SOURCES as ALL_ITEM_SOURCES
 from ..pipeline import fetch_all
-from ..scheduler import SchedulerStatus, run_now, start_scheduler
+from ..scheduler import SchedulerStatus, reschedule, run_now, start_scheduler
 from ..scrapers.manual_drop import add_smart_item
 from ..trends.company_store import find_possible_duplicate_companies, load_companies, merge_company_pair
 from ..trends.fda_stages import FDA_STAGES, stage_for
@@ -75,10 +75,15 @@ def _require_auth() -> "Response | None":
     return Response("Authentication required.", 401, {"WWW-Authenticate": 'Basic realm="besseleth"'})
 
 
-def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
+def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=None) -> Flask:
     app = Flask(__name__)
     app.config["BESSELETH_CONFIG"] = config
     app.config["BESSELETH_STATUS"] = status or SchedulerStatus(enabled=False)
+    # The live APScheduler instance (None if schedule.enabled is false) —
+    # kept around so the Settings tab's schedule form can re-arm its jobs
+    # with a new interval/cron immediately (see reschedule() in
+    # scheduler.py) instead of only taking effect after a restart.
+    app.config["BESSELETH_SCHEDULER"] = scheduler
     app.before_request(_require_auth)
 
     reports_dir = Path(config.report.get("output_dir", "reports"))
@@ -460,6 +465,61 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         if payload.get("ollama_url"):
             fields["ollama_url"] = payload["ollama_url"]
         update_summarizer_settings(config, **fields)
+        return jsonify({"ok": True})
+
+    @app.get("/api/settings/schedule")
+    def api_get_schedule_settings():
+        sched = config.raw.get("schedule", {}) or {}
+        return jsonify({
+            "enabled": sched.get("enabled", True),
+            "fetch_interval_hours": sched.get("fetch_interval_hours", 6),
+            "report_cron": sched.get("report_cron", "0 4 * * MON"),
+            "timezone": sched.get("timezone") or "",
+        })
+
+    @app.post("/api/settings/schedule")
+    def api_set_schedule_settings():
+        payload = request.get_json(silent=True) or {}
+        try:
+            fetch_interval_hours = float(payload["fetch_interval_hours"]) if payload.get("fetch_interval_hours") else None
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "message": "fetch_interval_hours must be a number."}), 400
+        if fetch_interval_hours is not None and fetch_interval_hours <= 0:
+            return jsonify({"ok": False, "message": "fetch_interval_hours must be greater than 0."}), 400
+        report_cron = (payload.get("report_cron") or "").strip() or None
+        if report_cron:
+            try:
+                from apscheduler.triggers.cron import CronTrigger
+
+                CronTrigger.from_crontab(report_cron)  # raises on a malformed cron expression — validate before saving
+            except Exception as e:
+                return jsonify({"ok": False, "message": f"Invalid cron expression: {e}"}), 400
+        timezone_name = payload.get("timezone")
+        if timezone_name:
+            try:
+                from zoneinfo import ZoneInfo
+
+                ZoneInfo(timezone_name)
+            except Exception:
+                return jsonify({"ok": False, "message": f"Unknown timezone {timezone_name!r} (use an IANA name, e.g. America/Los_Angeles)."}), 400
+        update_schedule_settings(config, fetch_interval_hours=fetch_interval_hours, report_cron=report_cron, timezone=timezone_name)
+        reschedule(app.config.get("BESSELETH_SCHEDULER"), config)
+        return jsonify({"ok": True})
+
+    @app.get("/api/settings/industry")
+    def api_get_industry_settings():
+        return jsonify({"name": config.industry_name, "keywords": config.keywords})
+
+    @app.post("/api/settings/industry")
+    def api_set_industry_settings():
+        payload = request.get_json(silent=True) or {}
+        name = (payload.get("name") or "").strip() or None
+        keywords = payload.get("keywords")
+        if keywords is not None:
+            keywords = [k.strip() for k in keywords if isinstance(k, str) and k.strip()]
+            if not keywords:
+                return jsonify({"ok": False, "message": "At least one keyword is required."}), 400
+        update_industry_settings(config, name=name, keywords=keywords)
         return jsonify({"ok": True})
 
     @app.get("/api/metrics-table")
@@ -1068,7 +1128,7 @@ def main(argv=None):
         config.raw.setdefault("schedule", {})["enabled"] = False
     _scheduler, status = start_scheduler(config)
 
-    app = create_app(config, status)
+    app = create_app(config, status, _scheduler)
     print(f"[web] Serving {config.industry_name} dashboard at http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)
 

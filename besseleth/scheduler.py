@@ -212,3 +212,21 @@ def start_scheduler(config: Config) -> tuple[BackgroundScheduler | None, Schedul
         f"(next fetch {status.next_fetch_at}, next report {status.next_report_at})."
     )
     return scheduler, status
+
+
+def reschedule(scheduler: BackgroundScheduler | None, config: Config) -> None:
+    """Re-arms the running fetch/report jobs from `config.raw["schedule"]`
+    as it stands right now — called by the Settings tab's schedule form
+    (via /api/settings/schedule) right after it updates config.yaml, so a
+    new interval/cron/timezone takes effect immediately instead of only
+    on the next restart. No-op if the scheduler was never started
+    (schedule.enabled is false) — there's nothing running to re-arm."""
+    if scheduler is None:
+        return
+    schedule_cfg = config.raw.get("schedule", {}) or {}
+    fetch_hours = schedule_cfg.get("fetch_interval_hours", 6)
+    report_cron = schedule_cfg.get("report_cron", "0 4 * * MON")
+    tz = _resolve_timezone(schedule_cfg)
+    scheduler.reschedule_job("fetch", trigger=IntervalTrigger(hours=fetch_hours))
+    scheduler.reschedule_job("report", trigger=CronTrigger.from_crontab(report_cron, timezone=tz))
+    print(f"[scheduler] Re-armed: fetch every {fetch_hours}h, report on cron '{report_cron}' ({tz}).")
