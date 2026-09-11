@@ -398,6 +398,16 @@
     </div>
     <p class="hint" id="settingsScheduleResult">Report cron is a standard 5-field cron expression (minute hour day-of-month month day-of-week), e.g. "0 4 * * MON" = 4am every Monday. Leave timezone blank to use this host's local time.</p>
 
+    <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Data maintenance</h3>
+    <p class="hint">Citation counts and stock prices are only ever fetched once, when the item/company is first
+      seen — nothing re-checks them automatically after that, so a paper's real citation count (which only ever
+      grows) or a company's stock price can go stale. Free, safe to re-run any time.</p>
+    <div class="controls" style="align-items:center; flex-wrap:wrap">
+      <div><button class="btn" id="refreshCitationsBtn">Refresh citation counts</button></div>
+      <div><button class="btn" id="refreshStockBtn">Refresh stock prices</button></div>
+    </div>
+    <p class="hint" id="dataMaintenanceResult"></p>
+
     <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Tabs</h3>
     <p class="hint">Hide the tabs you don't use — this is per-browser (saved locally), so it doesn't affect anyone
       else viewing this dashboard. "Report" and "Settings" itself always stay visible.</p>
@@ -1038,6 +1048,41 @@ document.getElementById('saveSettingsIndustryBtn').onclick = async () => {
     result.textContent = data.ok ? 'Saved — takes effect on the next fetch/enrich.' : `Failed: ${data.message}`;
   } catch (e) {
     result.textContent = 'Failed — see server log.';
+  }
+};
+
+document.getElementById('refreshCitationsBtn').onclick = async () => {
+  const result = document.getElementById('dataMaintenanceResult');
+  const btn = document.getElementById('refreshCitationsBtn');
+  btn.disabled = true;
+  result.textContent = 'Checking OpenAlex for every stored paper with a DOI… this can take a bit for a large backlog.';
+  try {
+    const res = await fetch('/api/papers/refresh-citations', { method: 'POST' });
+    const data = await res.json();
+    result.textContent = data.ok
+      ? `Checked ${data.checked} paper(s): ${data.updated} updated, ${data.unchanged} unchanged, ${data.not_found} not found on OpenAlex.`
+        + (data.errors.length ? ` ${data.errors.length} batch error(s) — see server log.` : '')
+      : `Failed: ${data.message}`;
+  } catch (e) {
+    result.textContent = 'Failed — see server log.';
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+document.getElementById('refreshStockBtn').onclick = async () => {
+  const result = document.getElementById('dataMaintenanceResult');
+  const btn = document.getElementById('refreshStockBtn');
+  btn.disabled = true;
+  result.textContent = 'Refreshing stock prices…';
+  try {
+    const res = await fetch('/api/companies/refresh-stock', { method: 'POST' });
+    const data = await res.json();
+    result.textContent = data.log.length ? data.log.join(' · ') : 'No companies with a stock_ticker set — add one via the Trends tab.';
+  } catch (e) {
+    result.textContent = 'Failed — see server log.';
+  } finally {
+    btn.disabled = false;
   }
 };
 
@@ -1819,7 +1864,7 @@ const TRENDS_HINTS = {
   fda_timeline: 'Each line is one org’s devices, ordered by report date, plotted against the FDA stage ladder (see trends/fda_stages.py for what each rung means) — a rising line is regulatory progress; a flat one means no new dated report yet. Hover a point for the device and its exact fda_status text; click to open the source.',
   ipo_timeline: 'One point per company that has gone public, plotted at its IPO date. Hover for the exchange/ticker; click to open the source that reported it.',
   events_timeline: 'Every org milestone besseleth has recorded — funding rounds, IPOs, regulatory approvals, mergers/acquisitions, leadership changes, and notably novel papers — one row per org, one marker per event, colored by type. Hover for the title/description; click to open the source.',
-  stock_chart: 'Daily closing price for the companies you pick below (only companies with a stock_ticker set are eligible) — pulled free from Stooq, backfilled once per ticker then appended to on every stock refresh (dashboard header, or `cli company-refresh-stock`).',
+  stock_chart: 'Daily closing price for the companies you pick below (only companies with a stock_ticker set are eligible) — pulled free from Stooq, backfilled once per ticker then appended to on every stock refresh (Settings tab, or `cli company-refresh-stock`).',
   metrics_table: 'Every numeric value besseleth has extracted, one row each, with its unit, its subject (which device or company it\'s actually ABOUT — a number is useless without this), and its source — a "3 year lifespan" is only trustworthy once you can see it\'s attributed to the right device and check the source it came from. This is the troubleshooting view for whether extraction is pulling out the right numbers, not a chart.',
 };
 
@@ -2143,7 +2188,7 @@ async function renderStockChart() {
     Plotly.purge('chart');
     document.getElementById('chart').innerHTML =
       '<p class="hint">No price history yet for the selected compan(ies) — it\'s backfilled the first time ' +
-      '"Refresh stock prices" runs for a ticker (dashboard header, or `cli company-refresh-stock`).</p>';
+      '"Refresh stock prices" runs for a ticker (Settings tab, or `cli company-refresh-stock`).</p>';
     return;
   }
   const layout = {

@@ -206,3 +206,66 @@ def fetch(config, days_back: int, max_results_per_keyword: int, mailto: str | No
         f"match — the rest of the gap between seen/kept is duplicates across keywords, not rejections)."
     )
     return items
+
+
+_CITATION_REFRESH_BATCH_SIZE = 50  # OpenAlex's filter=doi:a|b|c... accepts up to 50 OR'd values per request
+
+
+def refresh_citation_counts(db, mailto: str | None = None) -> dict:
+    """One-time (or run-whenever) refresh of citation_count for every
+    already-stored paper with a DOI url — see db.papers_with_doi()'s
+    docstring for why this needs to exist at all: citation_count is only
+    ever set once, at scrape time, and a paper's real count only grows
+    from there.
+
+    Batches lookups 50 DOIs at a time via OpenAlex's `filter=doi:a|b|c`
+    (one HTTP request per batch, not one per paper) — friendly to the
+    free API's rate limit and fast even for a large backlog. Returns
+    {"checked": int, "updated": int, "unchanged": int, "not_found": int,
+    "errors": [str, ...]}."""
+    def _normalize(doi_url: str) -> str:
+        # OpenAlex always returns "https://doi.org/<suffix>", lowercased —
+        # normalize what's stored the same way so a direct dict lookup
+        # works regardless of how the url was originally cased/trailed.
+        return doi_url.strip().rstrip("/").lower()
+
+    rows = db.papers_with_doi()
+    result = {"checked": len(rows), "updated": 0, "unchanged": 0, "not_found": 0, "errors": []}
+    if not rows:
+        return result
+
+    by_doi = {_normalize(row["url"]): row for row in rows}
+    dois = [row["url"].strip() for row in rows]
+    headers = {"User-Agent": f"besseleth/1.0 (industry-briefing tool{f'; mailto:{mailto}' if mailto else ''})"}
+
+    for i in range(0, len(dois), _CITATION_REFRESH_BATCH_SIZE):
+        batch = dois[i : i + _CITATION_REFRESH_BATCH_SIZE]
+        params = {"filter": "doi:" + "|".join(batch), "per_page": len(batch)}
+        if mailto:
+            params["mailto"] = mailto
+        try:
+            resp = requests.get(OPENALEX_WORKS_API, params=params, headers=headers, timeout=30)
+            resp.raise_for_status()
+            works = resp.json().get("results", [])
+        except requests.RequestException as e:
+            result["errors"].append(f"batch starting at {i}: {e}")
+            continue
+
+        matched = 0
+        for work in works:
+            row = by_doi.get(_normalize(work.get("doi") or ""))
+            if not row:
+                continue
+            matched += 1
+            new_count = work.get("cited_by_count")
+            if new_count is None:
+                continue
+            if new_count != row["citation_count"]:
+                db.update_item_citation_count(row["id"], new_count)
+                result["updated"] += 1
+            else:
+                result["unchanged"] += 1
+        result["not_found"] += len(batch) - matched
+        time.sleep(1)  # be polite to OpenAlex's free API
+
+    return result

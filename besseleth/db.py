@@ -995,6 +995,24 @@ class DB:
         q = f"SELECT * FROM items WHERE source IN ({placeholders}) ORDER BY published_at DESC"
         return list(self.conn.execute(q, sources).fetchall())
 
+    def papers_with_doi(self) -> list[sqlite3.Row]:
+        """Papers items whose url is a DOI link — the subset
+        refresh_citation_counts() (openalex_scraper.py) can look back up
+        on OpenAlex by DOI to get a fresh citation count, since
+        citation_count is only ever set once, at scrape time (upsert_item
+        never updates an existing row), and never revisited after — a
+        real paper's citation count only grows over time, so this can
+        go stale (or, e.g. after a scraper bug that under-fetched it,
+        just start out wrong for everything already stored)."""
+        self.conn.row_factory = sqlite3.Row
+        return list(self.conn.execute(
+            "SELECT id, url, citation_count FROM items WHERE source = 'papers' AND url LIKE '%doi.org/%'"
+        ).fetchall())
+
+    def update_item_citation_count(self, item_id: str, citation_count: int) -> None:
+        self.conn.execute("UPDATE items SET citation_count = ? WHERE id = ?", (citation_count, item_id))
+        self.conn.commit()
+
     # --- devices/companies (trends) -------------------------------------
 
     def devices(self) -> list[sqlite3.Row]:

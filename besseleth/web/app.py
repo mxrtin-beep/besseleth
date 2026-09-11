@@ -467,6 +467,29 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         update_summarizer_settings(config, **fields)
         return jsonify({"ok": True})
 
+    @app.post("/api/papers/refresh-citations")
+    def api_refresh_citations():
+        # One-time-or-whenever action (Settings tab) — citation_count is
+        # only ever set once at scrape time (see db.papers_with_doi's
+        # docstring), so this is the only way an already-stored paper's
+        # count ever gets updated. Batched (50 DOIs/request), so this is
+        # fast even for a large backlog — safe to run synchronously.
+        from ..scrapers.openalex_scraper import refresh_citation_counts
+
+        db = DB(config.db_path)
+        try:
+            result = refresh_citation_counts(db, mailto=config.source("papers").get("mailto"))
+        finally:
+            db.close()
+        return jsonify({"ok": True, **result})
+
+    @app.post("/api/companies/refresh-stock")
+    def api_refresh_stock():
+        from ..trends.company_store import refresh_stock_prices
+
+        log = refresh_stock_prices(config.companies_path)
+        return jsonify({"ok": True, "log": log})
+
     @app.get("/api/settings/schedule")
     def api_get_schedule_settings():
         sched = config.raw.get("schedule", {}) or {}
