@@ -247,6 +247,32 @@ class Item:
     openalex_id: Optional[str] = None
 
 
+def _typo_comparison_core(a: str, b: str) -> tuple[str, str]:
+    """Strips the longest word-aligned prefix AND suffix `a`/`b` have in
+    common (case-insensitive), leaving just the part that actually
+    differs — used by find_possible_duplicate_orgs's typo pass so a
+    shared institution ("... Lab at Stanford") doesn't inflate two
+    genuinely different labs' similarity ratio just because most of the
+    string happens to match. Falls back to the original strings if
+    stripping would consume one of them entirely (nothing left to
+    meaningfully compare — safer to fall back to the full-string ratio,
+    which for two truly identical strings never happens here since
+    callers only ever call this on distinct org names)."""
+    aw, bw = a.split(), b.split()
+    suffix_len = 0
+    while suffix_len < min(len(aw), len(bw)) and aw[-1 - suffix_len].lower() == bw[-1 - suffix_len].lower():
+        suffix_len += 1
+    aw2 = aw[: len(aw) - suffix_len]
+    bw2 = bw[: len(bw) - suffix_len]
+    prefix_len = 0
+    while prefix_len < min(len(aw2), len(bw2)) and aw2[prefix_len].lower() == bw2[prefix_len].lower():
+        prefix_len += 1
+    aw2, bw2 = aw2[prefix_len:], bw2[prefix_len:]
+    core_a = " ".join(aw2)
+    core_b = " ".join(bw2)
+    return (core_a, core_b) if core_a and core_b else (a, b)
+
+
 class DB:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -712,12 +738,23 @@ class DB:
                 seen.add(key)
                 pairs.append((a, b, reason))
 
-        # Typo pass — same conservative length+ratio gate as companies'.
+        # Typo pass — same conservative length+ratio gate as companies',
+        # but on each pair's shared-affix-STRIPPED "core" rather than the
+        # full string. Without this, two DIFFERENT labs that happen to
+        # share an institution ("Babapoor Lab at Stanford" vs "Povliko
+        # Lab at Stanford") get flagged on the strength of that shared
+        # "Lab at Stanford" tail alone — the ratio is computed over the
+        # WHOLE string, so a long identical suffix inflates it past the
+        # threshold even though the one part that actually identifies
+        # which lab this is (the PI name) is nothing alike. Stripping the
+        # longest common word-aligned prefix/suffix first means the ratio
+        # only ever measures the part that's actually distinguishing.
         for i, name in enumerate(names):
             for other in names[i + 1 :]:
-                if abs(len(name) - len(other)) > 2:
+                core_a, core_b = _typo_comparison_core(name, other)
+                if abs(len(core_a) - len(core_b)) > 2:
                     continue
-                if difflib.SequenceMatcher(None, name.lower(), other.lower()).ratio() >= 0.78:
+                if difflib.SequenceMatcher(None, core_a.lower(), core_b.lower()).ratio() >= 0.78:
                     _add(name, other, "typo")
 
         # Corporate-suffix pass — squash to alnum-only and strip a known

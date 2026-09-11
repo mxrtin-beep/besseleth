@@ -405,6 +405,7 @@ _HEDGING_PHRASES = (
     "not a specific", "not specific", "no specific", "didn't mention", "did not mention",
     "doesn't mention", "does not mention", "unspecified", "n/a", "note:", "possibly",
     "according to another", "isn't clear", "is not clear", "unclear from",
+    "undisclosed", "implied", "not disclosed", "not stated", "not indicated", "not identified",
 )
 # A real org/lab name never trails off ending in a bare preposition/
 # article/conjunction — that shape means the actual name got cut off
@@ -460,6 +461,18 @@ def _clean_org_value(raw: str | None) -> str | None:
         if any(phrase in inner.lower() for phrase in _HEDGING_PHRASES) or len(inner.split()) > 3:
             org = org[: trailing_paren.start()].strip()
 
+    # "Merge Labs [undisclosed]", "University of [not specified]" — a
+    # bracket-wrapped placeholder is NEVER part of a real org's name
+    # (unlike parens, which sometimes legitimately hold an institution),
+    # so it's always safe to strip outright rather than reject the whole
+    # string over it — that salvages "Merge Labs" instead of losing a
+    # real name to an unrelated annotation. Whatever's left still goes
+    # through every check below, so "University of [not specified]" →
+    # "University of" still gets caught by the dangling-fragment check.
+    if "[" in org:
+        org = re.sub(r"\[[^\]]*\]?", "", org)
+        org = re.sub(r"\s+", " ", org).strip()
+
     if not org:
         return None
     lowered = org.lower()
@@ -468,12 +481,6 @@ def _clean_org_value(raw: str | None) -> str | None:
     # A real org/lab name is a few words, never a full sentence — this
     # catches hedging prose the checks above didn't happen to unwrap.
     if len(org.split()) > 8:
-        return None
-    # "University of [not specified]" — a literal bracket placeholder
-    # instead of an actual name. The bracket shape alone (any [...]) is
-    # a strong enough tell on its own; a real org name is never written
-    # with square brackets.
-    if "[" in org or "]" in org:
         return None
     # "the research institution/clinics of" — a fragment that got cut off
     # before naming anything, most often "<vague description> of" with
