@@ -1038,7 +1038,9 @@ def _search_org_location(org: str, summarizer_cfg: dict) -> tuple[str, float, fl
     return (location_text, *coords)
 
 
-def _backfill_org_locations(config: Config, db: DB, max_lookups_override: int | None = None) -> int:
+def _backfill_org_locations(
+    config: Config, db: DB, max_lookups_override: int | None = None, cancel_event=None, progress_cb=None
+) -> int:
     """Fills in a missing location for orgs that have none, independent
     of the LLM pass above (that one only ever knows what a given item's
     own text says, so an org whose location was never mentioned in any
@@ -1073,7 +1075,16 @@ def _backfill_org_locations(config: Config, db: DB, max_lookups_override: int | 
 
         if attempted >= max_lookups:
             continue
+        # Checked per-org, not just once before this whole function — each
+        # iteration can be a real web request plus an LLM call (tier 3),
+        # so this loop alone is exactly the kind of "stuck for a while
+        # with no per-item progress update" phase where a Cancel click
+        # otherwise had nothing to catch it until the WHOLE backfill (up
+        # to max_lookups orgs) finished.
+        check_cancelled(cancel_event)
         attempted += 1
+        if progress_cb:
+            progress_cb(f"Looking up location for {org}...", None, None)
         # A PI-named lab is essentially never itself in Wikidata — its
         # parent institution always is, and that's a perfectly good,
         # well-established physical location to plot a lab at (see
@@ -1100,7 +1111,9 @@ def _backfill_org_locations(config: Config, db: DB, max_lookups_override: int | 
     return filled
 
 
-def _backfill_contact_locations(config: Config, db: DB, max_lookups_override: int | None = None) -> int:
+def _backfill_contact_locations(
+    config: Config, db: DB, max_lookups_override: int | None = None, cancel_event=None, progress_cb=None
+) -> int:
     """Same free Wikidata/Wikipedia (then web-search+LLM) lookup as
     _backfill_org_locations, but for your contacts' current employers —
     powers the Map tab's "friends" layer, which needs a location for a
@@ -1132,7 +1145,10 @@ def _backfill_contact_locations(config: Config, db: DB, max_lookups_override: in
             continue  # already resolved (or already tried and came up empty) — cache handles recheck
         if attempted >= max_lookups:
             continue
+        check_cancelled(cancel_event)  # see _backfill_org_locations's comment on why this needs to be per-org
         attempted += 1
+        if progress_cb:
+            progress_cb(f"Looking up location for {org}...", None, None)
         geocode_query = _institution_for_geocoding(org) or org
         result = web_lookup.lookup_org_location(geocode_query) or _search_org_location(org, config.summarizer)
         if result:
@@ -1519,13 +1535,36 @@ def enrich_items_detailed(
     # Lower enrichment.run_until_done_location_lookup_cap if this run is
     # too heavy for your machine.
     location_lookup_cap = cfg.get("run_until_done_location_lookup_cap", 50) if run_until_done else None
-    locations_filled = _backfill_org_locations(config, db, max_lookups_override=location_lookup_cap)
-    contact_locations_filled = _backfill_contact_locations(config, db, max_lookups_override=location_lookup_cap)
+    # Initialized here (before the expanded try/except FetchCancelled
+    # below, which now covers the location backfill too, not just the
+    # per-item loop) so they're always defined for the message-building
+    # code after the try block, however early a cancel interrupts it.
+    total_processed = 0
+    total_attempted = 0
+    work_seconds = 0.0  # excludes the deliberate pause_seconds sleeps — this is actual enrich time, not throttling
+    cancelled = False
+    try:
+        locations_filled = _backfill_org_locations(
+            config, db, max_lookups_override=location_lookup_cap, cancel_event=cancel_event, progress_cb=progress_cb
+        )
+        contact_locations_filled = _backfill_contact_locations(
+            config, db, max_lookups_override=location_lookup_cap, cancel_event=cancel_event, progress_cb=progress_cb
+        )
+    except FetchCancelled:
+        cancelled = True
+        locations_filled = contact_locations_filled = 0
+        print("[enrich] Cancelled during org location backfill.")
     location_note = (
         f" Filled in a location for {locations_filled} org(s) via web lookup." if locations_filled else ""
     )
     if contact_locations_filled:
         location_note += f" Filled in a location for {contact_locations_filled} contact employer(s)."
+
+    if cancelled:
+        stats = db.get_enrich_stats()
+        message = "Cancelled during org location backfill (before item enrichment started)." + location_note
+        print(f"[enrich] {message}")
+        return {"processed": 0, "message": message, "backend": backend, "stats": stats, "cancelled": True}
 
     sources = cfg.get("sources", DEFAULT_SOURCES)
     max_items = cfg.get("max_items_per_run", 20)
@@ -1581,9 +1620,6 @@ def enrich_items_detailed(
 
     pause_seconds = cfg.get("pause_seconds", 0)
 
-    total_processed = 0
-    total_attempted = 0
-    work_seconds = 0.0  # excludes the deliberate pause_seconds sleeps — this is actual enrich time, not throttling
     rows = first_rows
     # A very basic total estimate — exact for force+run_until_done (a
     # snapshot count taken above) and for the plain interactive/background
@@ -1592,7 +1628,6 @@ def enrich_items_detailed(
     # backlog size isn't known until it runs dry — so the bar undershoots a
     # bit there rather than promising a total it can't back up.
     progress_total = force_pool_size if force_pool_size is not None else len(first_rows)
-    cancelled = False
     try:
         while rows:
             total_attempted += len(rows)
