@@ -240,7 +240,7 @@ _NON_ORG_EXACT = {
     "unknown", "n/a", "na", "none", "null", "nil", "various", "unspecified", "not specified", "not mentioned",
     "not applicable", "researchers", "scientists", "the researchers", "the scientists", "authors",
     "the authors", "the team", "the company", "the companies", "the university", "the lab", "the labs",
-    "investigators", "academics",
+    "investigators", "academics", "general",
 }
 # Generic media/journal-publisher names common enough across almost any
 # science/tech-news feed mix that they're worth rejecting outright,
@@ -406,6 +406,12 @@ _HEDGING_PHRASES = (
     "doesn't mention", "does not mention", "unspecified", "n/a", "note:", "possibly",
     "according to another", "isn't clear", "is not clear", "unclear from",
 )
+# A real org/lab name never trails off ending in a bare preposition/
+# article/conjunction — that shape means the actual name got cut off
+# somewhere upstream (a truncated hedge like "the research institution/
+# clinics of", or a sentence fragment), not that the name itself ends
+# there.
+_DANGLING_END_RE = re.compile(r"\b(of|at|in|for|and|or|the|a|an|to|with|by)\s*[/,]?\s*$", re.IGNORECASE)
 
 
 def _clean_org_value(raw: str | None) -> str | None:
@@ -462,6 +468,18 @@ def _clean_org_value(raw: str | None) -> str | None:
     # A real org/lab name is a few words, never a full sentence — this
     # catches hedging prose the checks above didn't happen to unwrap.
     if len(org.split()) > 8:
+        return None
+    # "University of [not specified]" — a literal bracket placeholder
+    # instead of an actual name. The bracket shape alone (any [...]) is
+    # a strong enough tell on its own; a real org name is never written
+    # with square brackets.
+    if "[" in org or "]" in org:
+        return None
+    # "the research institution/clinics of" — a fragment that got cut off
+    # before naming anything, most often "<vague description> of" with
+    # the actual name missing. A real org name never trails off ending in
+    # a bare preposition/article/conjunction like this.
+    if _DANGLING_END_RE.search(org):
         return None
     return org
 
@@ -593,29 +611,63 @@ _LAB_NAME_RE = re.compile(
     r"(?:\s*(?:at|@|,|\()\s*(?P<inst>[^)]+?)\)?)?$",
     re.IGNORECASE,
 )
+# Same idea, institution named FIRST — "Stanford University, Shenoy Lab",
+# "Stanford University's Shenoy Lab". Without this, only the PI-first
+# ordering above got normalized, so these two (and "Shenoy Lab at
+# Stanford") landed in three different Orgs-table rows instead of one —
+# exactly the kind of duplicate-by-phrasing this whole mechanism exists
+# to prevent, just missed for the other word order.
+_INSTITUTION_FIRST_LAB_RE = re.compile(
+    r"^(?P<inst>[A-Za-z][\w&.\-' ]*?)(?:'s|\s*,)\s+(?:the\s+)?(?P<pi>[A-Za-z][\w-]*)(?:'s)?\s+lab(?:oratory)?$",
+    re.IGNORECASE,
+)
 
 
 def _normalize_lab_name(org: str) -> str:
     """Collapses the handful of ways a PI-named lab gets phrased — "the
     Shenoy Lab at Stanford", "Shenoy's lab at Stanford", "Shenoy Lab",
     "the Shenoy Laboratory", "Shenoy Lab (Stanford)", "Shenoy Lab,
-    Stanford" — into one consistent "<PI> Lab[ at <institution>]" form,
+    Stanford", "Stanford University, Shenoy Lab", "Stanford University's
+    Shenoy Lab" — into one consistent "<PI> Lab[ at <institution>]" form,
     so the same lab doesn't fork into multiple Orgs-table rows just
     because the LLM (or the source text) phrased it differently from one
     item to the next. A no-op (returns `org` unchanged) for anything
-    that doesn't match this specific shape — never guesses at a name it
-    isn't confident is a PI-named lab."""
-    match = _LAB_NAME_RE.match(org.strip())
-    if not match:
-        return org
-    pi = match.group("pi").strip()
+    that doesn't match either shape — never guesses at a name it isn't
+    confident is a PI-named lab."""
+    stripped = org.strip()
+    match = _LAB_NAME_RE.match(stripped)
+    inst = None
+    if match:
+        pi = match.group("pi").strip()
+        inst = match.group("inst")
+    else:
+        match = _INSTITUTION_FIRST_LAB_RE.match(stripped)
+        if not match:
+            return org
+        pi = match.group("pi").strip()
+        inst = match.group("inst")
     if pi.islower() or pi.isupper():
         pi = pi.capitalize()  # leaves mixed-case names ("McCarthy") alone
-    inst = re.sub(r"\s+", " ", (match.group("inst") or "").strip()).rstrip(".")
+    inst = re.sub(r"\s+", " ", (inst or "").strip()).rstrip(".")
     canonical = f"{pi} Lab"
     if inst:
         canonical += f" at {inst}"
     return canonical
+
+
+def _institution_for_geocoding(org: str) -> str | None:
+    """The parent institution behind a PI-named lab (see
+    _normalize_lab_name) — e.g. "Stanford" out of "Shenoy Lab at
+    Stanford" — for geocoding to use INSTEAD of the full lab name. A
+    specific PI's lab is essentially never itself in Wikidata/Wikipedia
+    (only the university is), so looking up the lab string directly
+    routinely fails and falls through to the slower/less reliable web-
+    search-plus-LLM tier for something that has one well-known, easy-to-
+    find physical location. None if `org` isn't a normalizable lab name,
+    or normalizes to one with no institution part."""
+    canonical = _normalize_lab_name(org)
+    match = re.match(r"^.+ Lab at (.+)$", canonical)
+    return match.group(1).strip() if match else None
 
 
 def _canonicalize_new_org(org: str, db: DB) -> str:
@@ -977,7 +1029,14 @@ def _backfill_org_locations(config: Config, db: DB, max_lookups_override: int | 
         if attempted >= max_lookups:
             continue
         attempted += 1
-        result = web_lookup.lookup_org_location(org) or _search_org_location(org, config.summarizer)
+        # A PI-named lab is essentially never itself in Wikidata — its
+        # parent institution always is, and that's a perfectly good,
+        # well-established physical location to plot a lab at (see
+        # _institution_for_geocoding's docstring). Try that first; fall
+        # back to the org's own name (then the web-search+LLM tier) if
+        # `org` doesn't parse as a lab name at all.
+        geocode_query = _institution_for_geocoding(org) or org
+        result = web_lookup.lookup_org_location(geocode_query) or _search_org_location(org, config.summarizer)
         if result:
             label, lat, lon = result
             db.set_org_location(org, label, lat, lon)
@@ -1028,7 +1087,8 @@ def _backfill_contact_locations(config: Config, db: DB, max_lookups_override: in
         if attempted >= max_lookups:
             continue
         attempted += 1
-        result = web_lookup.lookup_org_location(org) or _search_org_location(org, config.summarizer)
+        geocode_query = _institution_for_geocoding(org) or org
+        result = web_lookup.lookup_org_location(geocode_query) or _search_org_location(org, config.summarizer)
         if result:
             label, lat, lon = result
             db.set_org_location_cache(org, found=True, location_text=label, lat=lat, lon=lon)

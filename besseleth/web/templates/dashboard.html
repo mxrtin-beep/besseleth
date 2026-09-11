@@ -206,6 +206,11 @@
       <div><label for="ofOrgType">Org type</label><select id="ofOrgType"><option value="">All</option></select></div>
       <div><label for="ofSource">Source</label><select id="ofSource"><option value="">All</option></select></div>
     </div>
+    <div id="possibleDupeOrgsBox" style="display:none; margin-bottom:1rem; padding:.75rem 1rem; border:1px solid #e0763666; border-radius:8px; background:#e0763611;">
+      <strong style="font-size:.9rem;">Possible duplicate orgs</strong>
+      <p class="hint" style="margin:.3rem 0 .6rem;">Flagged by name similarity (a likely typo) or a shared name with/without a corporate suffix ("Valve" vs "Valve Corporation") — not merged automatically, since a similar name is just as often two real, different orgs. Check both before merging; merging repoints every item/device/job posting/event/stock history/location for the dropped name onto the kept one.</p>
+      <div id="possibleDupeOrgsList"></div>
+    </div>
     <p class="hint" id="orgsCount"></p>
     <table class="datatable" id="orgsTable"></table>
   </div>
@@ -1364,14 +1369,50 @@ function fmtUsd(n) {
   return `$${n}`;
 }
 
+let possibleDupeOrgs = [];
+
 async function loadOrgs() {
   orgsLoaded = true;
-  const res = await fetch('/api/orgs');
-  orgs = await res.json();
+  const [orgsRes, dupesRes] = await Promise.all([fetch('/api/orgs'), fetch('/api/orgs/possible-duplicates')]);
+  orgs = await orgsRes.json();
+  possibleDupeOrgs = await dupesRes.json();
   populateSelect('ofOrgType', uniqueSorted(orgs.map(o => o.org_type)));
   populateSelect('ofSource', uniqueSorted(orgs.flatMap(o => o.sources)));
   ['ofOrgType', 'ofSource'].forEach(id => document.getElementById(id).onchange = renderOrgs);
+  renderPossibleDupeOrgs();
   renderOrgs();
+}
+
+const DUPE_ORG_REASON_LABELS = { typo: 'possible typo', suffix: 'shared name, corporate suffix' };
+
+function renderPossibleDupeOrgs() {
+  document.getElementById('possibleDupeOrgsBox').style.display = possibleDupeOrgs.length ? 'block' : 'none';
+  document.getElementById('possibleDupeOrgsList').innerHTML = possibleDupeOrgs.map((d, i) => `
+    <div style="display:flex; align-items:center; gap:.6rem; padding:.3rem 0; font-size:.9rem; flex-wrap:wrap;">
+      <span>${d.a}</span><span class="hint">vs</span><span>${d.b}</span>
+      <span class="hint">(${DUPE_ORG_REASON_LABELS[d.reason] || d.reason})</span>
+      <button class="btn" style="padding:.2rem .6rem; font-size:.8rem;" data-i="${i}" data-keep="a">Keep "${d.a}"</button>
+      <button class="btn" style="padding:.2rem .6rem; font-size:.8rem;" data-i="${i}" data-keep="b">Keep "${d.b}"</button>
+      <button class="btn" style="padding:.2rem .6rem; font-size:.8rem; opacity:.6;" data-i="${i}" data-keep="neither">Not duplicates</button>
+    </div>`).join('');
+  document.querySelectorAll('#possibleDupeOrgsList button').forEach(btn => {
+    btn.onclick = async () => {
+      const dupe = possibleDupeOrgs[Number(btn.dataset.i)];
+      if (btn.dataset.keep !== 'neither') {
+        const keep = btn.dataset.keep === 'a' ? dupe.a : dupe.b;
+        const drop = btn.dataset.keep === 'a' ? dupe.b : dupe.a;
+        await fetch('/api/orgs/merge', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ keep, drop }),
+        });
+        const orgsRes = await fetch('/api/orgs');
+        orgs = await orgsRes.json();
+      }
+      possibleDupeOrgs = possibleDupeOrgs.filter((_, i) => i !== Number(btn.dataset.i));
+      renderPossibleDupeOrgs();
+      renderOrgs();
+    };
+  });
 }
 
 function renderOrgs() {

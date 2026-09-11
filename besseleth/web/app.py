@@ -225,6 +225,34 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         merge_company_pair(config.companies_path, keep_name=keep, drop_name=drop)
         return jsonify({"ok": True})
 
+    @app.get("/api/orgs/possible-duplicates")
+    def api_possible_duplicate_orgs():
+        # Flagged, never auto-merged — same reasoning as the companies-
+        # table version above, generalized to every org (labs/academic/
+        # gov orgs included, not just ones that made it into `companies`)
+        # and catching a second shape it can't (a corporate-suffix
+        # variant like "Valve" vs "Valve Corporation" — see
+        # db.find_possible_duplicate_orgs's docstring).
+        db = DB(config.db_path)
+        try:
+            pairs = db.find_possible_duplicate_orgs()
+        finally:
+            db.close()
+        return jsonify([{"a": a, "b": b, "reason": reason} for a, b, reason in pairs])
+
+    @app.post("/api/orgs/merge")
+    def api_merge_orgs():
+        payload = request.get_json(force=True) or {}
+        keep, drop = payload.get("keep"), payload.get("drop")
+        if not keep or not drop:
+            return jsonify({"ok": False, "message": "Both 'keep' and 'drop' are required."}), 400
+        db = DB(config.db_path)
+        try:
+            changed = db.merge_org(keep_org=keep, drop_org=drop)
+        finally:
+            db.close()
+        return jsonify({"ok": True, "changed": changed})
+
     @app.post("/api/jobs/reject-org")
     def api_jobs_reject_org():
         # For an org that got extracted wrong (a mentioned-in-passing

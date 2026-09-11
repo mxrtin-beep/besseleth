@@ -3,7 +3,9 @@ structured "paper" fields (org, modality, therapeutic target, novelty)
 that besseleth/enrich.py fills in for the papers table."""
 from __future__ import annotations
 
+import difflib
 import json
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -629,6 +631,125 @@ class DB:
         cur = self.conn.execute("UPDATE items SET org = ? WHERE org = ?", (new_org, old_org))
         self.conn.commit()
         return cur.rowcount
+
+    def merge_org(self, keep_org: str, drop_org: str) -> int:
+        """Full cross-table merge for two org strings that are the same
+        real organization spelled/formatted differently ("Valve" vs
+        "Valve Corporation") — unlike rename_org (items only), this folds
+        `drop_org` into `keep_org` everywhere an org name is stored:
+        items, devices, job_postings, company_events, stock_price_history,
+        org_location_cache, and the companies table (via the existing
+        merge_company, if `drop_org` has a companies row — a plain rename
+        would fail on companies.name's primary key if `keep_org` already
+        has one too). Returns how many items rows were repointed (the
+        same "how much changed" signal rename_org already returns; the
+        other tables are supporting data, not the main count callers
+        care about). Explicit, human-confirmed only (see
+        find_possible_duplicate_orgs) — never automatic, same reasoning
+        as merge_company's docstring."""
+        cur = self.conn.execute("UPDATE items SET org = ? WHERE org = ?", (keep_org, drop_org))
+        changed = cur.rowcount
+        self.conn.execute("UPDATE devices SET org = ? WHERE org = ?", (keep_org, drop_org))
+        self.conn.execute("UPDATE job_postings SET org = ? WHERE org = ?", (keep_org, drop_org))
+        self.conn.execute("UPDATE company_events SET org = ? WHERE org = ?", (keep_org, drop_org))
+        # stock_price_history/org_location_cache have (org, ...) primary
+        # keys, so a plain UPDATE can collide if `keep_org` already has a
+        # row for the same date/at all — OR IGNORE keeps whichever
+        # (keep_org's own) row already exists instead of erroring, then
+        # the DELETE clears out whatever's left under drop_org.
+        self.conn.execute("UPDATE OR IGNORE stock_price_history SET org = ? WHERE org = ?", (keep_org, drop_org))
+        self.conn.execute("DELETE FROM stock_price_history WHERE org = ?", (drop_org,))
+        self.conn.execute(
+            "INSERT OR IGNORE INTO org_location_cache (org, found, location_text, lat, lon, checked_at) "
+            "SELECT ?, found, location_text, lat, lon, checked_at FROM org_location_cache WHERE org = ?",
+            (keep_org, drop_org),
+        )
+        self.conn.execute("DELETE FROM org_location_cache WHERE org = ?", (drop_org,))
+        self.conn.commit()
+        # companies.name is that table's primary key — merge_company()
+        # already knows how to fold one company row into another without
+        # hitting that constraint; a plain rename only works when
+        # `keep_org` has no companies row of its own yet.
+        if self.get_company(drop_org):
+            if self.get_company(keep_org):
+                self.merge_company(keep_name=keep_org, drop_name=drop_org)
+            else:
+                self.conn.execute("UPDATE companies SET name = ? WHERE name = ?", (keep_org, drop_org))
+                self.conn.commit()
+        return changed
+
+    def find_possible_duplicate_orgs(self) -> list[tuple[str, str, str]]:
+        """Flags pairs of stored orgs that look like the same real org
+        under two different spellings/formattings — for a human to
+        review and merge_org(), never automatic (same reasoning as
+        trends/company_store.py's find_possible_duplicate_companies for
+        the narrower companies-table case this generalizes). Two
+        different, deliberately separate heuristics, since they catch two
+        different failure shapes:
+
+          - a likely TYPO (e.g. "Axfot" for "Axoft") — near-identical
+            length AND a high character-similarity ratio. Conservative on
+            purpose: a coincidental similarity between two genuinely
+            different orgs is far more likely the shorter/further apart
+            two strings are, so this only fires when both length and
+            ratio agree.
+          - the same org with/without a common corporate suffix (e.g.
+            "Valve" vs "Valve Corporation", "OpenAI" vs "OpenAI Inc.") —
+            an entirely different shape a pure similarity ratio misses
+            completely (wildly different lengths, so the typo check above
+            never even looks at these), caught instead by stripping a
+            known suffix word and comparing what's left.
+
+        Returns (org_a, org_b, reason) tuples, "reason" being "typo" or
+        "suffix" so the UI can label which kind of match this is."""
+        names = self.distinct_orgs()
+        pairs: list[tuple[str, str, str]] = []
+        seen: set[frozenset] = set()
+
+        def _add(a: str, b: str, reason: str) -> None:
+            key = frozenset((a, b))
+            if key not in seen:
+                seen.add(key)
+                pairs.append((a, b, reason))
+
+        # Typo pass — same conservative length+ratio gate as companies'.
+        for i, name in enumerate(names):
+            for other in names[i + 1 :]:
+                if abs(len(name) - len(other)) > 2:
+                    continue
+                if difflib.SequenceMatcher(None, name.lower(), other.lower()).ratio() >= 0.78:
+                    _add(name, other, "typo")
+
+        # Corporate-suffix pass — squash to alnum-only and strip a known
+        # trailing suffix word, then compare what's left.
+        suffix_re = re.compile(
+            r"\b(corporation|corp|incorporated|inc|llc|ltd|limited|co|company|labs?|laborator(?:y|ies)|"
+            r"technolog(?:y|ies)|tech|group|holdings|gmbh|ag|plc)\.?\s*$",
+            re.IGNORECASE,
+        )
+
+        def _stripped(name: str) -> str:
+            prev = None
+            n = name.strip()
+            while prev != n:  # strip repeatedly — "X Labs Inc" needs two passes
+                prev = n
+                n = suffix_re.sub("", n).strip().rstrip(",").strip()
+            return re.sub(r"[^a-z0-9]", "", n.lower())
+
+        by_stripped: dict[str, list[str]] = {}
+        for name in names:
+            key = _stripped(name)
+            if key:  # never group two orgs on an EMPTY stripped result (e.g. both just "Labs")
+                by_stripped.setdefault(key, []).append(name)
+        for group in by_stripped.values():
+            if len(group) < 2:
+                continue
+            for i, name in enumerate(group):
+                for other in group[i + 1 :]:
+                    if name.lower() != other.lower():  # pure case/spacing dupes are _canonicalize_existing_orgs's job
+                        _add(name, other, "suffix")
+
+        return pairs
 
     def items_with_org(self) -> list[sqlite3.Row]:
         """(id, org, url) for every item with an org set — for a per-item
