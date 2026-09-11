@@ -138,6 +138,7 @@
     <button id="tabTrends">Trends</button>
     <button id="tabPaste">Paste</button>
     <button id="tabContacts">Contacts</button>
+    <button id="tabSettings">Settings</button>
   </div>
 
   <div id="reportPane"><p class="hint">Pick a report from the sidebar.</p></div>
@@ -369,6 +370,41 @@
     </div>
     <div id="linkedinImportResult"></div>
   </div>
+
+  <div id="settingsPane" style="display:none">
+    <h3 style="margin-top:0; font-size:1rem;">Tabs</h3>
+    <p class="hint">Hide the tabs you don't use — this is per-browser (saved locally), so it doesn't affect anyone
+      else viewing this dashboard. "Report" and "Settings" itself always stay visible.</p>
+    <div id="tabVisibilityList" class="controls" style="flex-wrap:wrap"></div>
+
+    <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">LLM backend</h3>
+    <p class="hint">Which LLM does enrichment/summarization — extracting orgs, metrics, novelty, writing report
+      sections, comparing an uploaded paper against existing research. This is a server-wide setting (saved to
+      config.yaml), not per-browser.</p>
+    <div class="controls" style="align-items:flex-end; flex-wrap:wrap">
+      <div>
+        <label for="settingsBackend">Backend</label>
+        <select id="settingsBackend">
+          <option value="groq">Groq (free, hosted — default)</option>
+          <option value="ollama">Ollama (local/offline)</option>
+          <option value="none">None (plain extractive fallback, no LLM)</option>
+        </select>
+      </div>
+      <div>
+        <label for="settingsGroqKey" id="settingsGroqKeyLabel">Groq API key</label>
+        <input type="password" id="settingsGroqKey" placeholder="leave blank to keep current" style="width:260px;">
+      </div>
+      <div>
+        <label for="settingsOllamaUrl">Ollama URL</label>
+        <input type="text" id="settingsOllamaUrl" placeholder="http://localhost:11434" style="width:200px;">
+      </div>
+      <div><button class="btn" id="saveSettingsBackendBtn">Save</button></div>
+    </div>
+    <p class="hint" id="settingsBackendResult"></p>
+    <p class="hint">Get a free Groq API key at <a href="https://console.groq.com" target="_blank" rel="noopener">console.groq.com</a>,
+      or set it via the <code>GROQ_API_KEY</code> environment variable instead of storing it here. Ollama needs
+      <a href="https://ollama.ai" target="_blank" rel="noopener">Ollama</a> installed and running on this machine.</p>
+  </div>
 </main>
 
 <script>
@@ -407,6 +443,7 @@ const tabMap = document.getElementById('tabMap');
 const tabTrends = document.getElementById('tabTrends');
 const tabPaste = document.getElementById('tabPaste');
 const tabContacts = document.getElementById('tabContacts');
+const tabSettings = document.getElementById('tabSettings');
 
 function showTab(which) {
   reportPane.style.display = which === 'report' ? 'block' : 'none';
@@ -418,6 +455,7 @@ function showTab(which) {
   trendsPane.style.display = which === 'trends' ? 'block' : 'none';
   pastePane.style.display = which === 'paste' ? 'block' : 'none';
   contactsPane.style.display = which === 'contacts' ? 'block' : 'none';
+  document.getElementById('settingsPane').style.display = which === 'settings' ? 'block' : 'none';
   tabReport.classList.toggle('active', which === 'report');
   tabPapers.classList.toggle('active', which === 'papers');
   tabEnrichLog.classList.toggle('active', which === 'enrichlog');
@@ -427,6 +465,7 @@ function showTab(which) {
   tabTrends.classList.toggle('active', which === 'trends');
   tabPaste.classList.toggle('active', which === 'paste');
   tabContacts.classList.toggle('active', which === 'contacts');
+  tabSettings.classList.toggle('active', which === 'settings');
   if (which === 'papers' && !papersLoaded) loadPapers();
   if (which === 'enrichlog') loadEnrichLog();
   if (which === 'orgs' && !orgsLoaded) loadOrgs();
@@ -434,6 +473,8 @@ function showTab(which) {
   if (which === 'map' && !mapLoaded) loadMap();
   if (which === 'paste') { loadPasted(); loadFeeds(); }
   if (which === 'contacts') { loadContacts(); loadInterests(); }
+  if (which === 'settings') loadSettings();
+  try { localStorage.setItem('besseleth:lastTab', which); } catch (e) {}
 }
 tabReport.onclick = () => showTab('report');
 tabPapers.onclick = () => showTab('papers');
@@ -443,6 +484,7 @@ tabJobs.onclick = () => showTab('jobs');
 tabMap.onclick = () => showTab('map');
 tabTrends.onclick = () => showTab('trends');
 tabPaste.onclick = () => showTab('paste');
+tabSettings.onclick = () => showTab('settings');
 tabContacts.onclick = () => showTab('contacts');
 
 function wireReportNav() {
@@ -881,6 +923,90 @@ function renderContacts() {
     };
   });
 }
+
+// --- Settings (tab visibility + LLM backend) ----------------------------
+// Every top-level tab except Report/Settings themselves can be hidden —
+// per-browser (localStorage), so it never affects anyone else viewing
+// this same dashboard from another machine.
+const HIDEABLE_TABS = [
+  { id: 'tabPapers', label: 'Sources' },
+  { id: 'tabEnrichLog', label: 'Enrich log' },
+  { id: 'tabOrgs', label: 'Orgs' },
+  { id: 'tabJobs', label: 'Jobs' },
+  { id: 'tabMap', label: 'Map' },
+  { id: 'tabTrends', label: 'Trends' },
+  { id: 'tabPaste', label: 'Paste' },
+  { id: 'tabContacts', label: 'Contacts' },
+];
+
+function getHiddenTabs() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem('besseleth:hiddenTabs') || '[]'));
+  } catch (e) {
+    return new Set();
+  }
+}
+
+function applyHiddenTabs() {
+  const hidden = getHiddenTabs();
+  HIDEABLE_TABS.forEach(t => {
+    document.getElementById(t.id).style.display = hidden.has(t.id) ? 'none' : '';
+  });
+  // If the tab we'd otherwise land on just got hidden (or was hidden on
+  // a previous visit), fall back to Report rather than showing a blank
+  // pane with no matching visible nav button.
+  const active = document.querySelector('.tabs button.active');
+  if (active && active.style.display === 'none') showTab('report');
+}
+
+function renderTabVisibilityList() {
+  const hidden = getHiddenTabs();
+  const list = document.getElementById('tabVisibilityList');
+  list.innerHTML = HIDEABLE_TABS.map(t => `
+    <label style="display:flex; align-items:center; gap:.35rem; font-weight:normal; font-size:.9rem;">
+      <input type="checkbox" data-tab-id="${t.id}" ${hidden.has(t.id) ? '' : 'checked'}> ${t.label}
+    </label>`).join('');
+  list.querySelectorAll('input[type=checkbox]').forEach(cb => {
+    cb.onchange = () => {
+      const hidden = getHiddenTabs();
+      if (cb.checked) hidden.delete(cb.dataset.tabId); else hidden.add(cb.dataset.tabId);
+      try { localStorage.setItem('besseleth:hiddenTabs', JSON.stringify([...hidden])); } catch (e) {}
+      applyHiddenTabs();
+    };
+  });
+}
+
+async function loadSettings() {
+  renderTabVisibilityList();
+  const res = await fetch('/api/settings/summarizer');
+  const data = await res.json();
+  document.getElementById('settingsBackend').value = data.backend;
+  document.getElementById('settingsOllamaUrl').value = data.ollama_url;
+  document.getElementById('settingsGroqKey').placeholder = data.groq_api_key_set
+    ? 'set — leave blank to keep it' : 'not set — paste your key here';
+}
+
+document.getElementById('saveSettingsBackendBtn').onclick = async () => {
+  const result = document.getElementById('settingsBackendResult');
+  const backend = document.getElementById('settingsBackend').value;
+  const groq_api_key = document.getElementById('settingsGroqKey').value.trim();
+  const ollama_url = document.getElementById('settingsOllamaUrl').value.trim();
+  result.textContent = 'Saving…';
+  try {
+    const res = await fetch('/api/settings/summarizer', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ backend, groq_api_key: groq_api_key || undefined, ollama_url: ollama_url || undefined }),
+    });
+    const data = await res.json();
+    result.textContent = data.ok ? 'Saved — takes effect on the next enrich/report run, no restart needed.' : `Failed: ${data.message}`;
+    document.getElementById('settingsGroqKey').value = '';
+    await loadSettings();
+  } catch (e) {
+    result.textContent = 'Failed — see server log.';
+  }
+};
+
+applyHiddenTabs();
 
 async function loadContacts() {
   const res = await fetch('/api/contacts');

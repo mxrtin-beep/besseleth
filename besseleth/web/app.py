@@ -30,7 +30,7 @@ from pathlib import Path
 import markdown as md
 from flask import Flask, Response, abort, jsonify, render_template, request, send_from_directory
 
-from ..config import Config, load_config
+from ..config import Config, load_config, update_summarizer_settings
 from ..contacts_store import Contact, add_contact, import_linkedin_csv, load_contacts, remove_contact, update_contact
 from ..db import DB
 from ..feeds_store import add_feed, load_feeds, remove_feed
@@ -427,6 +427,40 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
                 "time_axis": {"key": "date_reported", "label": "Date reported", "unit": ""},
             }
         )
+
+    @app.get("/api/settings/summarizer")
+    def api_get_summarizer_settings():
+        # Powers the Settings tab's backend picker — deliberately never
+        # returns groq_api_key's actual value (it's a secret; the field
+        # just shows "set"/"not set" and a save always overwrites rather
+        # than needing the old value round-tripped back to the browser).
+        cfg = config.summarizer
+        return jsonify({
+            "backend": cfg.get("backend", "groq"),
+            "groq_api_key_set": bool(cfg.get("groq_api_key") or os.environ.get("GROQ_API_KEY")),
+            "groq_model": cfg.get("groq_model", "llama-3.3-70b-versatile"),
+            "ollama_url": cfg.get("ollama_url", "http://localhost:11434"),
+            "model": cfg.get("model", "llama3.1"),
+        })
+
+    @app.post("/api/settings/summarizer")
+    def api_set_summarizer_settings():
+        # Writes straight into config.yaml (see update_summarizer_settings —
+        # a targeted text edit, not a full re-dump, so a hand-written
+        # config.yaml's comments survive) and takes effect immediately,
+        # no restart needed, since every LLM call reads config.summarizer
+        # fresh each time rather than caching it at startup.
+        payload = request.get_json(silent=True) or {}
+        backend = payload.get("backend")
+        if backend not in (None, "groq", "ollama", "none"):
+            return jsonify({"ok": False, "message": f"Unknown backend {backend!r}."}), 400
+        fields = {"backend": backend}
+        if payload.get("groq_api_key"):  # blank means "leave whatever's already set alone"
+            fields["groq_api_key"] = payload["groq_api_key"]
+        if payload.get("ollama_url"):
+            fields["ollama_url"] = payload["ollama_url"]
+        update_summarizer_settings(config, **fields)
+        return jsonify({"ok": True})
 
     @app.get("/api/metrics-table")
     def api_metrics_table():
