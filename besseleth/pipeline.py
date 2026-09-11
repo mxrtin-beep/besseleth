@@ -84,6 +84,20 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
             mailto=papers_cfg.get("mailto"),
         )
         results["papers"] += _dedupe_and_store(items, db)
+
+        # Labs.yaml-listed PIs' own papers, fetched by AUTHOR identity
+        # instead of your keyword list — catches genuinely on-topic work
+        # from a lab you already know about whose title/abstract just
+        # never happens to contain one of your exact keyword phrases
+        # (see fetch_known_lab_papers's docstring). Inert if labs.yaml
+        # is empty/missing, same as every other labs.yaml-driven feature.
+        if config.labs:
+            lab_items = openalex_scraper.fetch_known_lab_papers(
+                config, db,
+                days_back=_days_back(papers_cfg.get("days_back", 8), since),
+                mailto=papers_cfg.get("mailto"),
+            )
+            results["papers"] += _dedupe_and_store(lab_items, db)
     _tick("Papers (OpenAlex)")
 
     # User-submitted feeds (the dashboard's Feeds tab) are additional

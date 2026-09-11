@@ -66,6 +66,22 @@ CREATE TABLE IF NOT EXISTS job_board_cache (
     checked_at TEXT NOT NULL
 );
 
+-- Which OpenAlex author id a labs.yaml entry resolves to (see
+-- scrapers/openalex_scraper.py's fetch_known_lab_papers) — so pulling a
+-- listed PI's own papers directly (not just whatever happens to match
+-- your keyword list) doesn't re-search OpenAlex's Authors endpoint for
+-- the same PI+university on every single fetch. NULL author_id means
+-- "searched, found nobody confident enough to trust" (still cached, so
+-- a bad/rare-name PI isn't re-queried every run either) — recheck logic
+-- lives in the scraper, same idea as job_board_cache/org_location_cache.
+CREATE TABLE IF NOT EXISTS lab_author_cache (
+    pi TEXT NOT NULL,
+    university TEXT NOT NULL,
+    author_id TEXT,
+    checked_at TEXT NOT NULL,
+    PRIMARY KEY (pi, university)
+);
+
 -- Whether a web lookup (see web_lookup.py) already tried to find an
 -- org's location, so a miss isn't re-queried every enrich run — same
 -- idea as job_board_cache. The location itself is cached too (not just
@@ -1027,6 +1043,21 @@ class DB:
                ON CONFLICT(org) DO UPDATE SET platform = excluded.platform, slug = excluded.slug,
                checked_at = excluded.checked_at""",
             (org, platform, slug, datetime.now(timezone.utc).isoformat()),
+        )
+        self.conn.commit()
+
+    def get_lab_author_cache(self, pi: str, university: str) -> sqlite3.Row | None:
+        self.conn.row_factory = sqlite3.Row
+        return self.conn.execute(
+            "SELECT * FROM lab_author_cache WHERE lower(pi) = lower(?) AND lower(university) = lower(?)",
+            (pi, university),
+        ).fetchone()
+
+    def set_lab_author_cache(self, pi: str, university: str, author_id: str | None) -> None:
+        self.conn.execute(
+            """INSERT INTO lab_author_cache (pi, university, author_id, checked_at) VALUES (?, ?, ?, ?)
+               ON CONFLICT(pi, university) DO UPDATE SET author_id = excluded.author_id, checked_at = excluded.checked_at""",
+            (pi, university, author_id, datetime.now(timezone.utc).isoformat()),
         )
         self.conn.commit()
 
