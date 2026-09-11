@@ -41,6 +41,7 @@ WIKIDATA_API = "https://www.wikidata.org/w/api.php"
 WIKIPEDIA_SEARCH_API = "https://en.wikipedia.org/w/api.php"
 WIKIPEDIA_SUMMARY_API = "https://en.wikipedia.org/api/rest_v1/page/summary/"
 DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
+OPENALEX_WORKS_API = "https://api.openalex.org/works"
 USER_AGENT = "besseleth/1.0 (local personal industry-briefing tool; https://github.com/)"
 MIN_REQUEST_INTERVAL = 0.5  # seconds — polite spacing between calls (none of these publish a strict limit like Nominatim's)
 
@@ -62,6 +63,11 @@ def _get(url: str, params: dict) -> dict | None:
         _last_request_at = time.monotonic()
         resp.raise_for_status()
         return resp.json()
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            return None  # a plain "not found" (e.g. OpenAlex has no record for this DOI) — expected, not worth logging
+        print(f"[web_lookup] request to {url} failed: {e}")
+        return None
     except (requests.RequestException, ValueError) as e:
         print(f"[web_lookup] request to {url} failed: {e}")
         return None
@@ -94,6 +100,33 @@ def _claim_entity_id(qid: str, prop: str) -> str | None:
         return data["claims"][prop][0]["mainsnak"]["datavalue"]["value"]["id"]
     except (TypeError, KeyError, IndexError):
         return None
+
+
+def lookup_arxiv_authorships(arxiv_id: str) -> list[tuple[str, list[str]]]:
+    """Real author-institution data for an arXiv paper, from OpenAlex
+    (https://openalex.org — free, keyless, aggregates affiliations from
+    ORCID/Crossref/publisher metadata). This is a genuine lookup, not
+    something asked of the LLM: arXiv's own API almost never has author
+    affiliation filled in, and asking the LLM to recall an author's
+    institution from its training data would be a guess with no way to
+    verify it — exactly the kind of thing enrich.py otherwise refuses to
+    do. Returns [(author_name, [institution_name, ...]), ...] — [] if
+    the paper isn't in OpenAlex (arXiv has only assigned every preprint
+    its own DOI since Feb 2022, so older papers often aren't findable
+    this way) or on any request failure."""
+    doi = f"10.48550/arxiv.{arxiv_id.lower()}"
+    data = _get(f"{OPENALEX_WORKS_API}/doi:{doi}", {})
+    if not data:
+        return []
+    out = []
+    for authorship in data.get("authorships", []) or []:
+        name = (authorship.get("author") or {}).get("display_name")
+        institutions = [
+            inst.get("display_name") for inst in (authorship.get("institutions") or []) if inst.get("display_name")
+        ]
+        if name:
+            out.append((name, institutions))
+    return out
 
 
 def duckduckgo_search(query: str, max_results: int = 4) -> list[str]:

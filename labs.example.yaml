@@ -1,0 +1,18 @@
+# Copy to labs.yaml and edit — a gazetteer of PI-led labs you know about,
+# used to deterministically resolve an item's org when its text mentions
+# a listed PI's surname alongside their university (see
+# besseleth/labs_store.py's docstring). Not exhaustive: a lab you don't
+# list here just falls through to the LLM's own extraction as before —
+# add entries whenever you notice one worth tracking accurately.
+#
+# `focus`/`website` are optional, for your own reference (not currently
+# shown anywhere in the report/dashboard) — `pi` and `university` are
+# what actually drive the match.
+- pi: "Poon"
+  university: "Stanford"
+  focus: "Wireless power transfer for implants"
+  website: "https://web.stanford.edu/group/poonlab/"
+- pi: "Shenoy"
+  university: "Stanford"
+  focus: "Neural prosthetics, closed-loop BCI"
+  website: ""

@@ -3,7 +3,7 @@
 A weekly industry-briefing bot. Point it at an industry (e.g.
 *neurotechnology*), and it:
 
-- Pulls recent **arXiv** papers matching your keywords/categories (free, official API)
+- Pulls **papers** matching your keywords/categories from two complementary feeds under one `papers` source: **arXiv** (free, official API — preprints, same-day freshness, no citation data) and **OpenAlex** (free, keyless — published journal/conference papers, real authors and a citation count for ranking by impact, but indexes with a lag of days to weeks). The report's papers section is one list, sorted by citations, highest first
 - Pulls **news** from RSS feeds — including a free Google News search feed by default (optionally NewsAPI.org too); add more from the dashboard's **Feeds** tab, no config-file editing needed
 - Pulls **blogs** (company/lab blogs, researcher Substacks) from RSS — Substack needs no code, just its `/feed` URL; also addable from the Feeds tab
 - Tracks a curated **conferences** watchlist, plus optional **conference news** (CFPs, accepted talks) via each conference's own RSS feed
@@ -50,9 +50,10 @@ it running —
 ```
 
 — it fetches sources on `schedule.fetch_interval_hours` (default: every 6h)
-and renders a report on `schedule.report_cron` (default: Monday 8am UTC)
-for as long as the process is alive, no cron needed. Adjust both in
-`config.yaml`'s `schedule` section. The dashboard's status bar shows when
+and renders a report on `schedule.report_cron` (default: Monday 4am, in
+`schedule.timezone` or the host's local timezone if unset) for as long as
+the process is alive, no cron needed. Adjust both in `config.yaml`'s
+`schedule` section. The dashboard's status bar shows when
 it last ran and when it's next due, and has a **Run now** button for an
 immediate fetch+report outside the schedule.
 
@@ -202,9 +203,10 @@ export BESSELETH_AUTH_PASSWORD="something-only-you-know"
 
 before starting the app — every route then requires that username/
 password (a plain browser login prompt, HTTP Basic Auth). Deliberately
-env vars, not a config.yaml setting: that file is tracked in git now, and
-a password has no business in version control. Leave both unset and
-nothing changes.
+env vars, not a config.yaml setting: `config.yaml` is your own file
+(gitignored, machine-specific), but a password still has no business
+sitting in a plaintext config file that gets copied, backed up, or
+pasted into a bug report. Leave both unset and nothing changes.
 
 Unlike the CLI, this doesn't need a `besseleth.cli run` first — starting
 it also starts the background schedule (see Usage above), so it fetches
@@ -213,11 +215,12 @@ it's doing and when. Tabs:
 
 - **Report** — the latest (or any past) report, rendered from Markdown;
   delete old ones from the sidebar.
-- **Papers** — every arXiv/news/blog item besseleth has ever fetched, in
+- **Papers** — every papers/news/blog item besseleth has ever fetched, in
   one browsable table — not just this week's snapshot. Filter by date
   range, source, org, org type (industry/academic/government/nonprofit),
-  modality, therapeutic target, and a minimum novelty score; sort by date
-  or novelty. See "Papers table" below for what populates the columns.
+  modality, therapeutic target, and a minimum novelty score; sort by date,
+  novelty, or citations. See "Papers table" below for what populates the
+  columns.
 - **Map** — the companies/labs behind those papers, plotted by location
   (free via OpenStreetMap), sized by how much has been fetched about
   each. See "Map" below.
@@ -251,7 +254,7 @@ in the pasted text), hit Add. besseleth looks at the URL's domain and
 files it under the right source automatically:
 `linkedin.com`→LinkedIn, `bsky.app`/`x.com`/`twitter.com`→social,
 `lu.ma`/`eventbrite.com`/`meetup.com`→event, `substack.com`→blog,
-`arxiv.org`→arXiv — anything else lands in a generic "📌 Clipped" section
+`arxiv.org`→papers — anything else lands in a generic "📌 Clipped" section
 rather than guessing wrong. You never have to pick which source it is;
 just paste. The same thing works from the CLI: `besseleth.cli paste`
 (reads stdin, or `--text`/`--url`), or force a specific source with
@@ -423,39 +426,217 @@ point to open its source.
 
 ## Papers table (filter by date, org, modality, therapeutic target, novelty)
 
-Unlike the weekly report (a rolling snapshot of what's new), the
-dashboard's **Papers** tab is a standing index of every arXiv/news/blog
-item besseleth has ever fetched, filterable and sortable. After each
-fetch, besseleth asks the local LLM to tag every new item with:
+Each row has a 🗑 to delete that item outright (a confirm prompt first)
+— for a stray false-positive you don't want counted (e.g. a keyword
+that's since been narrowed matched something unrelated in the past;
+config changes don't retroactively re-check items already stored). An
+**Export CSV** button above the table exports exactly what's currently
+filtered/sorted, not the whole table — narrow it down first if you only
+want a subset.
 
-- **org** — the company/lab/institution the item is about
-- **org_type** — industry / academic / government / nonprofit / unknown
+Unlike the weekly report (a rolling snapshot of what's new), the
+dashboard's **Papers** tab is a standing index of every papers/news/blog
+item besseleth has ever fetched, filterable and sortable. `papers`
+covers both feeds — arXiv preprints and OpenAlex-indexed published
+papers — as one source, since to a reader they're the same thing: a
+research paper, just via two complementary feeds with different
+tradeoffs (see the intro bullets above). An OpenAlex-sourced item
+carries **Authors** and **Citations** columns straight from the API —
+not LLM-derived, so they're exact; an arXiv-sourced one shows "citations
+unknown" instead (OpenAlex doesn't track preprints' citations) rather
+than a misleading 0. "Citations (highest)" is a Sort by option, for
+ranking by actual impact rather than recency. After each fetch,
+besseleth asks the local LLM to tag every new item with:
+
+- **org** — the company/lab/institution the item is about. For an arXiv
+  item, besseleth also looks up its authors' real institutional
+  affiliations via [OpenAlex](https://openalex.org) (free, keyless — no
+  LLM guessing involved) and hands that to the LLM as factual context
+  alongside the abstract, to help it pair a lab/PI named in the text with
+  the right institution. This only works for papers arXiv has assigned a
+  DOI to (every preprint since Feb 2022) and only when OpenAlex has the
+  affiliation on record — it's a real improvement on the null rate, not
+  a fix for every paper: an abstract that never names a specific
+  lab/PI at all still (correctly) resolves to a null org, same as
+  before — see "Why is org/modality/therapeutic_target often
+  null/unknown?" below. The opposite failure — naming who *reported* the
+  story instead of who it's about (e.g. "bioengineer.org", "36Kr" on a
+  news item from either site) — is guarded against three ways: an exact
+  match against your configured news/blog feeds' hostnames, a bare-
+  domain shape check ("word.com"/"word.org"/etc, independent of any
+  config — catches a publisher reached via an aggregator/search feed,
+  like Google News search or NewsAPI, that was never itself configured
+  anywhere), and a same-item check (the org squashes to the same base
+  name as *that specific item's own* url hostname). A static list of
+  well-known media/journal-publisher names (Nature, Science, CGTN, Tech
+  Times, ...) is also rejected outright — not exhaustive, so add an
+  outlet's own feed to `sources.news.feeds` when you spot a new one
+  slipping through (that also feeds the hostname-match check above). All
+  of this runs on every enrich call, including retroactively over
+  already-stored items, so existing bad rows self-correct the next time
+  you enrich rather than needing a manual fix.
+
+  A weaker local model doesn't always follow "respond with just the
+  name, or null" — it sometimes wraps the real answer in commentary
+  instead ("HCPLive (note: not a specific research group, but a news
+  outlet)", "Unknown (Poon Lab at UC Berkeley)", a whole sentence with
+  the real name after a colon). besseleth tries to recover the actual
+  name from these shapes (unwrapping, stripping a trailing parenthetical,
+  taking the tail after a colon) before the checks above run; if what's
+  left still reads like hedging prose rather than a name, it's dropped
+  to null rather than guessing which part was meant — also retroactive.
+
+  `labs.yaml` (copy from `labs.example.yaml`, entirely optional — no
+  effect at all if missing or empty) is a `{pi, university}` list that
+  deterministically sets `org` to `"<PI> Lab at <University>"` for a
+  listed PI whenever their surname and university both appear in an
+  item's text, bypassing the LLM's own extraction for that one item.
+  This isn't meant as something to keep in sync with reality as labs
+  move/PIs change — that's real upkeep for something that should mostly
+  take care of itself — so treat it as a spot-check tool more than a
+  standing feature: hand it a handful of labs you know well, see whether
+  the *generic* extraction (the checks described above, with no entry
+  for that lab) already gets them right on its own, and only add an
+  entry for one it doesn't. A lab not listed just falls through to the
+  LLM's own extraction and normalization, exactly as if labs.yaml didn't
+  exist.
+- **org_type** — industry / academic / government / nonprofit / general / unknown
 - **modality** — EEG, ECoG, CNS implant, PNS implant, EMG, fMRI, fNIRS,
-  or another short label if none fit
+  general, or another short label if none fit. **Multi-valued**: a study
+  combining more than one technique (e.g. EEG + eye-tracking) gets tagged
+  with each one separately rather than forced into a single combined
+  label — the Papers tab's Modality filter is a multi-select that matches
+  an item if ANY of its tags match ANY you've selected. "BCI"/"brain-
+  computer interface" (or this config's own industry name) is never used
+  as a tag on its own — that names the whole field, not a specific
+  technique, so it's rejected the same way an org name matching the
+  industry name/a keyword is rejected
 - **therapeutic_target** — what it addresses: motor, speech, vision,
-  hearing, memory, mood/psychiatric, epilepsy, pain, other
+  hearing, memory, mood/psychiatric, epilepsy, pain, other, general
 - **novelty_score** (1-5) — how surprising the item is **compared to
   other recent items on the same topic** (besseleth pulls a handful of
-  similar items from the DB and includes them in the prompt so the score
-  is relative, not just "does this sound impressive in isolation"),
-  with a one-sentence rationale shown on hover
+  similar items from the DB — across every enrichment source, not just
+  the item's own, so a news article gets compared against the papers
+  already covering the same result, not just other news) **and against
+  the best value besseleth has ever recorded for a relevant device
+  metric**, when the item reports one (e.g. an information transfer rate
+  that merely matches — or falls short of — the best one already in your
+  Trends data is incremental, not novel, regardless of how the item's
+  own framing sounds) — included in the prompt so the score is grounded
+  in your actual accumulated history, not just "does this sound
+  impressive in isolation" or the model's own general sense of what's
+  good. A one-sentence rationale is shown on hover
 
-This is bounded per fetch (`enrichment.max_items_per_run`, default 20) so
-one fetch cycle can't trigger unbounded LLM calls — it catches up over
-successive fetches if there's a backlog, or run it against everything at
-once:
+**Why is org/modality/therapeutic_target often null/unknown?** The LLM
+only ever sees the item's own title + text (abstract, for arXiv) — never
+the full PDF, and (arXiv aside) never a web search. A `null` org usually
+means the text genuinely never names a specific lab/PI, not a failed
+extraction — that's a deliberate "null over a wrong guess" design choice
+throughout enrichment: an author's institution isn't enough on its own
+either (a bare university name is still null; besseleth wants the
+specific lab, not "Stanford"). A genuinely `unknown` modality/
+therapeutic_target is rarer than it used to be: a lot of what used to
+collapse into "unknown" is actually **`general`** instead — a distinct
+value for "this item is genuinely about the technology/field broadly,
+not tied to one org/technique/target" (an industry trend piece, a
+funding-market roundup, a policy story), which is a real answer, not a
+gap. `unknown` is now reserved for the narrower case of a specific
+org/technique/target clearly being discussed that the text just doesn't
+name — the prompt asks for a best-effort call from what's described even
+if the exact word never appears, but a smaller/weaker local model still
+sometimes plays it safe and bails to "unknown" anyway; a stronger
+`summarizer.model` (if your hardware can run one) generally does
+noticeably better at this than prompt wording alone can. Note that this
+`general` distinction only applies going forward — an item enriched
+before this change still shows the old null/unknown; run **Re-check
+already-enriched items too** (Enrich now, Papers tab) to reclassify your
+existing backlog.
+
+The automatic pass after each fetch is bounded (`enrichment.max_items_per_run`,
+default 10) so one fetch cycle can't trigger unbounded LLM calls — it
+catches up over successive fetches if there's a backlog. Run it yourself
+— **Enrich now** on the Papers tab, or `besseleth.cli enrich` — and
+there's no count cap at all: it just works through everything unenriched
+from the last `enrichment.default_days_back` days (default 14), since
+that's normally all there is to do. For an actual backlog older than
+that, run through the whole thing in one go instead, no cap, however
+long that takes:
 
 ```bash
 .venv/bin/python -m besseleth.cli enrich --all
 ```
 
-...or hit **Enrich now** on the Papers tab. Requires
-`summarizer.backend: "ollama"` to actually extract anything (Ollama
+...or check **Enrich everything** next to **Enrich now** on the Papers
+tab before clicking it. Combined with **"Re-check already-enriched items
+too"** (re-running everything against a since-improved extraction rule,
+say), this does one full pass over every item currently in
+`enrichment.sources` — bounded by a count taken when the run starts, not
+"until empty" (a re-check queue has no empty state to reach on its own,
+so without that bound, checking both together used to silently fall
+back to one capped batch — fixed). **"Re-check already-enriched items
+too" on its own (Enrich everything not required) also rebuilds the
+Trends tab from scratch first** — every auto-extracted device/company row
+gets cleared before the re-check pass repopulates them. This is necessary,
+not just tidy: `add_company`/device auto-upsert deliberately never
+overwrite an existing row (so a hand-correction can never get silently
+clobbered by a later re-extraction), which also means a bad value from
+before an extraction-quality fix — a wrong unit conversion, say — would
+otherwise stick around forever even after re-enriching its source item,
+since the insert is just skipped rather than updated. Manually-added or
+hand-edited rows are never touched by this, only ones enrichment itself
+auto-extracted. Requires `summarizer.backend: "ollama"` to actually extract anything (Ollama
 running) — without it, items are marked `org_type: unknown` etc. rather
 than left unprocessed forever, since there's nothing more to learn
 without an LLM. The vocab above is a *suggestion* in the prompt, not a
 hard enum, so an unusual paper isn't forced into the wrong bucket — the
 filter dropdowns are populated from whatever values actually show up.
+
+### Enrich log tab (troubleshooting)
+
+If org/modality/location keep coming back null/unknown and you're not
+sure why, check the **Enrich log** tab next to Papers — no run
+triggered, just a live look at what's actually going on: your current
+`summarizer.backend`/`model`/`ollama_url`, whether Ollama is actually
+reachable right now (a green check, or the specific reason it isn't —
+unreachable, model not pulled, backend not "ollama" at all), and exactly
+what got extracted for the last 50 enriched items. If everything in that
+list is null/unknown, the status line above the table will say why
+(usually `summarizer.backend` isn't `"ollama"`, or Ollama isn't running)
+rather than leaving you to guess from the Papers table alone.
+
+If org locations specifically stay null even for orgs that show up
+constantly (Neuralink, a lab you know is at a specific university):
+`_backfill_org_locations`'s web-lookup tier 3 requires
+`summarizer.backend: "ollama"`, and a "not found" result used to get
+cached for `location_recheck_days` (default 30) regardless of *why* it
+came back empty — including because the backend wasn't "ollama" yet at
+the time, so tier 3 never actually ran. Fixed two ways: going forward, a
+miss is only cached when tier 3 got a genuine attempt; and a one-time
+cleanup (gated so it only ever runs once) clears every existing "not
+found" cache row the first time an enrich call sees `backend: "ollama"`,
+so orgs stuck in a stale cooldown from before get a real check
+immediately rather than waiting out 30 days. Also, `Enrich everything`
+(run_until_done) raises the per-run location-lookup budget from
+`enrichment.max_org_lookups_per_run`'s interactive default (8 — sized
+for one click, not hundreds of orgs) to
+`enrichment.run_until_done_location_lookup_cap` (default 50), since
+"enrich everything" implies looking up locations for everything you can
+too — lower that setting if a full run is straining your machine (each
+lookup is a web request, and one tier is an LLM call, so hundreds of
+them back-to-back on top of Ollama already holding a model resident is
+real sustained memory/CPU pressure even though no single lookup is
+large).
+
+**If "Enrich everything" runs your machine out of memory**: this is
+usually overall system memory pressure (Ollama's resident model + a
+long-running enrich pass + everything else open), not one runaway leak.
+Levers, in order of impact: lower
+`enrichment.run_until_done_location_lookup_cap` (above); close other
+memory-heavy apps (especially the browser) while it runs; or just don't
+use "Enrich everything" for a very large backlog — plain "Enrich now"
+(no cap at all, but only the last `enrichment.default_days_back` days,
+not your whole history) repeated over several days as new items arrive
+is much lighter per run.
 
 ## Map
 
@@ -492,24 +673,86 @@ it below the configured default) and stores whatever new items it finds
 in the same DB — it doesn't touch devices.yaml/companies.yaml, which stay
 hand-maintained.
 
+How far back this can actually reach depends on the source, not just how
+far back you ask:
+
+- **arXiv** has a real historical archive and paginates as far back as
+  you ask (there's a generous hard cap per keyword per run so an
+  extremely broad keyword/category combo over many years can't page
+  forever — re-run the backfill to keep going deeper if you hit it).
+- **News via Google News search** (the default feed) also paginates a
+  deep backfill (`days_back` beyond 30) — not by "going back" in the feed
+  itself (it has no offset/page parameter and always returns roughly its
+  newest ~100 matches, however far back you ask), but by slicing the
+  requested range into ~30-day chunks and querying Google News once per
+  chunk with its `after:`/`before:` date-bound search operators, so a
+  multi-year backfill actually samples each month instead of only ever
+  the same latest handful. This is specific to Google News search URLs
+  (detected by domain) — an ordinary RSS feed (a blog, a publication's
+  own feed, or NewsAPI's free tier) has no such operator and no
+  historical archive to page into either way, so those stay thin no
+  matter how far back you backfill; that part really is a limitation of
+  the source, not something more code can fix.
+- **Blogs and conference-news feeds are plain RSS/Atom**, same
+  limitation as above — a feed only ever exposes its current live
+  entries, not a historical archive, so backfilling doesn't help there.
+- **Events and the LinkedIn/social paste-in path** aren't date-windowed
+  fetches at all — a backfill doesn't apply to them.
+
 ## Reports: cadence and cleanup
 
 `schedule.report_cron` (in `config.yaml`) is a plain 5-field cron
-expression, so the report cadence is whatever you want, not just weekly:
+expression, so the report cadence is whatever you want, not just weekly.
+It's interpreted in `schedule.timezone` (an IANA zone name) if set,
+otherwise in the host's local timezone:
 
 ```yaml
 schedule:
-  report_cron: "0 8 * * *"      # daily
-  report_cron: "0 8 * * MON"    # weekly (default)
-  report_cron: "0 8 1 * *"      # monthly
-  report_cron: "0 8 1 1 *"      # yearly
+  report_cron: "0 4 * * *"      # daily
+  report_cron: "0 4 * * MON"    # weekly (default) — Monday 4am local time
+  report_cron: "0 4 1 * *"      # monthly
+  report_cron: "0 4 1 1 *"      # yearly
+  timezone: "America/Los_Angeles"  # optional; defaults to the host's local tz
 ```
 
-Reports accumulate in `reports/` — each is its own dated file, never
-overwritten. Delete one you don't need from the dashboard sidebar (🗑 next
-to its date) or `besseleth.cli report-delete <report-id>`. To prune
+Reports accumulate in `reports/` — each is its own timestamped file
+(`report-2026-09-05-140322.md`), never overwritten, even by a same-day
+re-run. Delete one you don't need from the dashboard sidebar (🗑 next
+to it) or `besseleth.cli report-delete <report-id>`. To prune
 automatically instead, set `reports.keep_last: N` in config.yaml to keep
 only the N most recent (0/omitted = keep everything).
+
+Every report is built fresh from scratch: it pulls everything in the last
+`news.days_back` days (default 8) at the moment it runs, with no memory of
+what a previous report already showed. Re-running — while developing, or
+because something new got scraped or pasted — always reflects the current
+window exactly as if no report had ever run before; it never skips an
+item just because an earlier report already included it.
+
+The report opens with **🏆 Most surprising / important this week** —
+every item that scored at least `report.top_findings_min_novelty` (1-5,
+default 3) on `novelty_score`, ranked highest first and capped at
+`report.top_findings_max_count` (default 5), each with the LLM's own
+one-sentence rationale for the score (already computed during enrichment
+— see the `novelty_score`/`novelty_rationale` reference above; this
+section is just surfacing it prominently, not a new LLM call). The point
+is leading with what actually matters instead of a flat chronological
+dump — a quiet week where nothing clears the threshold says so honestly
+("nothing stood out") rather than promoting a middling item just to fill
+the section. Every item in this section is also guaranteed to appear
+again in its own section further down (it's ranked from the same
+per-section-capped pool `max_items_per_section` already selected, not a
+separate wider search), so nothing here is only mentioned once with no
+way to find the fuller context. The report's closing **🧠 Big picture** section is the one place that does look back
+further, across everything besseleth has ever accumulated (item counts,
+most-active organizations, how far back its knowledge goes) to say what
+this run's items mean in that larger context — a trend continuing, a
+quiet org suddenly active again, or something genuinely new. It's
+explicitly prompted to commit to one real angle instead of just
+paraphrasing besseleth's own stats back at you (never a sentence shaped
+like "Besseleth has accumulated N items... most active: X, Y, Z") — with
+`summarizer.backend: "none"` there's no LLM to do that synthesis, so it
+falls back to the plain stats themselves rather than nothing.
 
 ## Project layout
 
@@ -552,3 +795,11 @@ extension/                # browser extension: select text anywhere -> POST /api
   access must be available to the process running this (some sandboxed dev
   environments restrict outbound hosts — this is unrelated to the code).
 - `data/besseleth.db` and `reports/*.md` are local, gitignored artifacts.
+- `config.yaml` is gitignored too, same as `contacts.yaml`/`devices.yaml`/
+  `companies.yaml`/`interests.yaml`/`feeds.yaml`/`job_boards.yaml`/
+  `labs.yaml` — it's
+  your own settings/contacts, not something to version control or diff
+  against another machine's copy. `config.example.yaml` is the tracked
+  template `cp` it from; pull in a code update's config changes (a new
+  key, a changed default) by diffing `config.example.yaml` yourself and
+  copying over what you want.

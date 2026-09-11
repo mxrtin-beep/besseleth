@@ -55,10 +55,12 @@ class Device:
     date_reported: str = ""
     notes: str = ""
     auto_extracted: bool = False
+    id: int = 0  # the devices table's row id — needed to delete a specific row (e.g. a bad extraction)
 
 
 def _row_to_device(row) -> Device:
     return Device(
+        id=row["id"],
         name=row["name"],
         org=row["org"],
         org_type=row["org_type"] or "unknown",

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -196,24 +197,71 @@ def parse_linkedin_connections_csv(csv_text: str) -> list[Contact]:
     return contacts
 
 
-def _is_relevant(contact: Contact, keywords: list[str]) -> bool:
+_ORG_SUFFIX_RE = re.compile(r"\b(inc|incorporated|llc|ltd|corp|corporation|co|company|the)\b\.?", re.IGNORECASE)
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _normalize_org(name: str) -> str:
+    """"Neuralink, Inc." / "neuralink" / "NEURALINK" -> "neuralink" — for
+    an exact-identity comparison that still tolerates the usual case/
+    punctuation/suffix noise between a LinkedIn CSV's free-text company
+    field and however an org got spelled when besseleth extracted it."""
+    return _NON_ALNUM_RE.sub("", _ORG_SUFFIX_RE.sub("", name.lower()))
+
+
+def _is_relevant(contact: Contact, keywords: list[str], known_orgs: list[str]) -> bool:
     """A LinkedIn export is your whole network, not just the neurotech
-    corner of it — only import connections whose company/title actually
-    look like this industry, matched against the same keyword list
-    scrapers use to decide whether an article is on-topic (see
-    text_matches_keywords). No keywords configured -> don't filter (an
-    empty allowlist would silently import nobody and look like a bug)."""
-    if not keywords:
+    corner of it — only import connections who look on-topic. Two
+    independent checks, either is enough:
+
+      - `keywords` matched against their company+title text, same as an
+        article body (see text_matches_keywords) — catches a title like
+        "EEG Research Scientist" even at a company whose name says
+        nothing about neurotech. Requires one of your keyword PHRASES
+        verbatim — deliberately precision-over-recall: an earlier looser
+        version also matched on a shared word stem (e.g. "neuro...", to
+        catch "Neuroengineer"/"Axo Neurotech" without a full phrase) but
+        that same looseness is what let generic biomedical/academic
+        neighbors through — "neuroscience", "neurology", a random
+        university's "neuro" building/department, etc. A real match this
+        strict misses (an unusual title at a small company with an
+        unlisted name) is a fine trade for not re-importing your whole
+        adjacent-field network; add anyone missed by hand.
+      - `known_orgs` matched by NORMALIZED EXACT identity (not substring
+        containment — see _normalize_org) against their company name.
+        Deliberately scoped by the caller to only your manually-vetted
+        Trends company list (not auto-extracted entries, and NOT every
+        org enrich.py has ever extracted from an item) — a big
+        multi-division company (Amgen, Siemens, UCLA Health) mentioned
+        once, incidentally, in an article actually about something else
+        would otherwise mark every one of its employees "relevant",
+        which is exactly how that used to happen. And exact identity
+        only, never substring: a loose containment check against ANY
+        known-org list is how a law firm ends up imported just because
+        its name happens to share a short/generic fragment with one.
+
+    No keywords AND no known_orgs -> don't filter (an empty allowlist
+    would silently import nobody and look like a bug)."""
+    if not keywords and not known_orgs:
         return True
     text = " ".join(f"{w.get('company', '')} {w.get('role', '')}" for w in contact.workplaces)
-    return bool(text_matches_keywords(text, keywords))
+    if keywords and text_matches_keywords(text, keywords):
+        return True
+    if known_orgs:
+        companies = {_normalize_org(w.get("company", "")) for w in contact.workplaces if w.get("company")}
+        orgs_normalized = {_normalize_org(o) for o in known_orgs if o}
+        if companies & orgs_normalized:
+            return True
+    return False
 
 
-def import_linkedin_csv(path: str | Path, csv_text: str, keywords: list[str] | None = None) -> int:
+def import_linkedin_csv(
+    path: str | Path, csv_text: str, keywords: list[str] | None = None, known_orgs: list[str] | None = None
+) -> int:
     """Appends every contact parsed from `csv_text` that isn't already
     present (matched by linkedin_url if both have one, else by exact
-    name) AND looks relevant to `keywords` (your company/role mentions
-    the industry) — safe to import the same export twice without
+    name) AND looks relevant per `_is_relevant` (industry keywords OR a
+    known org name) — safe to import the same export twice without
     duplicating everyone, and skips the rest of your LinkedIn network
     that has nothing to do with this industry. Returns how many new
     contacts were added."""
@@ -223,7 +271,7 @@ def import_linkedin_csv(path: str | Path, csv_text: str, keywords: list[str] | N
 
     added = 0
     for contact in parse_linkedin_connections_csv(csv_text):
-        if not _is_relevant(contact, keywords or []):
+        if not _is_relevant(contact, keywords or [], known_orgs or []):
             continue
         if contact.linkedin_url and contact.linkedin_url in existing_urls:
             continue

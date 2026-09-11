@@ -149,6 +149,122 @@ def summarize_items_numbered(items: list[Item], industry_name: str, cfg: dict) -
     return "\n".join(lines)
 
 
+def summarize_context(new_items: list[Item], history: dict, industry_name: str, cfg: dict) -> str:
+    """The report's closing section: not a recap of what's already
+    summarized above, and not a recitation of besseleth's own database
+    stats either — what this run's new items actually MEAN set against
+    everything accumulated across every past run (`history`, from
+    DB.accumulated_knowledge_stats()): is a quiet org suddenly active
+    again, does this continue a trend already being tracked, is it a
+    genuinely new direction. Empty if there's nothing new to place."""
+    if not new_items:
+        return ""
+
+    total_items = history.get("total_items", 0)
+    total_orgs = history.get("total_orgs", 0)
+    top_orgs = history.get("top_orgs", [])
+    top_orgs_str = ", ".join(f"{org} ({n})" for org, n in top_orgs)
+    earliest = history.get("earliest_date") or "an earlier date"
+
+    # A concrete hook for the LLM to reason about, rather than just handing
+    # it aggregate counts to paraphrase: which of today's items involve an
+    # org that's normally one of the most active (a returning player worth
+    # remarking on), and which involve one that's rare/new in the record
+    # entirely (worth flagging as new, not just "also happened").
+    top_org_names = {org for org, _ in top_orgs}
+    new_item_orgs = {i.org for i in new_items if i.org}
+    returning_orgs = sorted(new_item_orgs & top_org_names)
+    fresh_orgs = sorted(new_item_orgs - top_org_names)
+
+    fallback = (
+        f"Besseleth has accumulated {total_items} items on {industry_name} since {earliest}, "
+        f"across {total_orgs} organizations"
+        + (f" — most active so far: {top_orgs_str}." if top_orgs_str else ".")
+    )
+
+    backend = cfg.get("backend", "none")
+    if backend != "ollama":
+        return fallback
+
+    model = cfg.get("model", "llama3.1")
+    ollama_url = cfg.get("ollama_url", "http://localhost:11434")
+    max_items = cfg.get("max_items_per_summary_call", 8)
+    new_titles = "\n".join(f"- {i.title}" for i in new_items[:max_items])
+    returning_note = f" (here: {', '.join(returning_orgs)})" if returning_orgs else ""
+    fresh_note = f" (here: {', '.join(fresh_orgs)})" if fresh_orgs else ""
+    prompt = (
+        f"You are writing the closing 'Big picture' section of a weekly {industry_name} "
+        f"briefing — analysis for someone who already read the sections above, not a recap "
+        f"of the database. You have background stats on everything besseleth has ever "
+        f"tracked: {total_items} items since {earliest}, across {total_orgs} organizations, "
+        f"most active historically: {top_orgs_str or 'none tracked yet'}.\n\n"
+        f"Do NOT write a sentence that just restates these numbers (e.g. never write anything "
+        f"shaped like 'Besseleth has accumulated N items... most active: X (Y), Z (W)' — that "
+        f"is a database dump, not analysis, and the reader already has that data if they want "
+        f"it). Instead, in 2-4 sentences, say what today's new items actually MEAN given that "
+        f"history — pick ONE genuine angle and commit to it, e.g.: an org among today's items "
+        f"that's normally one of the most active ones{returning_note} showing up again — is "
+        f"this more of the same, or does it look like a shift in what they're doing; an org in "
+        f"today's items that's rare or new in the whole record{fresh_note} — is this a new "
+        f"entrant worth watching; or, if neither applies cleanly, whether today's items "
+        f"continue a pattern you'd expect from this field's history or actually cut against "
+        f"it. If you genuinely can't identify a real angle from what's given, say plainly that "
+        f"this week doesn't point to a clear shift, rather than manufacturing one. No preamble "
+        f"like 'Here is a summary', no fluff.\n\n"
+        f"Today's new items:\n{new_titles}\n\nBig picture:"
+    )
+    result = _ollama_generate(prompt, ollama_url, model, num_thread=cfg.get("num_thread"))
+    return result or fallback
+
+
+_JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def summarize_linkedin_item(item: Item, cfg: dict) -> str:
+    """LinkedIn pastes are almost always a hiring post, and the pasted
+    text is the raw post — long, sometimes cut off mid-sentence by
+    whatever copied it, and headed by a useless generic page title
+    ("Feed | LinkedIn") rather than anything specific. The report just
+    wants the basics: role, company, location — not that raw text
+    truncated. Falls back to a short plain snippet (not the useless
+    title) if the LLM backend is off/unreachable or extraction fails."""
+    text = " ".join(item.summary.split())
+    fallback = (text[:150].rsplit(" ", 1)[0] + "…") if len(text) > 150 else text
+    fallback = fallback or item.title
+
+    backend = cfg.get("backend", "none")
+    if backend != "ollama":
+        return fallback
+
+    model = cfg.get("model", "llama3.1")
+    ollama_url = cfg.get("ollama_url", "http://localhost:11434")
+    prompt = (
+        "The following is a pasted LinkedIn post, almost always a hiring announcement. "
+        'Extract just the basics as JSON: {"role": "...", "company": "...", "location": "..."} '
+        "— use null for any field not clearly stated, don't guess. Output ONLY the JSON, no "
+        f"other text.\n\nPost:\n{item.summary[:800]}\n\nJSON:"
+    )
+    result = _ollama_generate(prompt, ollama_url, model, timeout=60, num_thread=cfg.get("num_thread"))
+    match = _JSON_BLOCK_RE.search(result or "")
+    try:
+        data = json.loads(match.group(0)) if match else {}
+    except json.JSONDecodeError:
+        data = {}
+
+    role = (data.get("role") or "").strip()
+    company = (data.get("company") or "").strip()
+    location = (data.get("location") or "").strip()
+    if not role and not company:
+        return fallback
+
+    line = role or "Opportunity"
+    if company:
+        line += f" at {company}"
+    if location:
+        line += f" ({location})"
+    return line
+
+
 def summarize_item(item: Item, cfg: dict) -> str:
     """One-line 'why it matters' for a single high-priority item (e.g. a
     personalized match). Falls back to the raw summary if unavailable."""

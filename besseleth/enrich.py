@@ -53,7 +53,7 @@ from .trends.company_store import auto_mark_ipo, auto_upsert_company
 from .trends.store import auto_append_device
 from . import summarizer as summarizer_mod
 
-DEFAULT_SOURCES = ["arxiv", "news", "blog"]
+DEFAULT_SOURCES = ["papers", "news", "blog"]
 
 _JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 
@@ -89,9 +89,28 @@ def ollama_status(summarizer_cfg: dict) -> tuple[bool, str]:
     return True, f"Ollama reachable at {ollama_url}, model {model!r} available."
 
 
-def _build_prompt(row, config: Config, context: str) -> str:
+def _build_prompt(row, config: Config, context: str, author_affiliations: str = "", known_benchmarks: str = "") -> str:
     metric_keys = ", ".join(f"{m['key']} ({m.get('unit', '')})" for m in config.trend_metrics if m.get("type", "numeric") == "numeric")
     categorical_keys = ", ".join(m["key"] for m in config.trend_metrics if m.get("type") == "categorical")
+
+    affiliations_block = (
+        f"\nReal author affiliation data (from OpenAlex — factual, not a guess; use it to help identify the org, "
+        f"e.g. pair an author's institution here with a lab/PI name mentioned in the item text, but still follow "
+        f'the "org" rule below — a bare institution name with no specific lab identified is still null):\n'
+        f"{author_affiliations}\n"
+        if author_affiliations
+        else ""
+    )
+
+    benchmarks_block = (
+        f"\nBest values besseleth has recorded so far for these metrics, across every device it has ever seen "
+        f"(actual accumulated history, not general knowledge — use this to judge whether a reported number in "
+        f"this item is actually notable or just ordinary, e.g. a reported rate BELOW the known best is incremental "
+        f"even if it sounds impressive in isolation, and one that clearly BEATS it is genuinely novel):\n"
+        f"{known_benchmarks}\n"
+        if known_benchmarks
+        else ""
+    )
 
     return (
         f"Read this {row['source']} item about {config.industry_name}. Extract structured metadata as JSON with "
@@ -106,16 +125,46 @@ def _build_prompt(row, config: Config, context: str) -> str:
         f'— a common mistake — the PUBLICATION or news outlet reporting the story (e.g. if the text says '
         f'"according to TechCrunch..." or "36Kr reports that...", that outlet is NOT the org; keep looking for who '
         f"the story is actually about). If the text doesn't name the specific organization, that's null, not your "
-        f"best guess at a description of one\n"
+        f"best guess at a description of one. This field is a NAME ONLY — a few words, never a sentence, never "
+        f"your reasoning about it: if you're unsure, or the org is only implied/mentioned in a roundabout way, "
+        f'use null rather than writing out your uncertainty (e.g. never "Unknown (possibly X)" or "X, but the '
+        f'text doesn\'t clearly say so" — either commit to the plain name or use null, nothing in between)\n'
         '  "org_description": at most 5 words on what that org is/does, e.g. "BCI implant company" or '
         '"Academic neuroscience lab" — null if "org" is null\n'
-        '  "org_type": one of "industry", "academic", "government", "nonprofit", or "unknown"\n'
-        '  "modality": the technical approach/category, e.g. "EEG", "ECoG", "CNS implant", "PNS implant", "EMG", '
-        '"fMRI", "fNIRS", or another short label if none fit; "unknown" if unclear\n'
+        '  "org_type": one of "industry", "academic", "government", "nonprofit", "general", or "unknown". Use '
+        '"general" (not "unknown") whenever "org" above is null BECAUSE the item is about the technology/field '
+        f'broadly rather than any specific organization — an industry trend piece, a review of {config.industry_name} '
+        'progress overall, policy/regulatory coverage not tied to one company, etc. Reserve "unknown" for when a '
+        "specific org clearly IS involved but you can't tell what kind of org it is (rare, since org_type is usually "
+        'inferable once "org" is non-null) — "unknown" should almost never co-occur with a null "org"\n'
+        '  "modality": a JSON ARRAY of the technical approach(es)/category(ies) actually used, e.g. ["EEG"], '
+        '["ECoG"], ["CNS implant"], ["PNS implant"], ["EMG"], ["fMRI"], ["fNIRS"], ["eye movement (EM)"], or '
+        'another short label if none fit — MULTIPLE entries when the item genuinely combines more than one, e.g. '
+        'a study using both EEG and eye-tracking is ["EEG", "eye movement (EM)"], never a single combined string '
+        'like "EEG + eye movement (EM)". Make your best-effort call from what the text actually describes (the '
+        'device/method used) even if that word never appears verbatim — e.g. "electrodes implanted in the motor '
+        'cortex" is "CNS implant" even without that exact phrase. NEVER use "BCI", "brain-computer interface", '
+        '"brain-machine interface", or a synonym for the field itself as an entry here — that names the whole '
+        f'topic ({config.industry_name}), not a specific technique, so it is true of nearly everything and useless '
+        'as a category; name the actual technique(s) instead. Two different "nothing specific" cases, don\'t '
+        'conflate them: ["general"] when the item discusses the technology/field broadly, spanning modalities or '
+        'not tied to one — e.g. an industry overview, a funding-market roundup, a policy piece — that\'s a genuine '
+        'answer, not a gap. ["unknown"] only when the item is clearly about a SPECIFIC technique/device but the '
+        "text just never says which one — a real gap, not merely because it isn't spelled out casually (in which "
+        "case still make your best-effort call per the instructions above)\n"
         '  "therapeutic_target": what it addresses, e.g. "motor", "speech", "vision", "hearing", "memory", '
-        '"mood/psychiatric", "epilepsy", "pain", "other", or "unknown" if not applicable/unclear\n'
+        '"mood/psychiatric", "epilepsy", "pain", "other", "general", or "unknown". Same standard as modality — '
+        'infer from what\'s described (a paralyzed patient regaining hand control is "motor") rather than requiring '
+        'the word itself. "general" when the item is about the technology/field broadly, not addressing any one '
+        'condition/target (an industry overview, a funding piece, a policy piece) — that\'s a real answer. '
+        '"unknown" only when a specific application IS clearly being discussed but the target genuinely can\'t be '
+        "determined from the text — not simply because it isn't spelled out explicitly\n"
         '  "novelty_score": integer 1-5 — how surprising/novel this is COMPARED TO the other recent items on the '
-        "same topic listed below (1 = incremental/expected, 5 = a genuine surprise or breakthrough relative to them)\n"
+        "same topic listed below (1 = incremental/expected, 5 = a genuine surprise or breakthrough relative to them) "
+        "AND, if this item reports a number for one of the device_metrics above, compared to the best value "
+        'besseleth has recorded for that metric (see "Best values" below, when given) — a number that merely '
+        "matches or falls short of the known best is incremental regardless of how the item's own framing sounds, "
+        "while one that clearly beats it is genuine evidence for a higher score, not just the item's own tone\n"
         '  "novelty_rationale": one concise sentence justifying the novelty_score\n'
         '  "location": the city and country of the org\'s relevant site/HQ mentioned or clearly implied by the '
         'text, as "City, Country" (e.g. "San Francisco, USA") — null if not mentioned or you would be guessing\n'
@@ -124,24 +173,57 @@ def _build_prompt(row, config: Config, context: str) -> str:
         "device or system (do NOT put the org's own name here as a stand-in — that's what \"org\" is for)\n"
         '  "device_metrics": an object with any of these keys the text reports concrete numbers/values for — '
         f"{metric_keys}, {categorical_keys} — omit keys with no data, use {{}} if none reported. Only meaningful "
-        'if "device_name" is set\n'
+        'if "device_name" is set. CONVERT the number to the unit named in parentheses above — the text will often '
+        "report a different unit, and the field only means what it says if the value has actually been converted, "
+        'not copied over as-is with a mismatched unit. Show your conversion by doing the arithmetic, don\'t just '
+        'restate the source number: e.g. for "information_transfer_rate (bits/min)", a reported "32 Mbps" is '
+        "32,000,000 bits/SECOND, so the bits/min value is 32,000,000 × 60 = 1,920,000, not 32 and not 32,000,000 "
+        '(those would be treating Mbps as if it already meant bits/min, or bits/second, respectively — it\'s '
+        'neither). Likewise "150 kbps" is 150,000 bits/sec → 9,000,000 bits/min, and a rate already given per-minute '
+        'or in raw bits/sec needs the matching conversion (×60 for /sec→/min, none needed if already /min). Same '
+        'principle for any other unit, not just data rates — e.g. for "longevity_days (days in vivo)", a reported '
+        '"16 months of data" is 16 × ~30.4 ≈ 487 days, NOT 16 (that would be treating months as if they were '
+        'already days); "2 years" is ~730 days; "6 weeks" is 42 days. If a duration is described as ongoing/at '
+        'least that long ("still implanted after 16 months" or "16 months and counting"), still report it as a '
+        "days value (487), not the raw number — the field is a day count, always, regardless of what unit the "
+        "text happened to use. If you're not confident you can convert the reported unit correctly, omit that key "
+        "rather than guess — a missing metric is fine, a wrong one silently corrupts a numeric trend chart\n"
         '  "company_funding": an object {"funding_total_usd": number or null, "last_funding_round": string or '
         'null, "last_funding_date": "YYYY-MM-DD" or null, "ipo_date": "YYYY-MM-DD" or null, "stock_exchange": '
         'string or null} — funding_total_usd/last_funding_round/last_funding_date if this item reports a specific '
         'funding amount/round for "org"; ipo_date/stock_exchange only if this item reports "org" actually going '
         'public (an IPO that happened or a completed direct listing — e.g. "NASDAQ: XYZ" starts trading), NOT a '
-        'mere announcement/rumor of a planned future IPO — use {} if none of this applies\n\n'
+        'mere announcement/rumor of a planned future IPO — use {} if none of this applies\n'
+        f"{affiliations_block}"
+        f"{benchmarks_block}\n"
         f"Item title: {row['title']}\nItem text: {(row['summary'] or '')[:1500]}\n\n"
-        f"Other recent items on the same topic (for novelty comparison):\n{context}\n\n"
+        f"Other recent items on the same topic, across every source type (for novelty comparison):\n{context}\n\n"
         "Respond with ONLY the JSON object, no other text."
     )
 
 
 _NON_ORG_EXACT = {
-    "unknown", "n/a", "na", "none", "various", "unspecified", "not specified", "not mentioned",
+    "unknown", "n/a", "na", "none", "null", "nil", "various", "unspecified", "not specified", "not mentioned",
     "not applicable", "researchers", "scientists", "the researchers", "the scientists", "authors",
     "the authors", "the team", "the company", "the companies", "the university", "the lab", "the labs",
     "investigators", "academics",
+}
+# Generic media/journal-publisher names common enough across almost any
+# science/tech-news feed mix that they're worth rejecting outright,
+# rather than relying solely on _known_publisher_names (which only
+# catches a hostname you've explicitly configured as a feed — useless
+# for a publisher reached via an aggregator/search feed like Google News
+# search or NewsAPI, which was never itself configured anywhere) or the
+# per-item hostname/domain-shape checks (which miss a publisher whose
+# brand name isn't domain-shaped and doesn't match this specific item's
+# own url, e.g. a syndicated repost). Not exhaustive — add to this list,
+# or better, add the outlet's own feed to `sources.news.feeds`, so
+# _known_publisher_names catches its other spellings/variants too.
+_KNOWN_MEDIA_OUTLETS = {
+    "nature", "science", "cell", "the lancet", "nejm", "pnas",
+    "hcplive", "pandaily", "36kr", "cgtn", "tech times", "techtimes",
+    "rockefeller university press", "baishideng publishing group",
+    "mercator institute for china studies", "the milelion", "milelion", "moomoo",
 }
 # "<Demonym/adjective> <generic role noun>" — e.g. "Chinese scientists",
 # "European researchers". Deliberately doesn't include "lab(s)"/"labs" or
@@ -285,22 +367,133 @@ def _is_bare_university(org: str) -> bool:
     return True
 
 
+_HEDGING_PHRASES = (
+    "not a specific", "not specific", "no specific", "didn't mention", "did not mention",
+    "doesn't mention", "does not mention", "unspecified", "n/a", "note:", "possibly",
+    "according to another", "isn't clear", "is not clear", "unclear from",
+)
+
+
+def _clean_org_value(raw: str | None) -> str | None:
+    """A weaker local model doesn't reliably follow "respond with just
+    the name" — it sometimes wraps the real answer in commentary instead
+    of using null: a trailing parenthetical hedge ("Wu's lab (unspecified
+    location, possibly China)"), a garbage prefix wrapping the real
+    answer ("Unknown (Poon Lab at UC Berkeley)"), or a full explanatory
+    sentence with the actual name tacked on after a colon ("Pandaily
+    didn't mention a specific organization, but according to another
+    news item: Merge Labs"). This tries to recover the real name from
+    each of those shapes; if what's left still reads like hedging prose
+    rather than a name (a hedging phrase survives, or it's just too long
+    /many words to be a name), returns None rather than guessing which
+    part was meant. Runs before _looks_like_a_named_org, so a name it
+    recovers still goes through all the normal validity checks after."""
+    if not raw:
+        return None
+    org = raw.strip()
+
+    # "Unknown (Poon Lab at UC Berkeley)" — the real answer is what's
+    # wrapped in parens after a non-answer prefix; unwrap it.
+    wrapped = re.match(r"^(?:unknown|n/a|none|null)\s*\((.+)\)$", org, re.IGNORECASE)
+    if wrapped:
+        org = wrapped.group(1).strip()
+
+    # "...but according to another news item: Merge Labs" — take
+    # whatever's after the last colon if it's short enough to plausibly
+    # be a name on its own, rather than another clause of the sentence.
+    if ":" in org:
+        tail = org.rsplit(":", 1)[1].strip()
+        if 0 < len(tail.split()) <= 6:
+            org = tail
+
+    # "Wu's lab (unspecified location, possibly China)" — a trailing
+    # parenthetical is usually commentary, not part of a real org's name
+    # — EXCEPT "Chang Lab (UCSF)" is a legitimate way of writing
+    # "Chang Lab at UCSF"; stripping that blindly would throw the
+    # institution away rather than the hedging. Only strip it as
+    # commentary when it actually reads like commentary (a hedging
+    # phrase, or more than a couple words — a real institution name in
+    # parens is short).
+    trailing_paren = re.search(r"\s*\(([^)]*)\)\s*$", org)
+    if trailing_paren:
+        inner = trailing_paren.group(1).strip()
+        if any(phrase in inner.lower() for phrase in _HEDGING_PHRASES) or len(inner.split()) > 3:
+            org = org[: trailing_paren.start()].strip()
+
+    if not org:
+        return None
+    lowered = org.lower()
+    if any(phrase in lowered for phrase in _HEDGING_PHRASES):
+        return None
+    # A real org/lab name is a few words, never a full sentence — this
+    # catches hedging prose the checks above didn't happen to unwrap.
+    if len(org.split()) > 8:
+        return None
+    return org
+
+
+def _match_known_lab(text: str, config: Config) -> str | None:
+    """Deterministic override using labs.yaml (see labs_store.py) — real
+    ground truth you supplied, not an LLM guess. If `text` mentions a
+    listed PI's surname, AND (when the entry gives one) their university,
+    returns the canonical "<PI> Lab at <University>" form directly;
+    checked BEFORE the LLM's own org extraction is used, so a listed lab
+    is never subject to however the LLM's phrasing or normalization
+    happens to shake out. Requiring the university too (when given) is
+    what keeps a common surname from matching every item that happens to
+    share it — "Chen" alone proves nothing, "Chen" + "USC" is specific.
+    None if nothing in labs.yaml matches (falls through to the LLM's own
+    extraction, exactly as before labs.yaml existed)."""
+    for lab in config.labs:
+        pi = lab["pi"]
+        if not pi:
+            continue
+        surname = pi.split()[-1]
+        if not re.search(rf"\b{re.escape(surname)}\b", text, re.IGNORECASE):
+            continue
+        university = lab["university"]
+        if university and not re.search(rf"\b{re.escape(university)}\b", text, re.IGNORECASE):
+            continue
+        return f"{pi} Lab at {university}" if university else f"{pi} Lab"
+    return None
+
+
+_LOOKS_LIKE_A_DOMAIN_RE = re.compile(
+    r"^([a-z0-9][a-z0-9-]*\.)+(com|org|net|io|co|info|biz|news|press|tech|ai)$",
+    re.IGNORECASE,
+)
+
+
 def _looks_like_a_named_org(org: str, config: Config) -> bool:
     """False for anything that isn't naming a specific organization: the
     industry name/a keyword verbatim, an explicit non-answer ('unknown',
     'n/a', ...), a vague group description ('Chinese scientists', 'the
     researchers'), one of besseleth's own configured news/blog feed
     sources (e.g. "Tech Times", "36Kr", "bioengineer.org") — those are
-    who reported the story, not who it's about — or a bare university/
-    college name with no specific lab named (see _is_bare_university).
-    All prompted against directly too (see _build_prompt) — this is the
-    defensive backstop for when the LLM ignores that instruction
+    who reported the story, not who it's about — a bare university/
+    college name with no specific lab named (see _is_bare_university), or
+    a bare domain-shaped string ("bioengineer.org", "techtimes.com").
+
+    That last check matters beyond the configured-feed list above: a news
+    item reached via an aggregator/search feed (Google News search,
+    NewsAPI) comes from a publisher that was never itself configured
+    anywhere, so _known_publisher_names has no way to know it — this
+    catches the common failure mode (the LLM naming the outlet, not the
+    subject) on shape alone, independent of what's configured. A real
+    org's name is essentially never written as a bare "word.tld" string
+    in running prose (a company styled "x.ai" gets referred to as "xAI"
+    in text, not literally "x.ai"), so the false-positive risk here is
+    low. All prompted against directly too (see _build_prompt) — this is
+    the defensive backstop for when the LLM ignores that instruction
     anyway."""
     normalized = org.strip().lower()
     if not normalized:
         return False
-    non_orgs = _NON_ORG_EXACT | {config.industry_name.strip().lower()} | {k.strip().lower() for k in config.keywords}
-    if normalized in non_orgs:
+    non_orgs = (
+        _NON_ORG_EXACT | _KNOWN_MEDIA_OUTLETS
+        | {config.industry_name.strip().lower()} | {k.strip().lower() for k in config.keywords}
+    )
+    if normalized in non_orgs or _squash(org) in {_squash(n) for n in _KNOWN_MEDIA_OUTLETS}:
         return False
     if _GENERIC_GROUP_RE.match(org.strip()):
         return False
@@ -308,20 +501,101 @@ def _looks_like_a_named_org(org: str, config: Config) -> bool:
         return False
     if _is_bare_university(org):
         return False
+    if _LOOKS_LIKE_A_DOMAIN_RE.match(org.strip()):
+        return False
     publisher_names = _known_publisher_names(config)
     if normalized in publisher_names or _squash(org) in publisher_names:
         return False
     return True
 
 
+# "BCI"/"brain-computer interface" describes the entire field — true of
+# nearly every item this tool tracks, so it's useless as a specific
+# modality tag (same reasoning as rejecting the industry name/a keyword
+# as an "org" above). Checked in addition to config.industry_name/
+# keywords (also rejected, dynamically) since these exact phrases are
+# the field's name regardless of what a given config calls the industry.
+_TOO_BROAD_MODALITY_TERMS = {
+    "bci", "bcis", "brain-computer interface", "brain computer interface",
+    "brain-machine interface", "brain machine interface", "bmi", "bmis",
+}
+
+
+def _clean_modality_tags(raw, config: Config) -> str:
+    """Normalizes the LLM's `modality` response — expected to be a JSON
+    array of one tag per distinct technique actually used (see
+    _build_prompt) — into a comma-separated string for storage: strips
+    each tag, drops empties and duplicates, and drops anything that's
+    just the field's own name (see _TOO_BROAD_MODALITY_TERMS above) or
+    this config's own industry name. Deliberately does NOT reject a
+    configured keyword in general the way "org" does: `industry.keywords`
+    routinely includes specific modality names themselves (EEG, ECoG,
+    TMS, DBS, ...), so those need to survive as valid tags here, unlike
+    an org name (which should never equal a search keyword). Also
+    accepts a bare string for backward compatibility with an older
+    single-value response shape. Returns "unknown" if nothing survives."""
+    if isinstance(raw, str):
+        raw = [raw]
+    elif not isinstance(raw, list):
+        raw = []
+
+    too_broad = _TOO_BROAD_MODALITY_TERMS | {config.industry_name.strip().lower()}
+
+    tags: list[str] = []
+    for tag in raw:
+        if not isinstance(tag, str):
+            continue
+        tag = tag.strip()
+        if not tag or tag.lower() in too_broad:
+            continue
+        if tag not in tags:
+            tags.append(tag)
+
+    return ", ".join(tags) if tags else "unknown"
+
+
+_LAB_NAME_RE = re.compile(
+    r"^(?:the\s+)?(?P<pi>[A-Za-z][\w-]*)(?:'s)?\s+lab(?:oratory)?"
+    r"(?:\s*(?:at|@|,|\()\s*(?P<inst>[^)]+?)\)?)?$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_lab_name(org: str) -> str:
+    """Collapses the handful of ways a PI-named lab gets phrased — "the
+    Shenoy Lab at Stanford", "Shenoy's lab at Stanford", "Shenoy Lab",
+    "the Shenoy Laboratory", "Shenoy Lab (Stanford)", "Shenoy Lab,
+    Stanford" — into one consistent "<PI> Lab[ at <institution>]" form,
+    so the same lab doesn't fork into multiple Orgs-table rows just
+    because the LLM (or the source text) phrased it differently from one
+    item to the next. A no-op (returns `org` unchanged) for anything
+    that doesn't match this specific shape — never guesses at a name it
+    isn't confident is a PI-named lab."""
+    match = _LAB_NAME_RE.match(org.strip())
+    if not match:
+        return org
+    pi = match.group("pi").strip()
+    if pi.islower() or pi.isupper():
+        pi = pi.capitalize()  # leaves mixed-case names ("McCarthy") alone
+    inst = re.sub(r"\s+", " ", (match.group("inst") or "").strip()).rstrip(".")
+    canonical = f"{pi} Lab"
+    if inst:
+        canonical += f" at {inst}"
+    return canonical
+
+
 def _canonicalize_new_org(org: str, db: DB) -> str:
-    """If an org that's letters/digits-equivalent to `org` (ignoring
+    """Normalizes lab-name phrasing first (see _normalize_lab_name), then:
+    if an org that's letters/digits-equivalent to the result (ignoring
     case, spacing, punctuation) is already stored under different
-    casing/spacing, reuse that exact existing spelling instead of
+    casing/spacing, reuses that exact existing spelling instead of
     adding a near-duplicate ("Ability Neurotech" vs "Ability NeuroTech"
     from two separate LLM calls, which otherwise show up as two
     different Orgs-table rows). Whichever spelling was seen first wins
-    and stays canonical going forward."""
+    and stays canonical going forward; a genuinely new lab is stored
+    already in its normalized form rather than however this one mention
+    happened to phrase it."""
+    org = _normalize_lab_name(org)
     target = _squash(org)
     if not target:
         return org
@@ -331,16 +605,34 @@ def _canonicalize_new_org(org: str, db: DB) -> str:
     return org
 
 
+def _self_referential_org_ids(db: DB) -> list[str]:
+    """Retroactive counterpart to the self-referential-hostname check in
+    _enrich_one (see its comment): item ids whose stored `org` squashes to
+    the same base name as their OWN url's hostname — org="36Kr" on an
+    item from 36kr.com, say. Unlike the industry-name/domain-shape checks
+    in _looks_like_a_named_org, this can't be swept by org name alone
+    (the same org string could be legitimate on a different item), so it
+    has to look at each item's own url."""
+    ids = []
+    for row in db.items_with_org():
+        host_base = _hostname(row["url"] or "").split(".")[0]
+        if host_base and _squash(row["org"]) == _squash(host_base):
+            ids.append(row["id"])
+    return ids
+
+
 def _canonicalize_existing_orgs(db: DB) -> int:
-    """Retroactive sweep: clusters every currently-stored org by the
-    same squash-equivalence as _canonicalize_new_org() and renames every
-    variant in a cluster to whichever spelling has the most items
-    (a tiebreak that's stable and doesn't need any judgment call).
-    Returns how many rows were renamed."""
+    """Retroactive sweep: clusters every currently-stored org by the same
+    normalize-then-squash equivalence as _canonicalize_new_org() — so
+    "the Shenoy Lab at Stanford" and "Shenoy's lab at Stanford" land in
+    the same cluster even though they're not letters/digits-equivalent —
+    and renames every variant in a cluster to the normalized form of
+    whichever spelling has the most items (a tiebreak that's stable and
+    doesn't need any judgment call). Returns how many rows were renamed."""
     counts = db.org_item_counts()
     clusters: dict[str, list[str]] = {}
     for org in counts:
-        clusters.setdefault(_squash(org), []).append(org)
+        clusters.setdefault(_squash(_normalize_lab_name(org)), []).append(org)
 
     renamed = 0
     for variants in clusters.values():
@@ -349,23 +641,87 @@ def _canonicalize_existing_orgs(db: DB) -> int:
         # Prefer the most-used spelling, but always collapse its own
         # whitespace to single spaces — a tie between "Ability Neurotech"
         # and "Ability  NeuroTech" (double space) shouldn't crown the
-        # double-space one just because it happened to sort higher.
-        canonical = re.sub(r"\s+", " ", max(variants, key=lambda o: counts[o])).strip()
+        # double-space one just because it happened to sort higher — then
+        # normalize it, so the cluster settles on a clean "<PI> Lab at
+        # <institution>" form regardless of which raw phrasing had the
+        # most items.
+        winner = re.sub(r"\s+", " ", max(variants, key=lambda o: counts[o])).strip()
+        canonical = _normalize_lab_name(winner)
         for variant in variants:
             if variant != canonical:
                 renamed += db.rename_org(variant, canonical)
     return renamed
 
 
+_ARXIV_ID_RE = re.compile(r"arxiv\.org/abs/([\w.\-/]+?)(?:v\d+)?/?$", re.IGNORECASE)
+
+
+def _arxiv_id_from_url(url: str) -> str | None:
+    match = _ARXIV_ID_RE.search(url or "")
+    return match.group(1) if match else None
+
+
+def _known_benchmarks_block(config: Config, db: DB) -> str:
+    """Formats db.best_known_metric_values() into prompt text — "" if
+    besseleth has never recorded a single numeric metric yet (a fresh
+    setup, or before any device has been extracted), so this is always
+    safe to splice in unconditionally, same as _author_affiliations_block."""
+    numeric_keys = [m["key"] for m in config.trend_metrics if m.get("type", "numeric") == "numeric"]
+    best = db.best_known_metric_values(numeric_keys)
+    if not best:
+        return ""
+    unit_by_key = {m["key"]: m.get("unit", "") for m in config.trend_metrics}
+    lines = [
+        f"- {key} ({unit_by_key.get(key, '')}): {v['value']:,} — {v['device']} ({v['org']})"
+        for key, v in best.items()
+    ]
+    return "\n".join(lines)
+
+
+def _author_affiliations_block(row) -> str:
+    """Real author-institution data for an arXiv item (see
+    web_lookup.lookup_arxiv_authorships's docstring for why this is a
+    lookup, not something left to the LLM to recall) — "" for a non-
+    arXiv item, a paper OpenAlex doesn't have, or on any lookup failure,
+    so this is always safe to splice into the prompt unconditionally.
+    Gated on the URL being an arxiv.org one (not row["source"], which is
+    "papers" for both arXiv and OpenAlex-sourced items now — see
+    pipeline.py) since that's what actually determines whether an arXiv
+    id can even be extracted; a non-arXiv "papers" item's url just won't
+    match and this returns "" the same way."""
+    arxiv_id = _arxiv_id_from_url(row["url"] or "")
+    if not arxiv_id:
+        return ""
+    authorships = web_lookup.lookup_arxiv_authorships(arxiv_id)
+    if not authorships:
+        return ""
+    lines = [
+        f"- {name}: {', '.join(institutions)}" if institutions else f"- {name}: (institution not on record)"
+        for name, institutions in authorships
+    ]
+    return "\n".join(lines)
+
+
 def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
     """Returns True if enrichment was saved (success or graceful
     'unknown' fallback), False if it should be retried next time."""
+    # Cross-source: searches every enrichment-eligible source, not just
+    # this item's own — a news article reporting a result is exactly as
+    # "surprising compared to what?" against a paper that already covered
+    # it, and that's usually the more informative comparison (same-source-
+    # only context couldn't catch a journalist reporting year-old work).
+    context_sources = config.raw.get("enrichment", {}).get("sources", DEFAULT_SOURCES)
     context_rows = db.recent_items_for_context(
-        row["source"], (row["matched_keywords"] or "").split(","), exclude_id=row["id"]
+        context_sources, (row["matched_keywords"] or "").split(","), exclude_id=row["id"]
     )
-    context = "\n".join(f"- {r['title']}: {(r['summary'] or '')[:200]}" for r in context_rows) or "(no similar recent items yet)"
+    context = (
+        "\n".join(f"- [{r['source']}] {r['title']}: {(r['summary'] or '')[:200]}" for r in context_rows)
+        or "(no similar recent items yet)"
+    )
+    author_affiliations = _author_affiliations_block(row)
+    known_benchmarks = _known_benchmarks_block(config, db)
 
-    prompt = _build_prompt(row, config, context)
+    prompt = _build_prompt(row, config, context, author_affiliations, known_benchmarks)
     result = summarizer_mod._ollama_generate(
         prompt,
         summarizer_cfg.get("ollama_url", "http://localhost:11434"),
@@ -385,9 +741,23 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
     except (TypeError, ValueError):
         novelty = None
 
-    org = data.get("org") or None
+    modality = _clean_modality_tags(data.get("modality"), config)
+
+    org = _clean_org_value(data.get("org"))
     if org and not _looks_like_a_named_org(org, config):
         org = None
+    if org and _squash(org) == _squash(_hostname(row["url"] or "").split(".")[0]):
+        # The org the LLM named squashes to the same base name as the
+        # item's OWN url's hostname — e.g. org="36Kr" on an item from
+        # 36kr.com. This is the same "who reported it, not who it's
+        # about" mistake _known_publisher_names guards against, but
+        # catches it for a publisher reached via an aggregator/search
+        # feed (Google News search, NewsAPI) that was never itself
+        # configured anywhere, so that list has no way to know about it.
+        org = None
+    known_lab = _match_known_lab(f"{row['title']} {row['summary'] or ''}", config)
+    if known_lab:
+        org = known_lab  # real ground truth (labs.yaml) wins over the LLM's own extraction
     if org:
         org = _canonicalize_new_org(org, db)
     org_description = (data.get("org_description") or "").strip() or None
@@ -410,7 +780,7 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
         row["id"],
         org=org,
         org_type=data.get("org_type") or "unknown",
-        modality=data.get("modality") or "unknown",
+        modality=modality,
         therapeutic_target=data.get("therapeutic_target") or "unknown",
         novelty_score=novelty,
         novelty_rationale=data.get("novelty_rationale") or None,
@@ -507,7 +877,7 @@ def _search_org_location(org: str, summarizer_cfg: dict) -> tuple[str, float, fl
     return (location_text, *coords)
 
 
-def _backfill_org_locations(config: Config, db: DB) -> int:
+def _backfill_org_locations(config: Config, db: DB, max_lookups_override: int | None = None) -> int:
     """Fills in a missing location for orgs that have none, independent
     of the LLM pass above (that one only ever knows what a given item's
     own text says, so an org whose location was never mentioned in any
@@ -520,7 +890,7 @@ def _backfill_org_locations(config: Config, db: DB) -> int:
     newer item for the same org shows up without its own location.
     Returns how many orgs got newly filled in."""
     cfg = config.raw.get("enrichment", {}) or {}
-    max_lookups = cfg.get("max_org_lookups_per_run", 8)
+    max_lookups = max_lookups_override if max_lookups_override is not None else cfg.get("max_org_lookups_per_run", 8)
     recheck_days = cfg.get("location_recheck_days", 30)
     if max_lookups <= 0:
         return 0
@@ -549,13 +919,18 @@ def _backfill_org_locations(config: Config, db: DB) -> int:
             db.set_org_location(org, label, lat, lon)
             db.set_org_location_cache(org, found=True, location_text=label, lat=lat, lon=lon)
             filled += 1
-        else:
+        elif config.summarizer.get("backend") == "ollama":
+            # Only cache a miss once tier 3 (the LLM-read web search) got
+            # a genuine shot — with backend != "ollama", _search_org_location
+            # returns None immediately without trying, so caching that as
+            # "not found" would wrongly lock the org out of a real check
+            # for location_recheck_days once Ollama is actually available.
             db.set_org_location_cache(org, found=False)
 
     return filled
 
 
-def _backfill_contact_locations(config: Config, db: DB) -> int:
+def _backfill_contact_locations(config: Config, db: DB, max_lookups_override: int | None = None) -> int:
     """Same free Wikidata/Wikipedia (then web-search+LLM) lookup as
     _backfill_org_locations, but for your contacts' current employers —
     powers the Map tab's "friends" layer, which needs a location for a
@@ -565,7 +940,7 @@ def _backfill_contact_locations(config: Config, db: DB) -> int:
     backfill — a company that's both a contact's employer and a source
     org only ever gets looked up once. Returns how many got newly filled."""
     cfg = config.raw.get("enrichment", {}) or {}
-    max_lookups = cfg.get("max_org_lookups_per_run", 8)
+    max_lookups = max_lookups_override if max_lookups_override is not None else cfg.get("max_org_lookups_per_run", 8)
     if max_lookups <= 0:
         return 0
 
@@ -593,8 +968,8 @@ def _backfill_contact_locations(config: Config, db: DB) -> int:
             label, lat, lon = result
             db.set_org_location_cache(org, found=True, location_text=label, lat=lat, lon=lon)
             filled += 1
-        else:
-            db.set_org_location_cache(org, found=False)
+        elif config.summarizer.get("backend") == "ollama":
+            db.set_org_location_cache(org, found=False)  # see _backfill_org_locations's comment on this condition
 
     return filled
 
@@ -697,26 +1072,134 @@ def _sync_duplicate_novelty(config: Config, db: DB) -> int:
     return synced
 
 
-def enrich_items_detailed(config: Config, db: DB, force: bool = False) -> dict:
-    """Enriches up to `enrichment.max_items_per_run` items. Returns
-    {"processed": int, "message": str, "backend": str} — the message
-    always explains a 0, so 'nothing happened' is never silent:
+def _sync_duplicate_orgs(config: Config, db: DB) -> tuple[int, int]:
+    """Same idea as _sync_duplicate_novelty, for `org`/`org_type`/
+    `org_description`: multiple rows for the same underlying paper/story
+    (arXiv + OpenAlex versions of one paper, or the same news article via
+    two feeds) are expected and kept — but each row's org gets extracted
+    independently, by a separate LLM call that can just have a worse day
+    on one of them (e.g. "Poon Lab" on one row, a hallucinated "Pooiman
+    Lab" on the other, for literally the same paper). Within a confirmed
+    near-duplicate group, a disagreement is unambiguous evidence at least
+    one row is wrong — unlike _apply_location_consensus's org-wide
+    location voting (where "no clear majority" means leave it alone, one
+    real org can legitimately show up at more than one true location),
+    here the group IS the same one real-world item, so there's exactly
+    one correct answer. Applies the majority org when there's a clear one
+    (3+ member groups); with a tie (most commonly a 2-row group split
+    1-vs-1, arXiv/OpenAlex's most common shape) there's no way to tell
+    which side is right, so both get nulled rather than guessing — same
+    "null over a wrong guess" standard used everywhere else in this file.
+    Returns (rows synced to the majority, rows nulled on a tie)."""
+    from .dedupe import group_near_duplicates
+
+    cfg = config.raw.get("enrichment", {}) or {}
+    sources = cfg.get("sources", DEFAULT_SOURCES)
+    items = db.recent_items_for_dedupe(sources)
+    if len(items) < 2:
+        return 0, 0
+
+    synced = 0
+    nulled = 0
+    for group in group_near_duplicates(items):
+        if len(group) < 2:
+            continue
+        orgs_present = [i.org for i in group if i.org]
+        if not orgs_present:
+            continue  # nobody in this group has an org yet — nothing to reconcile
+        distinct = set(orgs_present)
+        if len(distinct) == 1:
+            continue  # already unanimous (nulls don't count as disagreement)
+
+        counts = {org: orgs_present.count(org) for org in distinct}
+        ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+        has_majority = len(ranked) == 1 or ranked[0][1] > ranked[1][1]
+
+        if has_majority:
+            canonical = next(i for i in group if i.org == ranked[0][0])
+            for item in group:
+                if (item.org, item.org_type, item.org_description) == (canonical.org, canonical.org_type, canonical.org_description):
+                    continue
+                db.sync_org(item.id, canonical.org, canonical.org_type, canonical.org_description)
+                synced += 1
+        else:
+            for item in group:
+                if item.org is None:
+                    continue
+                db.sync_org(item.id, None, None, None)
+                nulled += 1
+
+    return synced, nulled
+
+
+def enrich_items_detailed(
+    config: Config, db: DB, force: bool = False, run_until_done: bool = False, background: bool = False,
+    progress_cb=None,
+) -> dict:
+    """Returns {"processed": int, "message": str, "backend": str} — the
+    message always explains a 0, so 'nothing happened' is never silent:
     enrichment disabled in config, nothing left to enrich (already
     caught up), no LLM configured (marked unknown instead), or Ollama
     unreachable (left pending — will retry once it's back).
 
-    force=True re-checks items that already have enrichment too (oldest-
-    checked first), instead of only ones that have never been enriched —
-    for catching up already-stored data after enrich.py's extraction
-    logic improves, without re-running the LLM on everything at once:
-    still capped by max_items_per_run, so a big backlog cycles through
-    over repeated runs rather than one long burst."""
+    Modes:
+      - default, interactive (force=False, run_until_done=False,
+        background=False — the dashboard's "Enrich now" and a plain
+        `cli enrich`): everything unenriched from the last
+        `enrichment.default_days_back` days (default 14), no count cap
+        — this is what a normal fetch/paste cycle leaves behind, so
+        there's no need to cap it; an older backlog beyond that window
+        is left alone rather than crowding out what you actually just
+        added.
+      - background=True (the automatic post-fetch enrichment step —
+        `enrich_items()`, run unattended every fetch): the original
+        behavior, capped at `enrichment.max_items_per_run` with no day
+        window — deliberately conservative since this runs on its own,
+        possibly on a schedule, with nobody watching CPU load.
+      - run_until_done=True: ignores the day window and the per-run cap
+        — keeps pulling and enriching batch after batch (still
+        `enrichment.max_items_per_run` at a time) until the never-
+        enriched queue is genuinely empty, however old. For "kick this
+        off and walk away, come back to the whole backlog filled in"
+        rather than clicking Enrich repeatedly.
+      - force=True: re-checks items that already have enrichment too
+        (oldest-checked first), instead of only ones that have never
+        been enriched — for catching up already-stored data after
+        enrich.py's extraction logic improves (a new validity rule, a
+        prompt change, ...). Ignores the day window (there's no "recent"
+        backlog here, only "all of it"); without run_until_done, cycles
+        one capped batch per call, since that queue never runs dry on
+        its own (the batch you just re-checked is simply the newest-
+        checked now, not gone). Combined with run_until_done, keeps
+        going until it's cycled through every item currently in
+        `enrichment.sources` once — bounded by a count taken at the
+        start, not "until empty" (which would never arrive) — so
+        "re-check everything" actually means everything, not one batch."""
     cfg = config.raw.get("enrichment", {}) or {}
     summarizer_cfg = config.summarizer
     backend = summarizer_cfg.get("backend", "none")
 
     if not cfg.get("enabled", True):
         return {"processed": 0, "message": "enrichment.enabled is false in config.yaml — nothing to do.", "backend": backend}
+
+    # force=True ("Re-check already-enriched items too") rebuilds the
+    # Trends tab from scratch first. Necessary, not just tidy: add_company
+    # and auto_upsert_device both deliberately never overwrite an existing
+    # row (so a hand-correction can't get silently clobbered by a later
+    # re-extraction) — which also means a bad value from before an
+    # extraction-quality fix sticks around forever even after re-
+    # enrichment, since the insert is just skipped, not updated. Wiping
+    # the auto-extracted rows first is what makes a re-check pass actually
+    # a do-over. Manually-added/edited rows (auto_extracted=0) are never
+    # touched. A plain (non-force) enrich run leaves Trends alone, same as
+    # always — this only fires on the explicit "re-check" ask.
+    if force:
+        devices_cleared, companies_cleared = db.clear_auto_extracted_trends()
+        if devices_cleared or companies_cleared:
+            print(
+                f"[enrich] Rebuilding Trends from scratch: cleared {devices_cleared} auto-extracted device(s) and "
+                f"{companies_cleared} auto-extracted compan(ies) — repopulated as their source items get re-enriched below."
+            )
 
     # Rows for the same story across multiple feeds are expected and
     # stay separate — this only makes sure they agree on novelty. See
@@ -725,15 +1208,45 @@ def enrich_items_detailed(config: Config, db: DB, force: bool = False) -> dict:
     if synced:
         print(f"[enrich] Synced novelty score across {synced} duplicate item(s) of the same story.")
 
+    # Same idea, for org/org_type/org_description — see
+    # _sync_duplicate_orgs()'s docstring for why a disagreement here (two
+    # rows for the same paper naming two different orgs) always means at
+    # least one is wrong, and why a tie gets nulled rather than guessed.
+    org_synced, org_nulled = _sync_duplicate_orgs(config, db)
+    if org_synced:
+        print(f"[enrich] Synced org to the majority across {org_synced} duplicate item(s) of the same story.")
+    if org_nulled:
+        print(f"[enrich] Cleared org on {org_nulled} duplicate item(s) whose org disagreed with no clear majority.")
+
     # Self-healing cleanup for items enriched before this guard existed
     # (or before it covered vague-group phrasing like "Chinese scientists")
     # — sweeps every org value currently stored against the same check a
     # fresh enrichment applies. Cheap (one query for the distinct list,
     # then an indexed exact-match update), safe to run every call.
-    invalid_orgs = [o for o in db.distinct_orgs() if not _looks_like_a_named_org(o, config)]
+    #
+    # Also retroactively applies _clean_org_value (existing rows saved
+    # before that existed can still have the raw hedging-prose org value
+    # verbatim): a value it can't recover a name from joins invalid_orgs
+    # below (nulled); one it rewrites to something shorter gets renamed
+    # to the cleaned form instead of nulled.
+    existing_orgs = db.distinct_orgs()
+    invalid_orgs = []
+    for o in existing_orgs:
+        cleaned = _clean_org_value(o)
+        if cleaned is None:
+            invalid_orgs.append(o)
+        elif cleaned != o:
+            db.rename_org(o, cleaned)
+        elif not _looks_like_a_named_org(o, config):
+            invalid_orgs.append(o)
     cleared = db.clear_org_matches(invalid_orgs)
     if cleared:
-        print(f"[enrich] Cleared {cleared} item(s) whose 'org' was actually the industry name/a keyword.")
+        print(f"[enrich] Cleared {cleared} item(s) whose 'org' was actually the industry name/a keyword (or unrecoverable hedging text).")
+
+    self_referential = _self_referential_org_ids(db)
+    cleared_self_ref = db.clear_org_matches_by_id(self_referential)
+    if cleared_self_ref:
+        print(f"[enrich] Cleared {cleared_self_ref} item(s) whose 'org' was actually who reported the story (its own url's publisher).")
 
     renamed = _canonicalize_existing_orgs(db)
     if renamed:
@@ -761,6 +1274,17 @@ def enrich_items_detailed(config: Config, db: DB, force: bool = False) -> dict:
     if dated_companies:
         print(f"[enrich] Backfilled a funding date for {dated_companies} compan(ies) that had funding data but no date.")
 
+    # One-time recovery for negative org_location_cache rows written while
+    # summarizer.backend wasn't "ollama" (tier 3 never actually ran then,
+    # so "not found" wasn't a real answer — see the comment where this is
+    # now guarded against in _backfill_org_locations). Gated on a meta
+    # flag so this only ever runs once, not every enrich call.
+    if config.summarizer.get("backend") == "ollama" and not db.get_meta("location_cache_backend_fix_applied"):
+        reset = db.clear_negative_location_cache()
+        db.set_meta("location_cache_backend_fix_applied", "1")
+        if reset:
+            print(f"[enrich] Reset {reset} cached 'not found' location(s) so they get a real check now that Ollama is available.")
+
     invalid_locations = [loc for loc in db.distinct_locations() if not _looks_like_a_real_location(loc)]
     locations_cleared = db.clear_location_matches(invalid_locations)
     if locations_cleared:
@@ -776,9 +1300,21 @@ def enrich_items_detailed(config: Config, db: DB, force: bool = False) -> dict:
 
     # Independent of the LLM pass below — a free web lookup (Wikidata)
     # for orgs whose location was never mentioned in any item's own
-    # text, so those don't just stay unlocated forever.
-    locations_filled = _backfill_org_locations(config, db)
-    contact_locations_filled = _backfill_contact_locations(config, db)
+    # text, so those don't just stay unlocated forever. The per-run
+    # budget (enrichment.max_org_lookups_per_run, default 8) is sized for
+    # a normal interactive click, nowhere near enough to work through
+    # hundreds of orgs in one go — raised for run_until_done (since
+    # "enrich everything" implies "look up everything you can too," not
+    # just the item-extraction pass), but configurable and modest by
+    # default: each lookup is a web request (+ an LLM call for tier 3),
+    # and on a machine already tight on RAM (Ollama holding a model
+    # resident, a browser open) hundreds of them back-to-back is real
+    # sustained load, not free just because no single one is large.
+    # Lower enrichment.run_until_done_location_lookup_cap if this run is
+    # too heavy for your machine.
+    location_lookup_cap = cfg.get("run_until_done_location_lookup_cap", 50) if run_until_done else None
+    locations_filled = _backfill_org_locations(config, db, max_lookups_override=location_lookup_cap)
+    contact_locations_filled = _backfill_contact_locations(config, db, max_lookups_override=location_lookup_cap)
     location_note = (
         f" Filled in a location for {locations_filled} org(s) via web lookup." if locations_filled else ""
     )
@@ -787,9 +1323,25 @@ def enrich_items_detailed(config: Config, db: DB, force: bool = False) -> dict:
 
     sources = cfg.get("sources", DEFAULT_SOURCES)
     max_items = cfg.get("max_items_per_run", 20)
+    default_days_back = cfg.get("default_days_back", 14)
+    keep_going = run_until_done
+    # Only meaningful for force+run_until_done — a one-time snapshot of
+    # how many items exist right now, so that combo means "one full pass
+    # over everything currently stored," not "forever" (the re-check
+    # queue has no natural empty state to stop at on its own).
+    force_pool_size = db.count_items(sources) if (force and run_until_done) else None
 
-    rows = db.items_to_reenrich(sources, max_items) if force else db.unenriched_items(sources, max_items)
-    if not rows:
+    if force:
+        first_rows = db.items_to_reenrich(sources, max_items)
+    elif run_until_done or background:
+        first_rows = db.unenriched_items(sources, max_items)  # batched below — the whole backlog, any age
+    else:
+        # The common interactive case: whatever's unenriched from normal
+        # recent use (a fetch or two, a few pastes), not a years-old
+        # backlog — so no count cap, just a time window
+        # (enrichment.default_days_back).
+        first_rows = db.unenriched_items(sources, None, days_back=default_days_back)
+    if not first_rows:
         message = (
             f"Nothing to re-enrich — enrichment.sources is empty.{location_note}" if force else
             f"Nothing to enrich — every item in enrichment.sources is already tagged (or unknown).{location_note}"
@@ -801,6 +1353,7 @@ def enrich_items_detailed(config: Config, db: DB, force: bool = False) -> dict:
         }
 
     if backend != "ollama":
+        rows = first_rows
         for row in rows:
             db.save_enrichment(
                 row["id"], org=None, org_type="unknown", modality="unknown",
@@ -822,39 +1375,86 @@ def enrich_items_detailed(config: Config, db: DB, force: bool = False) -> dict:
 
     pause_seconds = cfg.get("pause_seconds", 0)
 
-    processed = 0
+    total_processed = 0
+    total_attempted = 0
     work_seconds = 0.0  # excludes the deliberate pause_seconds sleeps — this is actual enrich time, not throttling
-    for i, row in enumerate(rows):
-        item_start = time.time()
-        try:
-            if _enrich_one(row, db, config, summarizer_cfg):
-                processed += 1
-        except Exception as e:
-            print(f"[enrich] Failed on item {row['id']}: {e}")
-        work_seconds += time.time() - item_start
-        # Gives the CPU a breather between LLM calls instead of hammering
-        # it back-to-back for the whole batch — set enrichment.pause_seconds
-        # in config.yaml if enrich runs are making the machine unusable.
-        # Skipped after the last item so it doesn't delay returning.
-        if pause_seconds and i < len(rows) - 1:
-            time.sleep(pause_seconds)
+    rows = first_rows
+    # A very basic total estimate — exact for force+run_until_done (a
+    # snapshot count taken above) and for the plain interactive/background
+    # cases (the whole queue is already in `first_rows`); for plain
+    # run_until_done (no force) it's just this first batch, since the real
+    # backlog size isn't known until it runs dry — so the bar undershoots a
+    # bit there rather than promising a total it can't back up.
+    progress_total = force_pool_size if force_pool_size is not None else len(first_rows)
+    while rows:
+        total_attempted += len(rows)
+        batch_processed = 0
+        for i, row in enumerate(rows):
+            if progress_cb:
+                progress_cb(f"Enriching item {total_attempted - len(rows) + i + 1}", total_attempted - len(rows) + i + 1, progress_total)
+            item_start = time.time()
+            try:
+                if _enrich_one(row, db, config, summarizer_cfg):
+                    total_processed += 1
+                    batch_processed += 1
+            except Exception as e:
+                print(f"[enrich] Failed on item {row['id']}: {e}")
+            work_seconds += time.time() - item_start
+            # Gives the CPU a breather between LLM calls instead of hammering
+            # it back-to-back for the whole batch — set enrichment.pause_seconds
+            # in config.yaml if enrich runs are making the machine unusable.
+            # Skipped after the last item so it doesn't delay returning.
+            if pause_seconds and i < len(rows) - 1:
+                time.sleep(pause_seconds)
 
-    if processed:
-        db.record_enrich_run(processed, work_seconds)
+        if not keep_going:
+            break
+        if not batch_processed:
+            # Nothing in this batch actually got enriched (Ollama up, but
+            # every item errored/timed out) — the next batch would just
+            # hand back this same stuck item(s), so stop instead of
+            # spinning. Whatever succeeded elsewhere is still kept.
+            print(f"[enrich] Stopping: {len(rows)} item(s) in the last batch made no progress (see errors above).")
+            break
+        if force_pool_size is not None and total_attempted >= force_pool_size:
+            print(f"[enrich] Stopping: completed one full pass over all {force_pool_size} item(s) in scope.")
+            break
+        rows = db.items_to_reenrich(sources, max_items) if force else db.unenriched_items(sources, max_items)
+        if rows and force_pool_size is None:
+            # Growing backlog (plain run_until_done) — extend the estimate
+            # rather than let progress "overshoot" past a too-small total.
+            progress_total = total_attempted + len(rows)
+        if rows:
+            print(f"[enrich] Batch done ({total_processed} so far) — {len(rows)}+ item(s) left, continuing...")
+            ok, status_msg = ollama_status(summarizer_cfg)
+            if not ok:
+                print(f"[enrich] Stopping: {status_msg}")
+                break
+
+    if total_processed:
+        db.record_enrich_run(total_processed, work_seconds)
     stats = db.get_enrich_stats()
 
-    if processed < len(rows):
-        message = f"Enriched {processed}/{len(rows)} — the rest failed mid-call and will retry next run (see server log)."
+    if total_processed < total_attempted:
+        message = f"Enriched {total_processed}/{total_attempted} — the rest failed mid-call and will retry next run (see server log)."
     else:
-        message = f"Enriched {processed} item(s)."
-    if processed:
-        message += f" ({work_seconds:.1f}s, {work_seconds / processed:.1f}s/item)"
+        message = f"Enriched {total_processed} item(s)."
+    if total_processed:
+        message += f" ({work_seconds:.1f}s, {work_seconds / total_processed:.1f}s/item)"
     message += location_note
     print(f"[enrich] {message}")
-    return {"processed": processed, "message": message, "backend": backend, "elapsed_seconds": work_seconds, "stats": stats}
+    return {
+        "processed": total_processed,
+        "message": message,
+        "backend": backend,
+        "elapsed_seconds": work_seconds,
+        "stats": stats,
+    }
 
 
 def enrich_items(config: Config, db: DB) -> int:
-    """Same as enrich_items_detailed(), returning just the count — kept
-    for existing callers (the post-fetch pipeline step)."""
-    return enrich_items_detailed(config, db)["processed"]
+    """Same as enrich_items_detailed(background=True), returning just the
+    count — kept for existing callers (the post-fetch pipeline step, run
+    unattended after every fetch, so stays capped rather than picking up
+    the interactive default's uncapped day window)."""
+    return enrich_items_detailed(config, db, background=True)["processed"]

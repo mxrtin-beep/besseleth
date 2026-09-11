@@ -23,6 +23,7 @@ import argparse
 import os
 import re
 import secrets
+import threading
 from datetime import date
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from ..contacts_store import Contact, add_contact, import_linkedin_csv, load_con
 from ..db import DB
 from ..feeds_store import add_feed, load_feeds, remove_feed
 from ..interests_store import load_interests, save_interests
+from ..pipeline import SOURCES as ALL_ITEM_SOURCES
 from ..pipeline import fetch_all
 from ..scheduler import SchedulerStatus, run_now, start_scheduler
 from ..scrapers.manual_drop import add_smart_item
@@ -124,6 +126,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             stage_rank, stage_label = stage_for(d.fda_status)
             result.append(
                 {
+                    "id": d.id,
                     "name": d.name,
                     "org": d.org,
                     "org_type": d.org_type,
@@ -139,6 +142,17 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             )
         return jsonify(result)
 
+    @app.delete("/api/devices/<int:device_id>")
+    def api_delete_device(device_id):
+        db = DB(config.db_path)
+        try:
+            deleted = db.delete_device(device_id)
+        finally:
+            db.close()
+        if not deleted:
+            abort(404)
+        return jsonify({"ok": True, "deleted": device_id})
+
     @app.get("/api/trends/fda-stages")
     def api_fda_stages():
         # The canonical stage ladder itself (rank + label), for the
@@ -149,6 +163,14 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
     @app.get("/api/companies")
     def api_companies():
         companies = load_companies(config.companies_path, config.legacy_companies_yaml_path)
+        db = DB(config.db_path)
+        try:
+            active_job_counts = db.active_job_counts_by_org()
+            added_job_counts = db.job_postings_added_by_org()
+            publication_counts = db.publication_counts_by_org()
+            external_metrics = db.external_metrics_by_org()
+        finally:
+            db.close()
         return jsonify(
             [
                 {
@@ -165,6 +187,17 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
                     "source_url": c.source_url,
                     "notes": c.notes,
                     "auto_extracted": c.auto_extracted,
+                    # A free, always-fresh proxy for hiring momentum —
+                    # unlike stock_price/ipo_date (almost never populated;
+                    # most tracked companies are private), this is
+                    # available for any company with a known job board —
+                    # see db.active_job_counts_by_org's docstring.
+                    "active_job_postings": active_job_counts.get(c.name, 0),
+                    "job_postings_added_30d": added_job_counts.get(c.name, 0),
+                    "publication_count": publication_counts.get(c.name, 0),
+                    **{
+                        k: v for k, v in external_metrics.get(c.name, {}).items()
+                    },
                 }
                 for c in companies
             ]
@@ -186,6 +219,31 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             return jsonify({"ok": False, "message": "Both 'keep' and 'drop' are required."}), 400
         merge_company_pair(config.companies_path, keep_name=keep, drop_name=drop)
         return jsonify({"ok": True})
+
+    @app.post("/api/jobs/reject-org")
+    def api_jobs_reject_org():
+        # For an org that got extracted wrong (a mentioned-in-passing
+        # investor/analyst/cited institution, not who the item was
+        # actually about) and slipped past enrich.py's automatic hygiene
+        # checks — those catch known media outlets, self-referential
+        # publishers, vague group descriptions, etc., but can't know
+        # "AQR Capital Management is a hedge fund, not a neurotech org"
+        # without a maintained allowlist, which is deliberately not how
+        # this works (see labs.yaml's own docstring). This is the manual
+        # backstop: nulls "org" on every item currently attributed to it
+        # (so it stops showing up anywhere — Orgs/Map/Trends too, not
+        # just Jobs) and removes its job postings/board cache outright.
+        payload = request.get_json(silent=True) or {}
+        org = (payload.get("org") or "").strip()
+        if not org:
+            return jsonify({"ok": False, "message": "Missing 'org'."}), 400
+        db = DB(config.db_path)
+        try:
+            cleared = db.clear_org_matches([org])
+            removed = db.delete_jobs_for_org(org)
+        finally:
+            db.close()
+        return jsonify({"ok": True, "cleared_items": cleared, "removed_postings": removed})
 
     @app.get("/api/jobs")
     def api_jobs():
@@ -216,13 +274,20 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         # Renamed "Sources" in the UI — this used to default to just
         # arxiv/news/blog, which silently hid manually-pasted LinkedIn/
         # social/event clips from the table entirely. Now it shows every
-        # source by default; the source filter dropdown narrows it down
-        # to just arXiv (or whatever) if that's all you want.
+        # source, unconditionally — this is a browsable index of
+        # everything stored, not scoped to what enrichment happens to be
+        # configured to touch. (A previous version of this endpoint read
+        # enrichment.sources as the display list here, which is a
+        # different concern that just happens to share a config key —
+        # with enrichment.sources customized down to its own default of
+        # ["papers", "news", "blog"], that silently hid linkedin/social/
+        # event/clip/conference from this table even when they had real
+        # data, which looked exactly like "nothing ever gets fetched for
+        # those sources" from the dashboard alone.) The source filter
+        # dropdown narrows it down to just one if that's all you want.
         db = DB(config.db_path)
         try:
-            rows = db.papers(
-                config.raw.get("enrichment", {}).get("sources", ["arxiv", "news", "blog", "linkedin", "social", "event", "clip"])
-            )
+            rows = db.papers(ALL_ITEM_SOURCES)
         finally:
             db.close()
         return jsonify(
@@ -240,6 +305,8 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
                     "therapeutic_target": r["therapeutic_target"],
                     "novelty_score": r["novelty_score"],
                     "novelty_rationale": r["novelty_rationale"],
+                    "authors": r["authors"],
+                    "citation_count": r["citation_count"],
                     "enriched": r["enriched_at"] is not None,
                 }
                 for r in rows
@@ -369,45 +436,167 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
 
     @app.get("/api/status")
     def api_status():
-        return jsonify(app.config["BESSELETH_STATUS"].as_dict())
+        # last_fetch_at/last_report_at are in-memory on SchedulerStatus,
+        # so they reset to "never" on every restart and never reflect
+        # activity from a CLI-only workflow (cli fetch/report never touch
+        # this in-process object). Fall back to the persisted DB meta —
+        # written by pipeline.py's fetch_all()/generate_weekly_report()
+        # regardless of caller — whenever the in-memory value is unset,
+        # so the status bar reflects real history, not just this
+        # process's own uptime.
+        data = app.config["BESSELETH_STATUS"].as_dict()
+        if not data.get("last_fetch_at") or not data.get("last_report_at"):
+            db = DB(config.db_path)
+            try:
+                data.setdefault("last_fetch_at", None)
+                data.setdefault("last_report_at", None)
+                if not data["last_fetch_at"]:
+                    data["last_fetch_at"] = db.get_meta("last_fetch_at")
+                if not data["last_report_at"]:
+                    data["last_report_at"] = db.get_meta("last_report_at")
+            finally:
+                db.close()
+        return jsonify(data)
 
     @app.post("/api/run-now")
     def api_run_now():
         status = app.config["BESSELETH_STATUS"]
         if status.running_now:
             return jsonify({"ok": False, "message": "Already running."}), 409
-        # Runs synchronously in the request thread — fetching+summarizing
-        # can take a while (LLM calls, network), so this blocks until
-        # done rather than pretending it's instant. The dashboard shows
-        # a spinner for this; poll /api/status if you'd rather not wait.
-        run_now(config, status)
-        return jsonify(status.as_dict())
+        # Runs in a background thread — fetching+summarizing can take a
+        # while (LLM calls, network) — so this returns immediately and the
+        # dashboard polls /api/status for progress_label/current/total and
+        # running_now instead of blocking on the request.
+        with status._lock:
+            status.running_now = True
+        status.set_progress("Starting run...")
+
+        def _work():
+            try:
+                run_now(config, status)
+            finally:
+                status.set_progress(None)
+                with status._lock:
+                    status.running_now = False
+
+        threading.Thread(target=_work, daemon=True).start()
+        return jsonify({"ok": True, "message": "Started."})
 
     @app.post("/api/enrich")
     def api_enrich():
         from ..enrich import enrich_items_detailed
 
-        force = bool((request.get_json(silent=True) or {}).get("force"))
-        db = DB(config.db_path)
-        try:
-            result = enrich_items_detailed(config, db, force=force)
-        finally:
-            db.close()
-        return jsonify({
-            "ok": True, "enriched": result["processed"], "message": result["message"], "backend": result["backend"],
-            "stats": result.get("stats"),
-        })
+        status = app.config["BESSELETH_STATUS"]
+        if status.running_now:
+            return jsonify({"ok": False, "message": "Already running."}), 409
+        payload = request.get_json(silent=True) or {}
+        force = bool(payload.get("force"))
+        run_until_done = bool(payload.get("run_until_done"))
+        # Runs in a background thread, same as /api/run-now — with
+        # run_until_done this can take a long while (the whole backlog,
+        # not one capped batch), so the dashboard polls /api/status rather
+        # than the request blocking until it's actually done.
+        with status._lock:
+            status.running_now = True
+        status.set_progress("Starting enrichment...")
+
+        def _work():
+            try:
+                db = DB(config.db_path)
+                try:
+                    result = enrich_items_detailed(
+                        config, db, force=force, run_until_done=run_until_done,
+                        progress_cb=status.set_progress,
+                    )
+                finally:
+                    db.close()
+                with status._lock:
+                    status.last_error = None
+                status.last_enrich_result = {
+                    "ok": True, "enriched": result["processed"], "message": result["message"],
+                    "backend": result["backend"], "stats": result.get("stats"),
+                }
+            except Exception as e:
+                with status._lock:
+                    status.last_error = f"enrich: {e}"
+            finally:
+                status.set_progress(None)
+                with status._lock:
+                    status.running_now = False
+
+        threading.Thread(target=_work, daemon=True).start()
+        return jsonify({"ok": True, "message": "Started."})
 
     @app.get("/api/enrich/stats")
     def api_enrich_stats():
-        # Read-only — for the dashboard to show "enriched N items so far,
-        # avg Xs/item" on page load, without triggering a run.
+        # Read-only — for the dashboard to show enrichment progress on
+        # page load, without triggering a run.
+        from ..enrich import DEFAULT_SOURCES
+
+        sources = config.raw.get("enrichment", {}).get("sources", DEFAULT_SOURCES)
         db = DB(config.db_path)
         try:
             stats = db.get_enrich_stats()
+            enriched, total = db.enrichment_progress(sources)
         finally:
             db.close()
+        # current_enriched/current_total: a live snapshot of right now
+        # (goes down if you delete items, unlike total_items/total_seconds
+        # below, which are an all-time running total that never resets —
+        # kept for the avg-seconds-per-item math, but current_* is the
+        # number actually worth looking at day to day).
+        stats["current_enriched"] = enriched
+        stats["current_total"] = total
         return jsonify(stats)
+
+    @app.get("/api/enrich/log")
+    def api_enrich_log():
+        # Troubleshooting view: the most recently enriched items with
+        # exactly what got extracted, plus the live config/backend status
+        # — so "why is everything null/unknown" is answerable by looking
+        # at this tab instead of reading server logs or config.yaml by
+        # hand. Read-only, no run triggered.
+        from ..enrich import ollama_status
+
+        summarizer_cfg = config.summarizer
+        backend = summarizer_cfg.get("backend", "none")
+        if backend == "ollama":
+            ok, ollama_message = ollama_status(summarizer_cfg)
+        else:
+            ok, ollama_message = False, ""
+
+        db = DB(config.db_path)
+        try:
+            rows = db.recently_enriched(limit=50)
+            stats = db.get_enrich_stats()
+        finally:
+            db.close()
+
+        return jsonify({
+            "backend": backend,
+            "model": summarizer_cfg.get("model", "llama3.1"),
+            "ollama_url": summarizer_cfg.get("ollama_url", "http://localhost:11434"),
+            "ollama_ok": ok,
+            "ollama_message": ollama_message,
+            "stats": stats,
+            "items": [
+                {
+                    "id": r["id"],
+                    "title": r["title"],
+                    "source": r["source"],
+                    "url": r["url"],
+                    "enriched_at": r["enriched_at"],
+                    "org": r["org"],
+                    "org_type": r["org_type"],
+                    "modality": r["modality"],
+                    "therapeutic_target": r["therapeutic_target"],
+                    "novelty_score": r["novelty_score"],
+                    "novelty_rationale": r["novelty_rationale"],
+                    "location_text": r["location_text"],
+                }
+                for r in rows
+            ],
+        })
 
     @app.post("/api/backfill")
     def api_backfill():
@@ -423,17 +612,28 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
 
         with status._lock:
             status.running_now = True
-        try:
-            db = DB(config.db_path)
+        status.set_progress("Starting backfill...")
+
+        def _work():
             try:
-                results = fetch_all(config, db, since=since)
+                db = DB(config.db_path)
+                try:
+                    results = fetch_all(config, db, since=since, progress_cb=status.set_progress)
+                finally:
+                    db.close()
+                with status._lock:
+                    status.last_error = None
+                status.last_fetch_counts = {k: len(v) for k, v in results.items()}
+            except Exception as e:
+                with status._lock:
+                    status.last_error = f"backfill: {e}"
             finally:
-                db.close()
-            counts = {k: len(v) for k, v in results.items()}
-            return jsonify({"ok": True, "since": since_str, "counts": counts})
-        finally:
-            with status._lock:
-                status.running_now = False
+                status.set_progress(None)
+                with status._lock:
+                    status.running_now = False
+
+        threading.Thread(target=_work, daemon=True).start()
+        return jsonify({"ok": True, "since": since_str, "message": "Started."})
 
     @app.post("/api/paste")
     def api_paste():
@@ -618,9 +818,27 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         except UnicodeDecodeError:
             return jsonify({"ok": False, "message": "Couldn't read that file as text — is it the CSV LinkedIn emailed you?"}), 400
         # Your LinkedIn export is your whole network, not just neurotech —
-        # only import connections whose company/title look on-topic, using
-        # the same keyword list scrapers use to judge relevance.
-        added = import_linkedin_csv(config.contacts_path, text, keywords=config.keywords)
+        # only import connections whose company/title look on-topic. Uses
+        # both the industry keyword list (for a title like "EEG Research
+        # Scientist" at an otherwise generic-sounding employer) AND every
+        # org name besseleth has already seen in your actual feeds (so a
+        # company like "Neuralink" gets recognized even though its name
+        # doesn't literally contain a keyword phrase like "neurotechnology").
+        from ..trends.company_store import load_companies
+
+        # Deliberately NOT db.distinct_orgs() (every org enrich.py has
+        # ever extracted, including a big pharma/health system mentioned
+        # once, incidentally, in an article actually about someone else —
+        # that's how e.g. Amgen/Siemens/UCLA Health ended up treating
+        # every one of their employees as "relevant"). Only companies you
+        # (or a "device suggest") have actually vetted onto the Trends
+        # tab count as a real known org — auto_extracted ones are
+        # excluded too, since those are exactly as unverified as
+        # distinct_orgs() and carry their own "verify before trusting"
+        # notice for the same reason.
+        companies = load_companies(config.db_path, config.companies_path)
+        known_orgs = [c.name for c in companies if not c.auto_extracted]
+        added = import_linkedin_csv(config.contacts_path, text, keywords=config.keywords, known_orgs=known_orgs)
         if added == 0:
             return jsonify({
                 "ok": True, "added": 0,
@@ -641,6 +859,22 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         if not deleted:
             abort(404)
         return jsonify({"ok": True, "deleted": item_id})
+
+    @app.delete("/api/source/<source>")
+    def api_clear_source(source):
+        # Bulk "delete everything from this source, I'll re-pull what's
+        # still reachable" — for cleaning up after a stale keyword (or
+        # similar) polluted a whole source, when deleting rows one at a
+        # time via /api/item isn't practical. Irreversible; a re-fetch
+        # only brings back whatever's still inside the source's normal
+        # days_back window (or a fresh backfill), same caveat as any
+        # other delete here.
+        db = DB(config.db_path)
+        try:
+            removed = db.delete_items_by_source(source)
+        finally:
+            db.close()
+        return jsonify({"ok": True, "removed": removed})
 
     return app
 

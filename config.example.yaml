@@ -6,6 +6,8 @@ industry:
   # broad single words like "brain" will flood the report with noise.
   keywords:
     - "neurotechnology"
+    - "neurotech"
+    - "neuroengineer"
     - "brain-computer interface"
     - "neural implant"
     - "neuroprosthetics"
@@ -57,8 +59,44 @@ industry:
       label: "Total funding raised"
       unit: "USD"
       type: "numeric"
-    - key: "stock_price"
-      label: "Stock price"
+    # active_job_postings isn't extracted from articles like the other
+    # metrics here — it's computed live from the Jobs tab's data (every
+    # currently-active posting jobs_scraper has found via each org's
+    # Greenhouse/Lever/Ashby board). A free, always-fresh signal
+    # available for most companies you're tracking (unlike stock_price,
+    # essentially never populated since almost no neurotech company is
+    # public) — hiring pace as a growth/momentum signal.
+    - key: "active_job_postings"
+      label: "Active job postings"
+      unit: "postings"
+      type: "numeric"
+    # Velocity, not snapshot: new postings on this org's board in the
+    # last 30 days — distinguishes stagnant vs. actively-growing boards.
+    - key: "job_postings_added_30d"
+      label: "Job postings added (30d)"
+      unit: "postings"
+      type: "numeric"
+    # Free research-output signal from data already extracted during
+    # enrichment (every papers-source item's org) — no new scraping.
+    - key: "publication_count"
+      label: "Publications"
+      unit: "papers"
+      type: "numeric"
+    # ClinicalTrials.gov + NIH RePORTER — refreshed periodically under
+    # trends.clinical_trials/trends.nih_grants, not on every fetch.
+    # Coverage is partial (org-name text matching), so 0 can mean
+    # "genuinely none found" OR "no name match" — a real number is
+    # signal, a zero isn't a confirmed absence.
+    - key: "clinical_trial_enrollment_total"
+      label: "Clinical trial enrollment (total)"
+      unit: "patients"
+      type: "numeric"
+    - key: "clinical_trial_count"
+      label: "Clinical trials"
+      unit: "trials"
+      type: "numeric"
+    - key: "nih_grant_total_usd"
+      label: "NIH grant funding (total)"
       unit: "USD"
       type: "numeric"
 
@@ -67,6 +105,25 @@ sources:
     enabled: true
     max_results_per_keyword: 15
     days_back: 8
+
+  papers:
+    # Published journal/conference papers (i.e. NOT arXiv preprints),
+    # via OpenAlex (openalex.org — free, keyless, comprehensive scholarly
+    # index). Complements arxiv: most invasive-BCI and clinical work
+    # publishes in a journal and never touches arXiv at all. Comes with
+    # a citation count arXiv itself has no concept of — the report ranks
+    # this section by citations (highest first), not recency.
+    enabled: true
+    max_results_per_keyword: 15
+    days_back: 8
+    # Optional, but recommended especially for a deep backfill: your
+    # email, sent as OpenAlex's documented `mailto` param. Joins their
+    # "polite pool" — a meaningfully higher, more reliable rate limit
+    # than anonymous requests get. A backfill pages through a lot of
+    # requests (page 14+ for one keyword alone isn't unusual), so this
+    # is the difference between that finishing cleanly and hitting
+    # sustained 429s partway through. Never sent anywhere else.
+    # mailto: "you@example.com"
 
   news:
     enabled: true
@@ -217,8 +274,11 @@ enrichment:
   #     comes, which is expected, not stuck.
   enabled: true
   max_items_per_run: 10   # smaller bursts, catches up over more fetches instead of one big spike
+  default_days_back: 14   # "Enrich now"/`cli enrich` (no flags): enrich everything unenriched from this many
+                           # days back, uncapped — not max_items_per_run, which only bounds the automatic
+                           # per-fetch run and `enrich --all`/"Enrich everything" (the whole backlog, any age)
   pause_seconds: 2        # sleep between items during a run — turns a CPU spike into a trickle
-  sources: ["arxiv", "news", "blog"]
+  sources: ["papers", "news", "blog"]
 
   # A separate pass, independent of the LLM extraction above: for orgs
   # that have no location at all (never mentioned in any item's text),
@@ -234,6 +294,16 @@ enrichment:
   # miss isn't re-queried every time.
   max_org_lookups_per_run: 8
   location_recheck_days: 30
+  # Same budget, but for "Enrich everything"/`enrich --all` specifically
+  # (which otherwise implies looking up every org's location too, not
+  # just extracting item metadata) — much higher than the interactive
+  # default above since there's a real backlog to work through in one
+  # go, but each lookup is a web request (+ an LLM call for the last
+  # tier), and hundreds of them back-to-back is sustained load on a
+  # machine already tight on RAM (Ollama holding a model resident, a
+  # browser open) even though no single one is large. Lower this if a
+  # full enrich run is straining your machine.
+  run_until_done_location_lookup_cap: 50
 
 summarizer:
   # Uses a local LLM via Ollama (https://ollama.ai) — free, runs offline.
@@ -274,6 +344,13 @@ report:
   output_dir: "reports"
   format: "markdown"         # "markdown" or "html"
   max_items_per_section: 12
+  # The report's lead "Most surprising / important" section — every item
+  # that scored at least top_findings_min_novelty (1-5) on novelty_score,
+  # highest first, capped at top_findings_max_count. A quiet week (nothing
+  # meets the threshold) shows an honest "nothing stood out" note instead
+  # of forcing a middling item in just to fill the section.
+  top_findings_min_novelty: 3
+  top_findings_max_count: 5
   email:
     enabled: false
     smtp_host: "smtp.gmail.com"
@@ -293,7 +370,9 @@ schedule:
   # the dashboard's "Run now" button).
   enabled: true
   fetch_interval_hours: 6      # how often to pull fresh items into the DB
-  report_cron: "0 8 * * MON"   # 5-field cron (UTC) for rendering the weekly report
+  report_cron: "0 4 * * MON"   # 5-field cron for rendering the weekly report (4am, overnight)
+  # timezone: "America/Los_Angeles"  # IANA zone report_cron is interpreted in;
+                                      # defaults to this host's local timezone if unset
 
 trends:
   # Manually (via the dashboard's Trends tab) or LLM-drafted, then
@@ -304,6 +383,17 @@ trends:
   devices_path: "devices.yaml"
   companies_path: "companies.yaml"
   charts_dir: "reports/trends"
+  # External per-org metrics, refreshed after enrichment on each fetch
+  # (skipped per-org until recheck_days has passed since its last check).
+  # Both are free, keyless APIs — see the scraper modules' own
+  # docstrings for exactly what's queried and their honest caveats
+  # (org-name text matching, not a guaranteed-exact lookup).
+  clinical_trials:
+    enabled: true
+    recheck_days: 7
+  nih_grants:
+    enabled: true
+    recheck_days: 7
 
 reports:
   # How report files pile up in report.output_dir. `report_cron` (above,

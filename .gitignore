@@ -7,12 +7,14 @@ reports/
 *.db-wal
 *.db-shm
 linkedin_drops/
+config.yaml
 devices.yaml
 companies.yaml
 job_boards.yaml
 feeds.yaml
 contacts.yaml
 interests.yaml
+labs.yaml
 event_drops/
 social_drops/
 .geocode_cache.json

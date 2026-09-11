@@ -35,6 +35,22 @@
   .tabs button.active { border-bottom-color: #4a90d9; font-weight: 600; }
   .controls { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: end; }
   .controls label { display: block; font-size: .8rem; opacity: .75; margin-bottom: .25rem; }
+  /* A dense filter bar (lots of small selects, e.g. the Papers tab) reads
+     as messy under the plain flex layout above once it wraps to several
+     rows — this variant lines everything up on a tidy grid instead, in a
+     bordered card so the whole filter bar reads as one unit. Opt-in via
+     an extra class rather than changing .controls itself, since other
+     .controls blocks (the paste textarea, feed-add forms) rely on the
+     plain flex behavior (flex:1 growing children, etc.) that a grid
+     would break. */
+  .controls.filterbar {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: .9rem 1rem; align-items: start;
+    padding: .9rem 1rem; border: 1px solid #8883; border-radius: 8px;
+  }
+  .controls.filterbar > div { display: flex; flex-direction: column; gap: .3rem; min-width: 0; }
+  .controls.filterbar select, .controls.filterbar input { width: 100%; box-sizing: border-box; }
+  .controls.filterbar .btn { align-self: stretch; white-space: nowrap; }
   select, input[type=text], input[type=date], textarea {
     padding: .4rem .6rem; border-radius: 6px; border: 1px solid #8886; font-size: .9rem;
     background: transparent; color: inherit; font-family: inherit;
@@ -54,6 +70,15 @@
      (e.g. the job title) into a narrow, multi-line wrap. */
   #jobsTable { table-layout: fixed; }
   #jobsTable td { overflow-wrap: break-word; }
+  /* Resizable columns (papersTable): table-layout:fixed so a <col> width
+     actually sticks, a drag handle on each th's trailing edge, widths
+     persisted per-viewer in localStorage so they survive a reload. */
+  table.resizable { table-layout: fixed; }
+  table.resizable td { overflow-wrap: break-word; }
+  table.resizable th { position: relative; }
+  .col-resizer { position: absolute; top: 0; right: 0; width: 6px; height: 100%; cursor: col-resize;
+                 user-select: none; touch-action: none; }
+  .col-resizer:hover, .col-resizer.resizing { background: #4a90d966; }
   .metric-tags { display: flex; flex-wrap: wrap; gap: .3rem; }
   .metric-tag { display: inline-block; border: 1px solid #4a90d966; background: #4a90d914; border-radius: 999px;
                 padding: .15rem .6rem; font-size: .78rem; white-space: nowrap; }
@@ -98,10 +123,15 @@
     <button class="btn" id="backfillBtn">Backfill</button>
     <button class="btn" id="runNowBtn">Run now</button>
   </div>
+  <div id="progressBar" style="display:none; align-items:center; gap:.6rem; padding:.4rem 1rem; margin:-0.6rem 0 1rem;">
+    <progress id="progressBarEl" style="flex:1 1 auto; height:.6rem;"></progress>
+    <span id="progressBarLabel" class="hint" style="white-space:nowrap"></span>
+  </div>
 
   <div class="tabs">
     <button id="tabReport" class="active">Report</button>
     <button id="tabPapers">Sources</button>
+    <button id="tabEnrichLog">Enrich log</button>
     <button id="tabOrgs">Orgs</button>
     <button id="tabJobs">Jobs</button>
     <button id="tabMap">Map</button>
@@ -118,31 +148,50 @@
       <label style="margin-left:.8rem; font-size:.85rem; font-weight:normal;">
         <input type="checkbox" id="enrichForce"> Re-check already-enriched items too
       </label>
+      <label style="margin-left:.8rem; font-size:.85rem; font-weight:normal;">
+        <input type="checkbox" id="enrichUntilDone"> Enrich everything
+      </label>
     </p>
     <p class="hint" id="enrichResult"></p>
     <p class="hint" id="enrichStats"></p>
-    <div class="controls">
+    <div class="controls filterbar">
       <div><label for="pfFrom">From</label><input type="date" id="pfFrom"></div>
       <div><label for="pfTo">To</label><input type="date" id="pfTo"></div>
       <div><label for="pfSource">Source</label><select id="pfSource"><option value="">All</option></select></div>
       <div><label for="pfOrgType">Org type</label><select id="pfOrgType"><option value="">All</option></select></div>
       <div><label for="pfOrg">Org</label><select id="pfOrg"><option value="">All</option></select></div>
-      <div><label for="pfModality">Modality</label><select id="pfModality"><option value="">All</option></select></div>
+      <div><label for="pfModality" title="Multi-select — matches any of your item's tags, ctrl/cmd-click for more than one">Modality</label><select id="pfModality" multiple size="4"></select></div>
+      <div><label for="pfAuthor" title="Most prolific first — exact-string match, so &quot;J. Smith&quot; and &quot;John Smith&quot; count separately">Author</label><select id="pfAuthor"><option value="">All</option></select></div>
       <div><label for="pfTarget">Therapeutic target</label><select id="pfTarget"><option value="">All</option></select></div>
       <div><label for="pfNovelty">Min novelty</label><select id="pfNovelty">
         <option value="0">Any</option><option value="1">1+</option><option value="2">2+</option>
         <option value="3">3+</option><option value="4">4+</option><option value="5">5 only</option>
       </select></div>
       <div><label for="pfSort">Sort by</label><select id="pfSort">
-        <option value="date">Date (newest)</option><option value="novelty">Novelty (highest)</option>
+        <option value="date">Date (newest)</option><option value="date_oldest">Date (oldest)</option>
+        <option value="novelty">Novelty (highest)</option><option value="citations">Citations (highest)</option>
       </select></div>
+      <div><label>&nbsp;</label><button class="btn" id="clearSourceBtn" title="Delete EVERY item currently stored for the selected source (e.g. after a stale keyword polluted it) — irreversible; a re-fetch only brings back what's still inside the normal fetch window">Clear source…</button></div>
     </div>
     <p class="hint" id="papersCount"></p>
+    <p><button class="btn" id="exportPapersBtn">Export CSV</button></p>
     <table class="datatable" id="papersTable"></table>
+    <p><button class="btn" id="papersShowMoreBtn" style="display:none">Show more</button></p>
+  </div>
+
+  <div id="enrichLogPane" style="display:none">
+    <p class="hint">
+      Troubleshooting view: your live summarizer config, whether Ollama is actually reachable
+      right now, and exactly what the most recent enrichment runs extracted per item — no run
+      triggered by opening this tab.
+    </p>
+    <div id="enrichLogStatus"></div>
+    <p class="hint" id="enrichLogCount"></p>
+    <table class="datatable" id="enrichLogTable"></table>
   </div>
 
   <div id="orgsPane" style="display:none">
-    <div class="controls">
+    <div class="controls filterbar">
       <div><label for="ofOrgType">Org type</label><select id="ofOrgType"><option value="">All</option></select></div>
       <div><label for="ofSource">Source</label><select id="ofSource"><option value="">All</option></select></div>
     </div>
@@ -151,7 +200,7 @@
   </div>
 
   <div id="jobsPane" style="display:none">
-    <div class="controls">
+    <div class="controls filterbar">
       <div><label for="jfOrg">Org</label><select id="jfOrg"><option value="">All</option></select></div>
       <div><label for="jfStatus">Status</label><select id="jfStatus">
         <option value="active">Active only</option><option value="">All (incl. removed)</option>
@@ -328,6 +377,7 @@
 
 const reportPane = document.getElementById('reportPane');
 const papersPane = document.getElementById('papersPane');
+const enrichLogPane = document.getElementById('enrichLogPane');
 const orgsPane = document.getElementById('orgsPane');
 const jobsPane = document.getElementById('jobsPane');
 const mapPane = document.getElementById('mapPane');
@@ -336,6 +386,7 @@ const pastePane = document.getElementById('pastePane');
 const contactsPane = document.getElementById('contactsPane');
 const tabReport = document.getElementById('tabReport');
 const tabPapers = document.getElementById('tabPapers');
+const tabEnrichLog = document.getElementById('tabEnrichLog');
 const tabOrgs = document.getElementById('tabOrgs');
 const tabJobs = document.getElementById('tabJobs');
 const tabMap = document.getElementById('tabMap');
@@ -346,6 +397,7 @@ const tabContacts = document.getElementById('tabContacts');
 function showTab(which) {
   reportPane.style.display = which === 'report' ? 'block' : 'none';
   papersPane.style.display = which === 'papers' ? 'block' : 'none';
+  enrichLogPane.style.display = which === 'enrichlog' ? 'block' : 'none';
   orgsPane.style.display = which === 'orgs' ? 'block' : 'none';
   jobsPane.style.display = which === 'jobs' ? 'block' : 'none';
   mapPane.style.display = which === 'map' ? 'block' : 'none';
@@ -354,6 +406,7 @@ function showTab(which) {
   contactsPane.style.display = which === 'contacts' ? 'block' : 'none';
   tabReport.classList.toggle('active', which === 'report');
   tabPapers.classList.toggle('active', which === 'papers');
+  tabEnrichLog.classList.toggle('active', which === 'enrichlog');
   tabOrgs.classList.toggle('active', which === 'orgs');
   tabJobs.classList.toggle('active', which === 'jobs');
   tabMap.classList.toggle('active', which === 'map');
@@ -361,6 +414,7 @@ function showTab(which) {
   tabPaste.classList.toggle('active', which === 'paste');
   tabContacts.classList.toggle('active', which === 'contacts');
   if (which === 'papers' && !papersLoaded) loadPapers();
+  if (which === 'enrichlog') loadEnrichLog();
   if (which === 'orgs' && !orgsLoaded) loadOrgs();
   if (which === 'jobs' && !jobsLoaded) loadJobs();
   if (which === 'map' && !mapLoaded) loadMap();
@@ -369,6 +423,7 @@ function showTab(which) {
 }
 tabReport.onclick = () => showTab('report');
 tabPapers.onclick = () => showTab('papers');
+tabEnrichLog.onclick = () => showTab('enrichlog');
 tabOrgs.onclick = () => showTab('orgs');
 tabJobs.onclick = () => showTab('jobs');
 tabMap.onclick = () => showTab('map');
@@ -423,6 +478,10 @@ const statusText = document.getElementById('statusText');
 const runNowBtn = document.getElementById('runNowBtn');
 const backfillBtn = document.getElementById('backfillBtn');
 const backfillDate = document.getElementById('backfillDate');
+const progressBar = document.getElementById('progressBar');
+const progressBarEl = document.getElementById('progressBarEl');
+const progressBarLabel = document.getElementById('progressBarLabel');
+let fastPoll = false; // true while something's running, so the bar tracks it closely
 
 function fmtAgo(iso) {
   if (!iso) return 'never';
@@ -446,6 +505,26 @@ function fmtUntil(iso) {
   return `in ${Math.round(hours / 24)}d`;
 }
 
+function updateProgressBar(s) {
+  // A very basic bar: shown whenever something's running and the backend
+  // has a label for it. current/total may be null (a step that doesn't
+  // have a real fraction, e.g. a single fetch source) — an indeterminate
+  // <progress> (no `value`) covers that case.
+  if (!s.running_now || !s.progress_label) {
+    progressBar.style.display = 'none';
+    return;
+  }
+  progressBar.style.display = 'flex';
+  if (s.progress_current != null && s.progress_total) {
+    progressBarEl.value = s.progress_current;
+    progressBarEl.max = s.progress_total;
+    progressBarLabel.textContent = `${s.progress_label} (${s.progress_current}/${s.progress_total})`;
+  } else {
+    progressBarEl.removeAttribute('value');
+    progressBarLabel.textContent = s.progress_label;
+  }
+}
+
 async function pollStatus() {
   try {
     const res = await fetch('/api/status');
@@ -453,28 +532,64 @@ async function pollStatus() {
     runNowBtn.disabled = s.running_now;
     backfillBtn.disabled = s.running_now;
     runNowBtn.textContent = s.running_now ? 'Running…' : 'Run now';
+    updateProgressBar(s);
 
     if (!s.enabled) {
       statusText.textContent = 'Auto-schedule disabled — fetch/report only run when triggered manually.';
     } else if (s.running_now) {
-      statusText.textContent = 'Fetching/summarizing now…';
+      statusText.textContent = s.progress_label || 'Fetching/summarizing now…';
     } else {
       const parts = [`Last fetch: ${fmtAgo(s.last_fetch_at)}`, `— next ${fmtUntil(s.next_fetch_at)}`,
                       `· Last report: ${fmtAgo(s.last_report_at)}`, `— next ${fmtUntil(s.next_report_at)}`];
       if (s.last_error) parts.push(`· ⚠ ${s.last_error}`);
       statusText.textContent = parts.join(' ');
     }
+
+    // Poll quickly while something's running (so the bar feels live), and
+    // back off to the normal slow interval once it's done.
+    if (s.running_now && !fastPoll) {
+      fastPoll = true;
+      clearInterval(pollTimer);
+      pollTimer = setInterval(pollStatus, 1500);
+    } else if (!s.running_now && fastPoll) {
+      fastPoll = false;
+      clearInterval(pollTimer);
+      pollTimer = setInterval(pollStatus, 15000);
+      return s; // signal callers waiting on run-now/backfill to finish
+    }
   } catch (e) {
     statusText.textContent = 'Status unavailable.';
   }
 }
 
+// Fire-and-poll: start an operation, then poll /api/status until
+// running_now goes back to false, rather than blocking the request for
+// however long fetch/enrich/report takes (which used to make the browser
+// just sit there with no feedback for minutes).
+async function waitUntilDone() {
+  return new Promise((resolve) => {
+    const check = async () => {
+      const res = await fetch('/api/status');
+      const s = await res.json();
+      updateProgressBar(s);
+      if (s.running_now) {
+        statusText.textContent = s.progress_label || 'Running…';
+        setTimeout(check, 1200);
+      } else {
+        resolve(s);
+      }
+    };
+    check();
+  });
+}
+
 runNowBtn.onclick = async () => {
   runNowBtn.disabled = true;
   runNowBtn.textContent = 'Running…';
-  statusText.textContent = 'Fetching/summarizing now…';
+  statusText.textContent = 'Starting…';
   try {
     await fetch('/api/run-now', { method: 'POST' });
+    await waitUntilDone();
   } finally {
     // A run-now can produce a new report, so reload to pick it up in the sidebar.
     window.location.reload();
@@ -484,19 +599,22 @@ runNowBtn.onclick = async () => {
 backfillBtn.onclick = async () => {
   if (!backfillDate.value) { alert('Pick a date to backfill from.'); return; }
   backfillBtn.disabled = true;
-  statusText.textContent = `Backfilling from ${backfillDate.value}…`;
+  statusText.textContent = `Starting backfill from ${backfillDate.value}…`;
   try {
     const res = await fetch('/api/backfill', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ since: backfillDate.value }),
     });
     const data = await res.json();
-    if (data.ok) {
-      const total = Object.values(data.counts).reduce((a, b) => a + b, 0);
-      statusText.textContent = `Backfill done: ${total} new items fetched since ${backfillDate.value}.`;
-    } else {
+    if (!data.ok) {
       statusText.textContent = `Backfill failed: ${data.message}`;
+      return;
     }
+    const s = await waitUntilDone();
+    const total = s.last_fetch_counts ? Object.values(s.last_fetch_counts).reduce((a, b) => a + b, 0) : '?';
+    statusText.textContent = s.last_error
+      ? `Backfill failed: ${s.last_error}`
+      : `Backfill done: ${total} new items fetched since ${backfillDate.value}.`;
   } catch (e) {
     statusText.textContent = 'Backfill failed — see server log.';
   } finally {
@@ -504,8 +622,8 @@ backfillBtn.onclick = async () => {
   }
 };
 
+let pollTimer = setInterval(pollStatus, 15000);
 pollStatus();
-setInterval(pollStatus, 15000);
 
 // --- Paste box -----------------------------------------------------------
 document.getElementById('pasteBtn').onclick = async () => {
@@ -546,6 +664,7 @@ async function loadPasted() {
     table.innerHTML = '<tbody><tr><td class="hint">Nothing pasted yet.</td></tr></tbody>';
     return;
   }
+  table.className = 'datatable resizable';
   table.innerHTML = `
     <thead><tr><th>Added</th><th>Source</th><th>Title / snippet</th><th>Report</th><th></th></tr></thead>
     <tbody>${items.map(it => `
@@ -557,6 +676,7 @@ async function loadPasted() {
         <td>${it.included_in_report ? it.included_in_report : '<span class="hint">not yet</span>'}</td>
         <td><button class="delBtn" data-del-item="${it.id}" title="Delete">🗑</button></td>
       </tr>`).join('')}</tbody>`;
+  makeTableResizable(table, 'pastedTable', { 2: 340 });
   table.querySelectorAll('[data-del-item]').forEach(btn => {
     btn.onclick = async () => {
       if (!confirm('Delete this pasted item? This removes it outright.')) return;
@@ -603,6 +723,7 @@ function renderFeedsTable(tableId, category, feedList) {
     table.innerHTML = '<tbody><tr><td class="hint">None submitted yet.</td></tr></tbody>';
     return;
   }
+  table.className = 'datatable resizable';
   table.innerHTML = `
     <thead><tr><th>Feed</th><th>Label</th><th>Added</th><th></th></tr></thead>
     <tbody>${feedList.map(f => `
@@ -612,6 +733,7 @@ function renderFeedsTable(tableId, category, feedList) {
         <td>${(f.added_at || '').slice(0, 10)}</td>
         <td><button class="delBtn" data-del-feed="${f.url}" data-del-category="${category}" title="Remove">🗑</button></td>
       </tr>`).join('')}</tbody>`;
+  makeTableResizable(table, tableId, { 0: 340 });
   table.querySelectorAll('[data-del-feed]').forEach(btn => {
     btn.onclick = async () => {
       if (!confirm('Remove this feed?')) return;
@@ -716,13 +838,15 @@ function renderContacts() {
     table.innerHTML = '<tbody><tr><td class="hint">No contacts yet — add one above, or import from LinkedIn below.</td></tr></tbody>';
     return;
   }
+  table.className = 'datatable resizable';
   table.innerHTML = `
-    <thead><tr><th>Name</th><th>Email(s)</th><th>Workplaces</th><th>Schools</th><th>Relationship</th><th>Notes</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Email(s)</th><th>Company</th><th>Job title</th><th>Schools</th><th>Relationship</th><th>Notes</th><th></th></tr></thead>
     <tbody>${contacts.map(c => `
       <tr>
         <td>${c.linkedin_url ? `<a href="${c.linkedin_url}" target="_blank" rel="noopener">${c.name}</a>` : c.name}</td>
         <td>${(c.emails || []).join(', ')}</td>
-        <td>${(c.workplaces || []).map(w => w.role ? `${w.company} (${w.role})` : w.company).join(', ')}</td>
+        <td>${(c.workplaces || []).map(w => w.company).join(', ')}</td>
+        <td>${(c.workplaces || []).map(w => w.role).filter(r => r).join(', ')}</td>
         <td>${(c.schools || []).map(s => s.level ? `${s.name} (${s.level})` : s.name).join(', ')}</td>
         <td>${c.relationship || ''}</td>
         <td>${c.notes || ''}</td>
@@ -731,6 +855,7 @@ function renderContacts() {
           <button class="delBtn" data-del-contact="${c.index}" title="Delete">🗑</button>
         </td>
       </tr>`).join('')}</tbody>`;
+  makeTableResizable(table, 'contactsTable');
   table.querySelectorAll('[data-edit-contact]').forEach(btn => {
     btn.onclick = () => startEditContact(parseInt(btn.dataset.editContact, 10));
   });
@@ -817,6 +942,7 @@ function renderMap() {
   document.getElementById('mapCount').textContent = `${mapLocations.length} located org(s).`;
 
   const table = document.getElementById('mapTable');
+  table.className = 'datatable resizable';
   table.innerHTML = `
     <thead><tr><th>Org</th><th>Location</th><th>Org type</th><th>Items</th></tr></thead>
     <tbody>${mapLocations.slice().sort((a, b) => b.total - a.total).map(m => `
@@ -826,6 +952,7 @@ function renderMap() {
         <td>${m.org_type || ''}</td>
         <td>${m.total} (${Object.entries(m.by_source).map(([s, n]) => `${s}: ${n}`).join(', ')})</td>
       </tr>`).join('')}</tbody>`;
+  makeTableResizable(table, 'mapTable');
 
   if (typeof Plotly === 'undefined') {
     document.getElementById('mapChart').innerHTML =
@@ -900,11 +1027,46 @@ function uniqueSorted(values) {
   return [...new Set(values.filter(v => v))].sort();
 }
 
+// modality is stored as a comma-separated list of tags (a paper can be
+// both EEG and eye-tracking, say) rather than one value — this splits
+// it back out, trimming each tag.
+function modalityTags(p) {
+  return (p.modality || '').split(',').map(s => s.trim()).filter(s => s);
+}
+
+// authors is stored as a plain comma-separated string as returned by
+// each scraper (OpenAlex/arXiv), same shape as modality above.
+function authorList(p) {
+  return (p.authors || '').split(',').map(s => s.trim()).filter(s => s);
+}
+
+// A prolific-author dropdown, most-frequent first — deliberately exact-
+// string counting, not name standardization: "J. Smith" and "John Smith"
+// count as different people, since reliably merging author name variants
+// (shared surnames especially) isn't something worth guessing at here.
+function populateAuthorSelect(rows) {
+  const counts = new Map();
+  for (const p of rows) for (const a of authorList(p)) counts.set(a, (counts.get(a) || 0) + 1);
+  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const sel = document.getElementById('pfAuthor');
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All</option>' +
+    sorted.map(([name, n]) => `<option value="${name}">${name} (${n})</option>`).join('');
+  if (counts.has(current)) sel.value = current;
+}
+
 function populateSelect(id, values) {
   const sel = document.getElementById(id);
   const current = sel.value;
   sel.innerHTML = '<option value="">All</option>' + values.map(v => `<option value="${v}">${v}</option>`).join('');
   if (values.includes(current)) sel.value = current;
+}
+
+function populateMultiSelect(id, values) {
+  const sel = document.getElementById(id);
+  const current = new Set(Array.from(sel.selectedOptions).map(o => o.value));
+  sel.innerHTML = values.map(v => `<option value="${v}">${v}</option>`).join('');
+  Array.from(sel.options).forEach(o => { if (current.has(o.value)) o.selected = true; });
 }
 
 async function loadPapers() {
@@ -914,9 +1076,10 @@ async function loadPapers() {
   populateSelect('pfSource', uniqueSorted(papers.map(p => p.source)));
   populateSelect('pfOrgType', uniqueSorted(papers.map(p => p.org_type)));
   populateSelect('pfOrg', uniqueSorted(papers.map(p => p.org)));
-  populateSelect('pfModality', uniqueSorted(papers.map(p => p.modality)));
+  populateMultiSelect('pfModality', uniqueSorted(papers.flatMap(modalityTags)));
+  populateAuthorSelect(papers);
   populateSelect('pfTarget', uniqueSorted(papers.map(p => p.therapeutic_target)));
-  ['pfFrom', 'pfTo', 'pfSource', 'pfOrgType', 'pfOrg', 'pfModality', 'pfTarget', 'pfNovelty', 'pfSort']
+  ['pfFrom', 'pfTo', 'pfSource', 'pfOrgType', 'pfOrg', 'pfModality', 'pfAuthor', 'pfTarget', 'pfNovelty', 'pfSort']
     .forEach(id => document.getElementById(id).onchange = renderPapers);
   renderPapers();
 }
@@ -956,6 +1119,7 @@ function renderOrgs() {
   document.getElementById('orgsCount').textContent = `${rows.length} of ${orgs.length} org(s).`;
 
   const table = document.getElementById('orgsTable');
+  table.className = 'datatable resizable';
   table.innerHTML = `
     <thead><tr><th>Org</th><th>Category</th><th>Type</th><th>Location</th><th>Items</th><th>Sources</th><th>Ticker</th><th>Funding</th><th>Source</th></tr></thead>
     <tbody>${rows.map(o => `
@@ -970,6 +1134,7 @@ function renderOrgs() {
         <td>${fmtUsd(o.funding_total_usd)}${o.last_funding_round ? ` (${o.last_funding_round})` : ''}</td>
         <td>${o.source_url ? `<a href="${o.source_url}" target="_blank" rel="noopener">link</a>` : '<span class="hint">—</span>'}</td>
       </tr>`).join('')}</tbody>`;
+  makeTableResizable(table, 'orgsTable', { 0: 200 });
 }
 
 // --- Jobs table ----------------------------------------------------------
@@ -998,12 +1163,9 @@ function renderJobs() {
   document.getElementById('jobsCount').textContent = `${rows.length} of ${jobs.length} posting(s).`;
 
   const table = document.getElementById('jobsTable');
+  table.className = 'datatable resizable';
   table.innerHTML = `
-    <colgroup>
-      <col style="width:16%"><col style="width:34%"><col style="width:20%">
-      <col style="width:12%"><col style="width:9%"><col style="width:9%">
-    </colgroup>
-    <thead><tr><th>Org</th><th>Title</th><th>Location</th><th>Platform</th><th>First seen</th><th>Status</th></tr></thead>
+    <thead><tr><th>Org</th><th>Title</th><th>Location</th><th>Platform</th><th>First seen</th><th>Status</th><th></th></tr></thead>
     <tbody>${rows.map(j => `
       <tr>
         <td>${j.org}</td>
@@ -1012,18 +1174,46 @@ function renderJobs() {
         <td>${j.platform}</td>
         <td>${(j.first_seen_at || '').slice(0, 10)}</td>
         <td>${j.removed_at ? `<span class="hint">Removed ${j.removed_at.slice(0, 10)}</span>` : 'Active'}</td>
+        <td><button class="delBtn" data-reject-org="${j.org}" title="Not actually a relevant org — clear it everywhere (Orgs/Map/Trends/Jobs), not just here">🗑 Org</button></td>
       </tr>`).join('')}</tbody>`;
+  makeTableResizable(table, 'jobsTable');
+
+  table.querySelectorAll('[data-reject-org]').forEach(btn => {
+    btn.onclick = async () => {
+      const org = btn.dataset.rejectOrg;
+      if (!confirm(`"${org}" isn't actually a relevant org? This clears it from every item (Orgs/Map/Trends/Jobs), and removes its job postings. Can't be undone.`)) return;
+      const res = await fetch('/api/jobs/reject-org', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ org }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        jobs = jobs.filter(j => j.org !== org);
+        renderJobs();
+      } else {
+        alert(data.message || 'Failed — see server log.');
+      }
+    };
+  });
 }
 
 function renderEnrichStats(stats) {
   const el = document.getElementById('enrichStats');
-  if (!stats || !stats.total_items) { el.textContent = ''; return; }
-  const avg = stats.total_seconds / stats.total_items;
-  let text = `Enriched ${stats.total_items} item(s) all-time (avg ${avg.toFixed(1)}s/item).`;
+  if (!stats) { el.textContent = ''; return; }
+  // Leads with the live count (how much of what's currently in the DB is
+  // actually enriched) rather than the all-time running total — that
+  // counter only ever goes up, even across a source-clear/rebuild, so
+  // it stops meaning "how caught up am I" the moment you delete anything.
+  let text = (stats.current_total)
+    ? `${stats.current_enriched} of ${stats.current_total} current item(s) enriched.`
+    : '';
+  if (stats.total_items) {
+    const avg = stats.total_seconds / stats.total_items;
+    text += ` (avg ${avg.toFixed(1)}s/item over ${stats.total_items} enriched all-time.)`;
+  }
   if (stats.last_run_items) {
     text += ` Last run: ${stats.last_run_items} item(s) in ${stats.last_run_seconds.toFixed(1)}s.`;
   }
-  el.textContent = text;
+  el.textContent = text.trim();
 }
 
 (async () => {
@@ -1035,19 +1225,33 @@ document.getElementById('enrichNowBtn').onclick = async (ev) => {
   const btn = ev.target;
   const resultEl = document.getElementById('enrichResult');
   btn.disabled = true;
-  btn.textContent = 'Enriching…';
+  btn.textContent = 'Starting…';
   resultEl.textContent = '';
   try {
     const force = document.getElementById('enrichForce').checked;
-    const res = await fetch('/api/enrich', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force }),
+    const run_until_done = document.getElementById('enrichUntilDone').checked;
+    const started = await fetch('/api/enrich', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force, run_until_done }),
     });
-    const data = await res.json();
+    const startedData = await started.json();
+    if (!startedData.ok) {
+      btn.textContent = 'Enrich now (busy)';
+      resultEl.textContent = startedData.message || 'Already running.';
+      return;
+    }
+    if (run_until_done) btn.textContent = 'Enriching everything… this can take a while, leave this tab open';
+    else btn.textContent = 'Enriching…';
+    const s = await waitUntilDone();
+    const data = s.last_enrich_result;
     papersLoaded = false;
     await loadPapers();
-    btn.textContent = `Enrich now (+${data.enriched})`;
-    resultEl.textContent = data.message || '';
-    renderEnrichStats(data.stats);
+    btn.textContent = data ? `Enrich now (+${data.enriched})` : 'Enrich now';
+    resultEl.textContent = (data && data.message) || s.last_error || '';
+    // Re-fetch rather than using data.stats directly — that object comes
+    // straight from enrich.py's own return value, which doesn't know the
+    // current_enriched/current_total live counts (those are computed
+    // separately, only in this endpoint).
+    renderEnrichStats(await (await fetch('/api/enrich/stats')).json());
   } catch (e) {
     btn.textContent = 'Enrich now (failed)';
     resultEl.textContent = 'Request failed — see server log.';
@@ -1062,13 +1266,67 @@ function novelBadge(score) {
   return `<span class="metric-tag" style="background:${colors[score] || '#8886'}">${score}/5</span>`;
 }
 
-function renderPapers() {
+// Drag-to-resize columns for a fixed-layout table. Widths are stored per
+// <col data-col="..."> and persisted to localStorage under `tableId` so
+// they survive a reload — per-viewer/per-browser only, same as any other
+// localStorage use here, nothing shared or sent anywhere.
+// Drag-to-resize columns for any rendered datatable — works directly off
+// the header row's cells (table-layout:fixed takes its column widths from
+// the first row), no <colgroup> needed, so this drops onto any table's
+// render function as a one-line call after its innerHTML is (re)built.
+// Widths are keyed by column index and persisted per-viewer in
+// localStorage under `tableId`, so they survive a reload; `defaults` (an
+// optional {index: px} map) sets an initial width — before any manual
+// resize has been saved — for a column that looks cramped otherwise
+// (e.g. Title, which is usually the one thing worth reading in full).
+function makeTableResizable(table, tableId, defaults) {
+  table.style.tableLayout = 'fixed';
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(`colwidths:${tableId}`) || '{}'); } catch (e) {}
+
+  const ths = table.querySelectorAll('thead th');
+  ths.forEach((th, i) => {
+    const w = saved[i] ?? (defaults || {})[i];
+    if (w) th.style.width = `${w}px`;
+    if (!th.textContent.trim() && i === ths.length - 1) return; // no handle on a trailing action/delete column
+    th.style.position = 'relative';
+    const handle = document.createElement('div');
+    handle.className = 'col-resizer';
+    th.appendChild(handle);
+    handle.addEventListener('mousedown', (ev) => {
+      ev.preventDefault();
+      const startX = ev.clientX;
+      const startWidth = th.getBoundingClientRect().width;
+      handle.classList.add('resizing');
+      function onMove(e) {
+        const newWidth = Math.max(40, startWidth + (e.clientX - startX));
+        th.style.width = `${newWidth}px`;
+      }
+      function onUp() {
+        handle.classList.remove('resizing');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        saved[i] = parseInt(th.style.width, 10);
+        try { localStorage.setItem(`colwidths:${tableId}`, JSON.stringify(saved)); } catch (e) {}
+      }
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  });
+}
+
+let currentPapersRows = [];
+let papersPageSize = 50; // how many filtered rows are actually rendered into the table right now
+
+function renderPapers(resetPage = true) {
+  if (resetPage) papersPageSize = 50; // any filter/sort change starts back at the top, not wherever "Show more" left off
   const from = document.getElementById('pfFrom').value;
   const to = document.getElementById('pfTo').value;
   const source = document.getElementById('pfSource').value;
   const orgType = document.getElementById('pfOrgType').value;
   const org = document.getElementById('pfOrg').value;
-  const modality = document.getElementById('pfModality').value;
+  const modalitySelected = Array.from(document.getElementById('pfModality').selectedOptions).map(o => o.value);
+  const author = document.getElementById('pfAuthor').value;
   const target = document.getElementById('pfTarget').value;
   const minNovelty = parseInt(document.getElementById('pfNovelty').value, 10);
   const sortBy = document.getElementById('pfSort').value;
@@ -1080,7 +1338,8 @@ function renderPapers() {
     if (source && p.source !== source) return false;
     if (orgType && p.org_type !== orgType) return false;
     if (org && p.org !== org) return false;
-    if (modality && p.modality !== modality) return false;
+    if (modalitySelected.length && !modalityTags(p).some(t => modalitySelected.includes(t))) return false;
+    if (author && !authorList(p).includes(author)) return false;
     if (target && p.therapeutic_target !== target) return false;
     if (minNovelty === 5 && p.novelty_score !== 5) return false;
     if (minNovelty > 0 && minNovelty < 5 && (p.novelty_score || 0) < minNovelty) return false;
@@ -1089,26 +1348,187 @@ function renderPapers() {
 
   rows = rows.slice().sort((a, b) => {
     if (sortBy === 'novelty') return (b.novelty_score || 0) - (a.novelty_score || 0);
+    if (sortBy === 'citations') return (b.citation_count || 0) - (a.citation_count || 0);
+    if (sortBy === 'date_oldest') return (a.published_at || '').localeCompare(b.published_at || '');
     return (b.published_at || '').localeCompare(a.published_at || '');
   });
 
+  currentPapersRows = rows; // full filtered set — CSV export always exports everything matching the filters, not just the visible page
+
+  const visible = rows.slice(0, papersPageSize);
+  const remaining = rows.length - visible.length;
   document.getElementById('papersCount').textContent =
-    `${rows.length} of ${papers.length} items` + (papers.some(p => !p.enriched) ? ' (some not yet enriched)' : '');
+    (remaining > 0 ? `Showing ${visible.length} of ${rows.length} filtered (${papers.length} total items)` : `${rows.length} of ${papers.length} items`)
+    + (papers.some(p => !p.enriched) ? ' (some not yet enriched)' : '');
+  const moreBtn = document.getElementById('papersShowMoreBtn');
+  if (moreBtn) {
+    moreBtn.style.display = remaining > 0 ? '' : 'none';
+    moreBtn.textContent = `Show all (${remaining} remaining)`;
+  }
+
+  // Authors condensed to "First Author et al." — the full comma-separated
+  // list is still there in the title tooltip and in the CSV export, this
+  // is just what saves the row from becoming a wall of names. Click it to
+  // filter the table down to that first author (a shortcut for something
+  // you could also do via the Author dropdown above).
+  function authorCell(p) {
+    const names = authorList(p);
+    if (!names.length) return '';
+    const shown = names.length > 1 ? `${names[0]} et al. (${names.length})` : names[0];
+    return `<span class="author-cell" data-author="${names[0]}" title="${names.join(', ')}" style="cursor:pointer; text-decoration:underline dotted;">${shown}</span>`;
+  }
+
+  // A blank citation count means two very different things depending on
+  // where the paper came from, and the Source column alone can't tell
+  // you which — both arxiv_scraper and openalex_scraper write source
+  // "papers" (they're merged into one section on purpose), but only
+  // OpenAlex ever reports a citation count at all. arXiv preprints
+  // genuinely have no citation data to give (that API doesn't track it)
+  // — expected, not a bug. A blank OpenAlex row, on the other hand,
+  // means something's actually wrong (OpenAlex reported no cited_by_count
+  // for a published paper, or the item was never re-fetched since the
+  // pagination fix). Distinguish by URL shape: an arxiv.org link is
+  // unambiguously an arXiv-sourced item regardless of when it was fetched.
+  function citationCell(p) {
+    if (p.citation_count !== null && p.citation_count !== undefined) return String(p.citation_count);
+    const isArxiv = /^https?:\/\/(www\.)?arxiv\.org\//i.test(p.url || '');
+    return isArxiv
+      ? '<span class="hint" title="arXiv preprints have no citation data — this is expected, not a gap">n/a (arXiv)</span>'
+      : '<span class="hint" title="No citation count from OpenAlex for this paper — could be a genuine 0, or worth a re-fetch">—</span>';
+  }
 
   const table = document.getElementById('papersTable');
+  table.className = 'datatable resizable';
   table.innerHTML = `
-    <thead><tr><th>Date</th><th>Title</th><th>Source</th><th>Org</th><th>Org type</th><th>Modality</th><th>Target</th><th>Novelty</th></tr></thead>
-    <tbody>${rows.map(p => `
-      <tr>
+    <thead><tr><th>Date</th><th>Title</th><th>Source</th><th>Authors</th><th>Citations</th><th>Org</th>
+      <th>Org type</th><th>Modality</th><th>Target</th><th>Novelty</th><th></th></tr></thead>
+    <tbody>${visible.map(p => `
+      <tr data-paper-row="${p.id}">
         <td>${(p.published_at || '').slice(0, 10)}</td>
         <td>${p.title}</td>
         <td>${p.url ? `<a href="${p.url}" target="_blank" rel="noopener">${p.source}</a>` : p.source}</td>
+        <td>${authorCell(p)}</td>
+        <td>${citationCell(p)}</td>
         <td>${p.org || (p.enriched ? '—' : '<span class="hint">pending</span>')}</td>
         <td>${p.org_type || ''}</td>
         <td>${p.modality || ''}</td>
         <td>${p.therapeutic_target || ''}</td>
         <td title="${p.novelty_rationale || ''}">${novelBadge(p.novelty_score)}</td>
+        <td><button class="delBtn" data-del-paper="${p.id}" title="Delete">🗑</button></td>
       </tr>`).join('')}</tbody>`;
+
+  table.querySelectorAll('[data-del-paper]').forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm('Delete this item outright? This can\'t be undone.')) return;
+      await fetch(`/api/item/${btn.dataset.delPaper}`, { method: 'DELETE' });
+      papers = papers.filter(p => p.id !== btn.dataset.delPaper);
+      renderPapers();
+    };
+  });
+
+  table.querySelectorAll('[data-author]').forEach(el => {
+    el.onclick = () => {
+      document.getElementById('pfAuthor').value = el.dataset.author;
+      renderPapers();
+    };
+  });
+
+  // Title is usually the one thing worth reading in full — give it a
+  // wider default than an even fixed-layout split would (only applies
+  // until you've manually resized it once, after which your own width wins).
+  makeTableResizable(table, 'papersTable', { 1: 340 });
+}
+
+function csvEscape(value) {
+  const s = String(value ?? '');
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+document.getElementById('clearSourceBtn').onclick = async () => {
+  const source = document.getElementById('pfSource').value;
+  if (!source) { alert('Pick a specific source from the dropdown first — "All" can\'t be bulk-cleared here.'); return; }
+  const count = papers.filter(p => p.source === source).length;
+  if (!confirm(`Delete all ${count} currently-stored "${source}" item(s)? This can't be undone — a re-fetch only brings back whatever's still inside the normal fetch window (or a fresh backfill).`)) return;
+  const btn = document.getElementById('clearSourceBtn');
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/source/${encodeURIComponent(source)}`, { method: 'DELETE' });
+    const data = await res.json();
+    papers = papers.filter(p => p.source !== source);
+    renderPapers();
+    alert(`Deleted ${data.removed} item(s). Run a fetch (or Backfill) to re-pull "${source}".`);
+  } catch (e) {
+    alert('Failed — see server log.');
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+document.getElementById('papersShowMoreBtn').onclick = () => {
+  papersPageSize = Infinity; // show every remaining filtered row, not another capped batch
+  renderPapers(false); // false: keep it expanded, don't reset back to 50
+};
+
+document.getElementById('exportPapersBtn').onclick = () => {
+  const columns = [
+    'published_at', 'title', 'source', 'url', 'authors', 'citation_count', 'org', 'org_type',
+    'modality', 'therapeutic_target', 'novelty_score',
+  ];
+  const csv = [columns.join(',')]
+    .concat(currentPapersRows.map(p => columns.map(c => csvEscape(p[c])).join(',')))
+    .join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = `besseleth-papers-${new Date().toISOString().slice(0, 10)}.csv`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+};
+
+// --- Enrich log (troubleshooting) ---------------------------------------
+async function loadEnrichLog() {
+  const res = await fetch('/api/enrich/log');
+  const data = await res.json();
+
+  const statusEl = document.getElementById('enrichLogStatus');
+  let statusHtml = `<p><strong>backend:</strong> ${data.backend} &nbsp; <strong>model:</strong> ${data.model} `
+    + `&nbsp; <strong>ollama_url:</strong> ${data.ollama_url}</p>`;
+  if (data.backend !== 'ollama') {
+    statusHtml += `<p style="color:#c0392b">summarizer.backend is "${data.backend}", not "ollama" — every item `
+      + `gets marked "unknown" rather than actually extracted. Set <code>summarizer.backend: "ollama"</code> in `
+      + `config.yaml and restart besseleth.</p>`;
+  } else if (data.ollama_ok) {
+    statusHtml += `<p style="color:#2a7d2a">✓ ${data.ollama_message}</p>`;
+  } else {
+    statusHtml += `<p style="color:#c0392b">✗ ${data.ollama_message}</p>`;
+  }
+  if (data.stats && data.stats.total_items) {
+    const avg = data.stats.total_seconds / data.stats.total_items;
+    statusHtml += `<p class="hint">Enriched ${data.stats.total_items} item(s) all-time (avg ${avg.toFixed(1)}s/item).</p>`;
+  }
+  statusEl.innerHTML = statusHtml;
+
+  document.getElementById('enrichLogCount').textContent =
+    `Last ${data.items.length} enriched item(s), newest first.`;
+
+  const table = document.getElementById('enrichLogTable');
+  table.className = 'datatable resizable';
+  table.innerHTML = `
+    <thead><tr><th>Enriched</th><th>Title</th><th>Source</th><th>Org</th><th>Org type</th>
+      <th>Modality</th><th>Target</th><th>Novelty</th><th>Location</th></tr></thead>
+    <tbody>${data.items.map(i => `
+      <tr>
+        <td>${fmtAgo(i.enriched_at)}</td>
+        <td>${i.url ? `<a href="${i.url}" target="_blank" rel="noopener">${i.title}</a>` : i.title}</td>
+        <td>${i.source}</td>
+        <td>${i.org || '<span class="hint">null</span>'}</td>
+        <td>${i.org_type || ''}</td>
+        <td>${i.modality || ''}</td>
+        <td>${i.therapeutic_target || ''}</td>
+        <td title="${i.novelty_rationale || ''}">${novelBadge(i.novelty_score)}</td>
+        <td>${i.location_text || ''}</td>
+      </tr>`).join('')}</tbody>`;
+  makeTableResizable(table, 'enrichLogTable', { 1: 300 });
 }
 
 // --- Trends explorer (devices + companies + FDA/IPO timelines) -----------
@@ -1374,6 +1794,7 @@ function renderIpoTimeline() {
 
 function renderTable() {
   const table = document.getElementById('dataTable');
+  table.className = 'datatable resizable';
   if (currentDataset === 'fda_timeline') {
     const dated = devices.filter(d => d.date_reported && d.fda_stage_rank > 0).slice().sort((a, b) => b.date_reported.localeCompare(a.date_reported));
     table.innerHTML = `
@@ -1387,6 +1808,7 @@ function renderTable() {
           <td>${d.date_reported}</td>
           <td>${d.source_url ? `<a href="${d.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
         </tr>`).join('')}</tbody>`;
+    makeTableResizable(table, 'dataTable:fda_timeline');
     return;
   }
   if (currentDataset === 'ipo_timeline') {
@@ -1401,13 +1823,14 @@ function renderTable() {
           <td>${c.stock_ticker || ''}</td>
           <td>${c.source_url ? `<a href="${c.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
         </tr>`).join('')}</tbody>`;
+    makeTableResizable(table, 'dataTable:ipo_timeline');
     return;
   }
   if (currentDataset === 'devices') {
     table.innerHTML = `
-      <thead><tr><th>Device</th><th>Org</th><th>Type</th><th>FDA status</th><th>Metrics</th><th>Reported</th><th>Source</th></tr></thead>
+      <thead><tr><th>Device</th><th>Org</th><th>Type</th><th>FDA status</th><th>Metrics</th><th>Reported</th><th>Source</th><th></th></tr></thead>
       <tbody>${devices.map(d => `
-        <tr>
+        <tr data-device-row="${d.id}">
           <td>${d.name}</td>
           <td>${d.org}</td>
           <td>${d.org_type}</td>
@@ -1415,19 +1838,31 @@ function renderTable() {
           <td><div class="metric-tags">${Object.entries(d.metrics).map(([k, v]) => formatMetricValue(k, v)).join('')}</div></td>
           <td>${d.date_reported || ''}</td>
           <td>${d.source_url ? `<a href="${d.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
+          <td><button class="delBtn" data-del-device="${d.id}" title="Delete this device row — e.g. a bad extraction (wrong unit conversion, hallucinated metric)">🗑</button></td>
         </tr>`).join('')}</tbody>`;
+    makeTableResizable(table, 'dataTable:devices');
+    table.querySelectorAll('[data-del-device]').forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm('Delete this device row outright? This can\'t be undone — if the underlying item still exists, re-enriching it may add it back (hopefully corrected this time).')) return;
+        await fetch(`/api/devices/${btn.dataset.delDevice}`, { method: 'DELETE' });
+        devices = devices.filter(x => String(x.id) !== btn.dataset.delDevice);
+        renderTable();
+        renderChart();
+      };
+    });
   } else {
     table.innerHTML = `
-      <thead><tr><th>Company</th><th>Funding</th><th>Last round</th><th>Stock</th><th>Source</th><th>Notes</th></tr></thead>
+      <thead><tr><th>Company</th><th>Funding</th><th>Last round</th><th>Active job postings</th><th>Source</th><th>Notes</th></tr></thead>
       <tbody>${companies.map(c => `
         <tr>
           <td>${c.name}</td>
           <td>${c.funding_total_usd ? '$' + c.funding_total_usd.toLocaleString() : '—'}</td>
           <td>${c.last_funding_round ? `${c.last_funding_round} (${c.last_funding_date})` : '—'}</td>
-          <td>${c.stock_price ? `${c.stock_ticker}: $${c.stock_price.toLocaleString()}` : (c.stock_ticker || '—')}</td>
+          <td>${c.active_job_postings || '—'}</td>
           <td>${c.source_url ? `<a href="${c.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
           <td class="hint">${c.notes || ''}</td>
         </tr>`).join('')}</tbody>`;
+    makeTableResizable(table, 'dataTable:companies');
   }
 }
 

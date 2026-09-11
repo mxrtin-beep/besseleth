@@ -10,18 +10,22 @@ from pathlib import Path
 from .config import env
 from .db import Item
 from . import summarizer
-from .trends.format import format_metrics
 
 MD_TEMPLATE = """# {{ industry }} — Weekly Briefing
 _{{ date_range }}_
 
+{% if top_findings_lines %}
+## 🏆 Most surprising / important this week
+{{ top_findings_lines }}
+
+{% endif %}
 {% if personalized_lines %}
 ## 🔔 For you
 {{ personalized_lines }}
 
 {% endif %}
-## 📄 arXiv research
-{{ arxiv_summary }}
+## 📚 Papers (arXiv + published, ranked by citations)
+{{ paper_lines }}
 
 ## 📰 News
 {{ news_summary }}
@@ -51,14 +55,9 @@ _{{ date_range }}_
 {{ clip_lines }}
 
 {% endif %}
-{% if trend_lines %}
-## 📈 Industry trends
-{{ trend_lines }}
-
-{% endif %}
-{% if company_lines %}
-## 🏢 Companies
-{{ company_lines }}
+{% if context_summary %}
+## 🧠 Big picture
+{{ context_summary }}
 
 {% endif %}
 ---
@@ -73,51 +72,85 @@ def _snippet_lines(items: list[Item], max_chars: int = 200) -> str:
     ) or "_None this week._"
 
 
+def _paper_lines(items: list[Item]) -> str:
+    """One combined papers section — arXiv preprints and OpenAlex-indexed
+    published papers alike (see pipeline.py: both scrapers feed the same
+    "papers" source now, since to a reader they're the same thing:
+    research papers, just via two complementary feeds with different
+    tradeoffs — arXiv is same-day fresh but never has a citation count;
+    OpenAlex has real citation counts but indexes with a lag). Already
+    sorted by citation_count (highest first) by the caller. Shows the
+    count and authors directly rather than running these through an LLM
+    summary: a citation count and author list are already-final facts,
+    not something to paraphrase, and an abstract is the paper's own text
+    (nothing left to extract beyond what the link+citation count already
+    convey at a glance). An arXiv item's citation_count/authors are
+    usually None/empty — shown as "citations unknown" rather than 0, so
+    it doesn't read as "confirmed no citations" for a paper OpenAlex just
+    doesn't index."""
+    lines = []
+    for i in items:
+        cite = f"{i.citation_count} citation{'s' if i.citation_count != 1 else ''}" if i.citation_count is not None else "citations unknown"
+        authors = f" — {i.authors}" if i.authors else ""
+        lines.append(f"- **{i.title}** ({cite}){authors}" + (f" ([link]({i.url}))" if i.url else ""))
+    return "\n".join(lines) or "_None this week._"
+
+
+_SOURCE_LABELS = {
+    "papers": "paper", "news": "news", "blog": "blog", "conference": "conference",
+    "conference_news": "conference news", "event": "event", "social": "social", "linkedin": "LinkedIn", "clip": "clipped",
+}
+
+
+def _top_findings_lines(all_items: list[Item], min_score: int, max_count: int) -> str:
+    """The report's lead section: whatever scored highest on novelty this
+    week, with the LLM's own one-sentence rationale for why (already
+    computed during enrichment — see enrich.py's novelty_score/
+    novelty_rationale, now grounded against cross-source context and your
+    actual accumulated device-metric benchmarks, not just this section
+    dressing up a number that was already there). Deliberately NOT every
+    item sorted by score: below `min_score`, nothing this week actually
+    stood out, and forcing a middling item into a "most important"
+    section just because it's the least-unremarkable thing available
+    would be worse than admitting a quiet week. Ties broken by
+    citation_count then published_at so a stronger paper/more recent item
+    wins among equally-scored ones."""
+    candidates = [i for i in all_items if (i.novelty_score or 0) >= min_score]
+    if not candidates:
+        return (
+            f"_Nothing this week scored {min_score}+ on novelty (out of 5) — a quiet week for genuinely surprising "
+            "findings, not a gap in coverage. See the full sections below for everything that came in._"
+        )
+    candidates.sort(key=lambda i: (i.novelty_score or 0, i.citation_count or 0, i.published_at or ""), reverse=True)
+    lines = []
+    for i in candidates[:max_count]:
+        label = _SOURCE_LABELS.get(i.source, i.source)
+        title = f"[{i.title}]({i.url})" if i.url else i.title
+        lines.append(f"- **{title}** _{label}, novelty {i.novelty_score}/5_")
+        if i.novelty_rationale:
+            lines.append(f"  {i.novelty_rationale}")
+    return "\n".join(lines)
+
+
+def _linkedin_lines(items: list[Item], summarizer_cfg: dict) -> str:
+    """Just the basics (role, company, location) per pasted post, not the
+    raw pasted text — see summarizer.summarize_linkedin_item's docstring."""
+    return "\n".join(
+        f"- **{summarizer.summarize_linkedin_item(i, summarizer_cfg)}**" + (f" ([link]({i.url}))" if i.url else "")
+        for i in items
+    ) or "_None this week._"
+
+
 def _render_markdown(context: dict) -> str:
     from jinja2 import Template
 
     return Template(MD_TEMPLATE, trim_blocks=True, lstrip_blocks=True).render(**context)
 
 
-def _trend_section(trend_devices, trend_chart_paths, trend_metrics) -> str:
-    if not trend_devices:
-        return ""
-    parts = []
-    for path in trend_chart_paths:
-        parts.append(f"![{Path(path).stem}]({path})")
-    parts.append("")
-    parts.append(
-        "_The interactive version of this — adjustable axes, time on the X axis to see "
-        "progress over releases, click-through to each device's specific source — lives in "
-        "the dashboard's Trends tab._"
-    )
-    parts.append("")
-    parts.append("| Device | Org | Type | FDA status | Metrics | Source |")
-    parts.append("|---|---|---|---|---|---|")
-    for d in trend_devices:
-        metrics_str = format_metrics(d.metrics, trend_metrics)
-        source = f"[{d.date_reported}]({d.source_url})" if d.source_url else (d.date_reported or "—")
-        parts.append(f"| {d.name} | {d.org} | {d.org_type} | {d.fda_status} | {metrics_str} | {source} |")
-    return "\n".join(parts)
-
-
-def _company_section(trend_companies) -> str:
-    if not trend_companies:
-        return ""
-    parts = ["| Company | Funding | Last round | Stock | Source |", "|---|---|---|---|---|"]
-    for c in trend_companies:
-        funding = f"${c.funding_total_usd:,.0f}" if c.funding_total_usd else "—"
-        round_str = f"{c.last_funding_round} ({c.last_funding_date})" if c.last_funding_round else "—"
-        stock = f"{c.stock_ticker}: ${c.stock_price:,.2f}" if c.stock_price else (c.stock_ticker or "—")
-        source = f"[link]({c.source_url})" if c.source_url else "—"
-        parts.append(f"| {c.name} | {funding} | {round_str} | {stock} | {source} |")
-    return "\n".join(parts)
-
-
 def build_report(
     industry_name: str,
     days_back: int,
-    arxiv_items: list[Item],
+    papers_items: list[Item],
     news_items: list[Item],
     blog_items: list[Item],
     conference_items: list[Item],
@@ -128,22 +161,30 @@ def build_report(
     personalized_items: list[Item],
     summarizer_cfg: dict,
     clip_items: list[Item] | None = None,
-    trend_devices: list | None = None,
-    trend_metrics: list[dict] | None = None,
-    trend_chart_paths: list | None = None,
-    trend_companies: list | None = None,
+    history: dict | None = None,
+    top_findings_min_novelty: int = 3,
+    top_findings_max_count: int = 5,
 ) -> tuple[str, str]:
-    """Returns (report_id, rendered_markdown)."""
+    """Returns (report_id, rendered_markdown). `history` (from
+    DB.accumulated_knowledge_stats()) is everything besseleth knows from
+    every past run, not just this one — used only for the closing 'Big
+    picture' section, so a fresh, independent report doesn't need any
+    other item from a previous report to render correctly.
+
+    report_id includes the time (not just the date) so two runs on the
+    same day — someone hits "Run now" twice, or pastes something new
+    right after a scheduled run — each get their own report file instead
+    of the second one silently overwriting the first."""
     clip_items = clip_items or []
+    history = history or {}
     now = datetime.now(timezone.utc)
-    report_id = now.strftime("%Y-%m-%d")
+    report_id = now.strftime("%Y-%m-%d-%H%M%S")
     date_range = f"{(now).strftime('%b %d, %Y')} (last {days_back} days)"
 
     # Bulleted, one sentence + a numbered citation per item — assigned in
     # code from the item's position, never trusted to an LLM citing many
     # items in one combined call (which is what was dropping links
     # entirely for some items). See summarize_items_numbered's docstring.
-    arxiv_summary = summarizer.summarize_items_numbered(arxiv_items, industry_name, summarizer_cfg)
     news_summary = summarizer.summarize_items_numbered(news_items, industry_name, summarizer_cfg)
     blog_summary = summarizer.summarize_section(blog_items, "Blogs", industry_name, summarizer_cfg)
 
@@ -167,38 +208,39 @@ def build_report(
         for item in conference_items
     ) or "_None on the watchlist this month._"
 
+    all_new_items = [
+        *papers_items,
+        *news_items,
+        *blog_items,
+        *conference_items,
+        *conference_news_items,
+        *event_items,
+        *social_items,
+        *linkedin_items,
+        *clip_items,
+    ]
+    context_summary = summarizer.summarize_context(all_new_items, history, industry_name, summarizer_cfg)
+    top_findings_lines = _top_findings_lines(all_new_items, top_findings_min_novelty, top_findings_max_count)
+
     context = {
         "industry": industry_name,
         "date_range": date_range,
+        "top_findings_lines": top_findings_lines,
         "personalized_lines": personalized_lines,
-        "arxiv_summary": arxiv_summary or "No new arXiv papers matched this week.",
+        "paper_lines": _paper_lines(papers_items),
         "news_summary": news_summary or "No notable news this week.",
         "blog_summary": blog_summary or "No notable blog posts this week.",
         "conference_lines": conference_lines,
         "conference_news_lines": _snippet_lines(conference_news_items) if conference_news_items else "",
         "event_lines": _snippet_lines(event_items),
         "social_lines": _snippet_lines(social_items),
-        "linkedin_lines": _snippet_lines(linkedin_items)
+        "linkedin_lines": _linkedin_lines(linkedin_items, summarizer_cfg)
         if linkedin_items
         else "_Nothing pasted this week. Use the dashboard's Paste tab, or `linkedin-add`._",
         "clip_lines": _snippet_lines(clip_items) if clip_items else "",
-        "trend_lines": _trend_section(trend_devices or [], trend_chart_paths or [], trend_metrics or []),
-        "company_lines": _company_section(trend_companies or []),
+        "context_summary": context_summary,
         "generated_at": now.strftime("%Y-%m-%d %H:%M UTC"),
-        "item_count": sum(
-            len(x)
-            for x in (
-                arxiv_items,
-                news_items,
-                blog_items,
-                conference_items,
-                conference_news_items,
-                event_items,
-                social_items,
-                linkedin_items,
-                clip_items,
-            )
-        ),
+        "item_count": len(all_new_items),
     }
     return report_id, _render_markdown(context)
 

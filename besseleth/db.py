@@ -3,9 +3,10 @@ structured "paper" fields (org, modality, therapeutic target, novelty)
 that besseleth/enrich.py fills in for the papers table."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -128,7 +129,18 @@ CREATE TABLE IF NOT EXISTS companies (
 # same auto-migration idiom as ENRICHMENT_COLUMNS, for the same reason:
 # a new metric shouldn't require anyone to re-copy an example file.
 DEVICE_COLUMNS: dict[str, str] = {}
-COMPANY_COLUMNS: dict[str, str] = {}
+COMPANY_COLUMNS: dict[str, str] = {
+    # ClinicalTrials.gov (clinicaltrials_scraper.py) — cumulative across
+    # every trial found with this org as sponsor, not just the latest one.
+    "clinical_trial_count": "INTEGER",
+    "clinical_trial_enrollment_total": "INTEGER",  # total enrolled patients, summed across those trials
+    "clinical_trials_checked_at": "TEXT",
+    # NIH RePORTER (grants_scraper.py) — cumulative award total across
+    # every grant found with this org as the recipient institution.
+    "nih_grant_count": "INTEGER",
+    "nih_grant_total_usd": "REAL",
+    "nih_grants_checked_at": "TEXT",
+}
 
 # Columns added after the initial release — migrated in with ALTER TABLE
 # (each guarded individually so an existing DB upgrades in place).
@@ -145,6 +157,8 @@ ENRICHMENT_COLUMNS = {
     "lon": "REAL",
     "enriched_at": "TEXT",             # ISO8601 once enrichment has run for this item (even if it found nothing)
     "matched_reason": "TEXT",          # "company" | "school" — why matched_contact matched (see personalize.py)
+    "authors": "TEXT",                 # comma-separated author names, scraped directly (papers.py/openalex_scraper.py) — not LLM-derived
+    "citation_count": "INTEGER",       # from OpenAlex, for ranking non-arXiv papers by impact — NULL for sources OpenAlex doesn't cover
 }
 
 
@@ -162,6 +176,7 @@ class Item:
     matched_reason: Optional[str] = None
     org: Optional[str] = None
     org_type: Optional[str] = None
+    org_description: Optional[str] = None
     modality: Optional[str] = None
     therapeutic_target: Optional[str] = None
     novelty_score: Optional[int] = None
@@ -169,6 +184,8 @@ class Item:
     location_text: Optional[str] = None
     lat: Optional[float] = None
     lon: Optional[float] = None
+    authors: Optional[str] = None
+    citation_count: Optional[int] = None
 
 
 class DB:
@@ -193,6 +210,14 @@ class DB:
         for col, sqltype in COMPANY_COLUMNS.items():
             if col not in existing:
                 self.conn.execute(f"ALTER TABLE companies ADD COLUMN {col} {sqltype}")
+
+        # arXiv preprints and OpenAlex-indexed published papers used to be
+        # two separate sources ("arxiv" vs "papers") — now one, since to a
+        # reader they're the same thing (research papers) via two feeds
+        # with different tradeoffs. Idempotent (matches zero rows after
+        # the first run on a given DB) so it's cheap to just run on every
+        # open rather than gating it behind a one-time flag.
+        self.conn.execute("UPDATE items SET source = 'papers' WHERE source = 'arxiv'")
 
     def close(self):
         self.conn.close()
@@ -222,6 +247,24 @@ class DB:
         self.set_meta("enrich_last_run_seconds", str(seconds))
         self.set_meta("enrich_last_run_at", datetime.now(timezone.utc).isoformat())
 
+    def enrichment_progress(self, sources: list[str]) -> tuple[int, int]:
+        """(enriched_count, total_count) across the given sources right
+        now — a live snapshot of the *current* DB, unlike get_enrich_stats'
+        all-time counter (which is a lifetime running total that never
+        goes down, even after a bulk delete/source-clear). This is scoped
+        to `sources` specifically (normally enrichment.sources) rather
+        than every item in the DB: linkedin/social/event/clip items are
+        never enrichment targets at all, so counting them as 'not yet
+        enriched' would understate progress on what's actually eligible."""
+        if not sources:
+            return 0, 0
+        placeholders = ",".join("?" for _ in sources)
+        total = self.conn.execute(f"SELECT COUNT(*) FROM items WHERE source IN ({placeholders})", sources).fetchone()[0]
+        enriched = self.conn.execute(
+            f"SELECT COUNT(*) FROM items WHERE source IN ({placeholders}) AND enriched_at IS NOT NULL", sources
+        ).fetchone()[0]
+        return enriched, total
+
     def get_enrich_stats(self) -> dict:
         return {
             "total_items": int(self.get_meta("enrich_total_items") or 0),
@@ -236,11 +279,27 @@ class DB:
         cur = self.conn.execute("SELECT 1 FROM items WHERE id = ?", (item.id,))
         if cur.fetchone():
             return False
+        # Papers-specific extra guard: arxiv_scraper and openalex_scraper
+        # each mint their own id (a different OpenAlex work, or an arXiv
+        # entry vs. its OpenAlex record, can land on the exact same
+        # landing-page URL — e.g. two OpenAlex records for the same
+        # Zenodo deposit, one per DOI version), so the id check above
+        # alone lets literal duplicates with different ids both in. A
+        # same-URL papers item already stored is always the same paper,
+        # so skip it rather than adding a second row with an identical
+        # (often broken/unhelpful, per Zenodo) link.
+        if item.source == "papers" and item.url:
+            cur = self.conn.execute(
+                "SELECT 1 FROM items WHERE source = 'papers' AND url = ?", (item.url,)
+            )
+            if cur.fetchone():
+                return False
         self.conn.execute(
             """INSERT INTO items
                (id, source, title, url, summary, published_at, fetched_at,
-                matched_keywords, matched_contact, matched_company, included_in_report)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+                matched_keywords, matched_contact, matched_company, included_in_report,
+                authors, citation_count)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)""",
             (
                 item.id,
                 item.source,
@@ -252,6 +311,8 @@ class DB:
                 ",".join(item.matched_keywords),
                 item.matched_contact,
                 item.matched_company,
+                item.authors,
+                item.citation_count,
             ),
         )
         self.conn.commit()
@@ -265,6 +326,19 @@ class DB:
         self.conn.commit()
         return cur.rowcount > 0
 
+    def delete_items_by_source(self, source: str) -> int:
+        """Removes every item currently stored for `source` outright —
+        for a bulk 'clear and re-pull' when a source's data quality has
+        gone bad (a stale keyword left noise across a lot of rows, say)
+        and deleting them one at a time via delete_item isn't practical.
+        A re-fetch afterward only brings back whatever's still inside the
+        source's normal days_back window (or a fresh backfill) — anything
+        older than that is gone for good, same as delete_item. Returns
+        how many rows were removed."""
+        cur = self.conn.execute("DELETE FROM items WHERE source = ?", (source,))
+        self.conn.commit()
+        return cur.rowcount
+
     def manual_items(self, sources: list[str], limit: int = 100) -> list[sqlite3.Row]:
         """Recently pasted items (linkedin/event/social/clip), newest
         first — for the dashboard's Paste tab list-with-delete view."""
@@ -273,10 +347,20 @@ class DB:
         q = f"SELECT * FROM items WHERE source IN ({placeholders}) ORDER BY fetched_at DESC LIMIT ?"
         return list(self.conn.execute(q, [*sources, limit]).fetchall())
 
-    def unreported_items(self, source: Optional[str] = None) -> list[sqlite3.Row]:
+    def items_in_window(self, days_back: int, source: Optional[str] = None) -> list[sqlite3.Row]:
+        """Every item published (or fetched, if it has no published date)
+        within the last `days_back` days — regardless of whether it's
+        already appeared in a past report. This is what the report is
+        built from: a fresh snapshot of "what's in the last N days" every
+        time it's generated, not a one-time consumable delta since the
+        last run — so re-running (e.g. while developing, or after
+        pasting something new) always reflects the current window as if
+        no report had ever run before, rather than skipping items an
+        earlier run already claimed."""
         self.conn.row_factory = sqlite3.Row
-        q = "SELECT * FROM items WHERE included_in_report IS NULL"
-        params: list[Any] = []
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).isoformat()
+        q = "SELECT * FROM items WHERE COALESCE(NULLIF(published_at, ''), fetched_at) >= ?"
+        params: list[Any] = [cutoff]
         if source:
             q += " AND source = ?"
             params.append(source)
@@ -292,15 +376,39 @@ class DB:
         )
         self.conn.commit()
 
-    def unenriched_items(self, sources: list[str], limit: int) -> list[sqlite3.Row]:
-        """Items in the given sources that enrich.py hasn't processed yet."""
+    def unenriched_items(
+        self, sources: list[str], limit: Optional[int], days_back: Optional[float] = None
+    ) -> list[sqlite3.Row]:
+        """Items in the given sources that enrich.py hasn't processed yet,
+        newest-published first. With `days_back` set, only considers items
+        published (or fetched, if unpublished-dated) within that window —
+        used for the default "Enrich now" (just the recent stuff you'd
+        normally care about, no count cap: pass limit=None). Leave
+        `days_back` unset and `limit` set for "Enrich everything" (the
+        whole backlog regardless of age, batched by `limit` per call)."""
         self.conn.row_factory = sqlite3.Row
         placeholders = ",".join("?" for _ in sources)
-        q = (
-            f"SELECT * FROM items WHERE source IN ({placeholders}) AND enriched_at IS NULL "
-            "ORDER BY published_at DESC LIMIT ?"
-        )
-        return list(self.conn.execute(q, [*sources, limit]).fetchall())
+        q = f"SELECT * FROM items WHERE source IN ({placeholders}) AND enriched_at IS NULL"
+        params: list[Any] = [*sources]
+        if days_back is not None:
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).isoformat()
+            q += " AND COALESCE(NULLIF(published_at, ''), fetched_at) >= ?"
+            params.append(cutoff)
+        q += " ORDER BY published_at DESC"
+        if limit is not None:
+            q += " LIMIT ?"
+            params.append(limit)
+        return list(self.conn.execute(q, params).fetchall())
+
+    def count_items(self, sources: list[str]) -> int:
+        """How many items exist in the given sources, period — used to
+        bound a force re-check "run until done" to one full pass over
+        everything currently stored, since that queue (oldest-checked-
+        first) never runs dry on its own the way a never-enriched queue
+        does."""
+        placeholders = ",".join("?" for _ in sources)
+        row = self.conn.execute(f"SELECT COUNT(*) FROM items WHERE source IN ({placeholders})", sources).fetchone()
+        return row[0] if row else 0
 
     def items_to_reenrich(self, sources: list[str], limit: int) -> list[sqlite3.Row]:
         """Every item in the given sources, oldest-enriched (or never
@@ -337,6 +445,7 @@ class DB:
                 id=r["id"], source=r["source"], title=r["title"], url=r["url"] or "",
                 summary=r["summary"] or "", published_at=r["published_at"] or "",
                 novelty_score=r["novelty_score"], novelty_rationale=r["novelty_rationale"],
+                org=r["org"], org_type=r["org_type"], org_description=r["org_description"],
             )
             for r in rows
         ]
@@ -348,19 +457,39 @@ class DB:
         )
         self.conn.commit()
 
-    def recent_items_for_context(self, source: str, keywords: list[str], exclude_id: str, limit: int = 5) -> list[sqlite3.Row]:
+    def sync_org(self, item_id: str, org: Optional[str], org_type: Optional[str], org_description: Optional[str]) -> None:
+        self.conn.execute(
+            "UPDATE items SET org = ?, org_type = ?, org_description = ? WHERE id = ?",
+            (org, org_type, org_description, item_id),
+        )
+        self.conn.commit()
+
+    def recent_items_for_context(self, sources: list[str], keywords: list[str], exclude_id: str, limit: int = 5) -> list[sqlite3.Row]:
         """A handful of other recent items sharing at least one keyword —
-        used as novelty-scoring context ('surprising compared to what?')."""
-        if not keywords:
+        used as novelty-scoring context ('surprising compared to what?').
+
+        Searches across ALL of `sources` (normally enrichment.sources —
+        papers/news/blog), not just the item's own source: a news article
+        announcing a result is exactly as "surprising compared to what?"
+        against a paper that already reported it three months ago as it
+        is against another news article. Restricting to same-source
+        alone (the original behavior) meant a news item never got
+        compared against the actual papers covering the same technique,
+        which is usually the more informative comparison — a journalist
+        writing up a result that's been in the literature for a year
+        should score low novelty, and same-source-only context couldn't
+        catch that."""
+        if not keywords or not sources:
             return []
         self.conn.row_factory = sqlite3.Row
+        source_placeholders = ",".join("?" for _ in sources)
         clauses = " OR ".join("matched_keywords LIKE ?" for _ in keywords)
         params = [f"%{kw}%" for kw in keywords]
         q = (
-            f"SELECT title, summary FROM items WHERE source = ? AND id != ? AND ({clauses}) "
+            f"SELECT title, summary, source FROM items WHERE source IN ({source_placeholders}) AND id != ? AND ({clauses}) "
             "ORDER BY published_at DESC LIMIT ?"
         )
-        return list(self.conn.execute(q, [source, exclude_id, *params, limit]).fetchall())
+        return list(self.conn.execute(q, [*sources, exclude_id, *params, limit]).fetchall())
 
     def save_enrichment(
         self,
@@ -404,6 +533,25 @@ class DB:
         rows = self.conn.execute("SELECT DISTINCT org FROM items WHERE org IS NOT NULL AND org != ''").fetchall()
         return [r[0] for r in rows]
 
+    def accumulated_knowledge_stats(self) -> dict:
+        """A snapshot of everything besseleth has accumulated across all
+        runs, ever — not just this week's items. Used to give the report's
+        closing 'big picture' section something to place new items
+        against (an org that's been quiet suddenly active again, a trend
+        that's been building for months, etc.)."""
+        total_items = self.conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        earliest = self.conn.execute(
+            "SELECT MIN(published_at) FROM items WHERE published_at IS NOT NULL AND published_at != ''"
+        ).fetchone()[0]
+        org_counts = self.org_item_counts()
+        top_orgs = sorted(org_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        return {
+            "total_items": total_items,
+            "total_orgs": len(org_counts),
+            "top_orgs": top_orgs,
+            "earliest_date": (earliest or "")[:10],
+        }
+
     def org_item_counts(self) -> dict[str, int]:
         """{org: item count} for every distinct org — used to pick which
         spelling/casing variant of a near-duplicate org name is the most-
@@ -421,6 +569,25 @@ class DB:
         row instead of them accumulating as separate Orgs-table entries.
         Returns how many rows were changed."""
         cur = self.conn.execute("UPDATE items SET org = ? WHERE org = ?", (new_org, old_org))
+        self.conn.commit()
+        return cur.rowcount
+
+    def items_with_org(self) -> list[sqlite3.Row]:
+        """(id, org, url) for every item with an org set — for a per-item
+        cleanup check that can't be expressed as a plain org-name-list
+        match (e.g. comparing an item's own org against its own url's
+        hostname), unlike clear_org_matches()/clear_org_matches_by_id()."""
+        self.conn.row_factory = sqlite3.Row
+        return list(self.conn.execute("SELECT id, org, url FROM items WHERE org IS NOT NULL").fetchall())
+
+    def clear_org_matches_by_id(self, ids: list[str]) -> int:
+        """Like clear_org_matches(), but for specific item ids rather
+        than an org-name list — for a cleanup check that's inherently
+        per-item (see items_with_org())."""
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        cur = self.conn.execute(f"UPDATE items SET org = NULL, org_description = NULL WHERE id IN ({placeholders})", ids)
         self.conn.commit()
         return cur.rowcount
 
@@ -477,6 +644,17 @@ class DB:
             """SELECT org FROM items WHERE org IS NOT NULL AND org != '' GROUP BY org HAVING MAX(lat) IS NULL"""
         ).fetchall()
         return [r[0] for r in rows]
+
+    def clear_negative_location_cache(self) -> int:
+        """Deletes every 'checked, nothing found' org_location_cache row
+        (a real hit, found=1, is untouched) — used once to recover from
+        misses that were cached while summarizer.backend wasn't 'ollama'
+        (tier 3 of the lookup never actually ran, so 'not found' wasn't a
+        real answer, just backend being off) rather than waiting out
+        each one's location_recheck_days cooldown individually."""
+        cur = self.conn.execute("DELETE FROM org_location_cache WHERE found = 0")
+        self.conn.commit()
+        return cur.rowcount
 
     def get_org_location_cache(self, org: str) -> sqlite3.Row | None:
         self.conn.row_factory = sqlite3.Row
@@ -652,6 +830,58 @@ class DB:
         self.conn.commit()
         return cur.rowcount
 
+    def delete_jobs_for_org(self, org: str) -> int:
+        """Removes every job posting AND the job-board cache entry for
+        `org` outright — for an org whose 'org' extraction turns out to
+        have been wrong (a bad LLM extraction cleared via
+        clear_org_matches, or the user rejecting one from the dashboard):
+        once `org` is gone from db.orgs(), its postings would otherwise
+        just sit here forever, since nothing else ever re-syncs or prunes
+        them for an org no longer in scope. Returns how many postings
+        were removed."""
+        cur = self.conn.execute("DELETE FROM job_postings WHERE org = ?", (org,))
+        self.conn.execute("DELETE FROM job_board_cache WHERE org = ?", (org,))
+        self.conn.commit()
+        return cur.rowcount
+
+    def active_job_counts_by_org(self) -> dict[str, int]:
+        """Currently-active (not marked removed) job posting count per
+        org — a free, always-fresh proxy for hiring momentum/company
+        growth, using data jobs_scraper already collects. Powers the
+        Trends tab's 'Active job postings' company metric, in place of
+        stock price/IPO date (almost never populated — most neurotech
+        companies are private) as a numeric signal that's actually
+        available for most tracked companies, not just the rare public
+        one."""
+        rows = self.conn.execute(
+            "SELECT org, COUNT(*) FROM job_postings WHERE removed_at IS NULL GROUP BY org"
+        ).fetchall()
+        return {org: count for org, count in rows}
+
+    def job_postings_added_by_org(self, days: int = 30) -> dict[str, int]:
+        """How many NEW postings each org's board has picked up in the
+        last `days` days — a velocity signal, distinct from
+        active_job_counts_by_org's snapshot: a company with 50 stagnant
+        postings and one that just added 8 this month look identical
+        under a raw count alone, but very different under this."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        rows = self.conn.execute(
+            "SELECT org, COUNT(*) FROM job_postings WHERE first_seen_at >= ? GROUP BY org", (cutoff,)
+        ).fetchall()
+        return {org: count for org, count in rows}
+
+    def publication_counts_by_org(self) -> dict[str, int]:
+        """How many 'papers' items besseleth has ever attributed to each
+        org — a free research-output signal derived entirely from data
+        already extracted during enrichment, no new scraping. Counts
+        every papers-source item with that org, arXiv preprint and
+        OpenAlex-indexed published paper alike (see pipeline.py — both
+        feed the same merged 'papers' source)."""
+        rows = self.conn.execute(
+            "SELECT org, COUNT(*) FROM items WHERE source = 'papers' AND org IS NOT NULL AND org != '' GROUP BY org"
+        ).fetchall()
+        return {org: count for org, count in rows}
+
     def job_postings(self, active_only: bool = False) -> list[sqlite3.Row]:
         self.conn.row_factory = sqlite3.Row
         q = "SELECT * FROM job_postings"
@@ -659,6 +889,50 @@ class DB:
             q += " WHERE removed_at IS NULL"
         q += " ORDER BY first_seen_at DESC"
         return list(self.conn.execute(q).fetchall())
+
+    def recently_enriched(self, limit: int = 50) -> list[sqlite3.Row]:
+        """The most recently enriched items, newest-enriched first —
+        powers the dashboard's Enrich log tab (troubleshooting: what
+        actually happened on the last enrich run, not just a count)."""
+        self.conn.row_factory = sqlite3.Row
+        return list(
+            self.conn.execute(
+                "SELECT * FROM items WHERE enriched_at IS NOT NULL ORDER BY enriched_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        )
+
+    def best_known_metric_values(self, metric_keys: list[str]) -> dict[str, dict]:
+        """For each numeric trend metric key, the best (highest) value
+        besseleth has ever recorded for it across every device — the
+        actual accumulated 'state of the art' this instance has observed,
+        used as grounding context so novelty scoring can judge a reported
+        number against a real prior benchmark instead of the LLM's own
+        (often wrong, un-updateable) sense of what's impressive for this
+        specific numeric field. Returns {key: {"value": float, "device":
+        str, "org": str}} — keys with no recorded value at all are
+        omitted. Computed in Python over metrics_json rather than in SQL:
+        the devices table is small (dozens to low hundreds of rows even
+        with heavy use), and a value is only ever a JSON blob here, not a
+        column SQLite could index/aggregate directly anyway."""
+        if not metric_keys:
+            return {}
+        self.conn.row_factory = sqlite3.Row
+        rows = self.conn.execute("SELECT name, org, metrics_json FROM devices").fetchall()
+        best: dict[str, dict] = {}
+        for row in rows:
+            if not row["metrics_json"]:
+                continue
+            try:
+                metrics = json.loads(row["metrics_json"])
+            except ValueError:
+                continue
+            for key in metric_keys:
+                value = metrics.get(key)
+                if not isinstance(value, (int, float)):
+                    continue
+                if key not in best or value > best[key]["value"]:
+                    best[key] = {"value": value, "device": row["name"], "org": row["org"]}
+        return best
 
     def papers(self, sources: list[str]) -> list[sqlite3.Row]:
         """All items in the given sources, enriched or not — the papers
@@ -674,6 +948,15 @@ class DB:
     def devices(self) -> list[sqlite3.Row]:
         self.conn.row_factory = sqlite3.Row
         return list(self.conn.execute("SELECT * FROM devices ORDER BY date_reported, id").fetchall())
+
+    def delete_device(self, device_id: int) -> bool:
+        """Removes one device row outright — for a bad extraction (a unit
+        conversion error, a hallucinated metric) that isn't the generic
+        'name == org' pattern delete_bogus_devices already sweeps
+        automatically. Returns True if a row was actually removed."""
+        cur = self.conn.execute("DELETE FROM devices WHERE id = ?", (device_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
 
     def delete_bogus_devices(self) -> int:
         """Removes device rows whose name is just the org's own name
@@ -731,6 +1014,28 @@ class DB:
         self.conn.row_factory = sqlite3.Row
         return list(self.conn.execute("SELECT * FROM companies ORDER BY name").fetchall())
 
+    def external_metrics_by_org(self) -> dict[str, dict]:
+        """clinical_trial_*/nih_grant_* columns keyed by org name — these
+        were added to `companies` via COMPANY_COLUMNS after the Company
+        dataclass (trends/store.py) was already fixed-shape, so
+        load_companies()'s normal path doesn't surface them; read
+        directly here instead of widening that dataclass for two
+        scrapers' worth of fields."""
+        self.conn.row_factory = sqlite3.Row
+        rows = self.conn.execute(
+            "SELECT name, clinical_trial_count, clinical_trial_enrollment_total, "
+            "nih_grant_count, nih_grant_total_usd FROM companies"
+        ).fetchall()
+        return {
+            row["name"]: {
+                "clinical_trial_count": row["clinical_trial_count"],
+                "clinical_trial_enrollment_total": row["clinical_trial_enrollment_total"],
+                "nih_grant_count": row["nih_grant_count"],
+                "nih_grant_total_usd": row["nih_grant_total_usd"],
+            }
+            for row in rows
+        }
+
     def get_company(self, name: str) -> sqlite3.Row | None:
         self.conn.row_factory = sqlite3.Row
         return self.conn.execute("SELECT * FROM companies WHERE lower(name) = lower(?)", (name,)).fetchone()
@@ -749,6 +1054,50 @@ class DB:
         )
         self.conn.commit()
         return True
+
+    def set_clinical_trial_stats(self, org: str, count: int, enrollment_total: int) -> None:
+        """Refreshes an org's ClinicalTrials.gov numbers — unlike
+        add_company's never-overwrite semantics (right for a one-off fact
+        like a funding round, where two news reports could disagree and
+        the first one shouldn't get silently clobbered), this is a live
+        external count that's meant to be replaced wholesale on every
+        re-check: there's one true current answer for 'how many trials/
+        patients has this sponsor got right now,' not a set of
+        potentially-conflicting historical reports to preserve. Inserts a
+        bare row if the org isn't in `companies` yet."""
+        now = datetime.now(timezone.utc).isoformat()
+        if not self.add_company(
+            name=org, stock_ticker="", stock_price=None, stock_price_updated_at="",
+            funding_total_usd=None, last_funding_round="", last_funding_date="",
+            ipo_date="", stock_exchange="", is_public=0, source_url="",
+            notes="", auto_extracted=1,
+            clinical_trial_count=count, clinical_trial_enrollment_total=enrollment_total,
+            clinical_trials_checked_at=now,
+        ):
+            self.conn.execute(
+                "UPDATE companies SET clinical_trial_count = ?, clinical_trial_enrollment_total = ?, "
+                "clinical_trials_checked_at = ? WHERE lower(name) = lower(?)",
+                (count, enrollment_total, now, org),
+            )
+            self.conn.commit()
+
+    def set_nih_grant_stats(self, org: str, count: int, total_usd: float) -> None:
+        """Same refresh-wholesale semantics as set_clinical_trial_stats,
+        for NIH RePORTER grant data."""
+        now = datetime.now(timezone.utc).isoformat()
+        if not self.add_company(
+            name=org, stock_ticker="", stock_price=None, stock_price_updated_at="",
+            funding_total_usd=None, last_funding_round="", last_funding_date="",
+            ipo_date="", stock_exchange="", is_public=0, source_url="",
+            notes="", auto_extracted=1,
+            nih_grant_count=count, nih_grant_total_usd=total_usd, nih_grants_checked_at=now,
+        ):
+            self.conn.execute(
+                "UPDATE companies SET nih_grant_count = ?, nih_grant_total_usd = ?, nih_grants_checked_at = ? "
+                "WHERE lower(name) = lower(?)",
+                (count, total_usd, now, org),
+            )
+            self.conn.commit()
 
     def set_company_ipo(self, name: str, ipo_date: str, stock_exchange: str) -> None:
         """Records that a company went public — inserts a bare row if
@@ -777,6 +1126,24 @@ class DB:
     def delete_company(self, name: str) -> None:
         self.conn.execute("DELETE FROM companies WHERE lower(name) = lower(?)", (name,))
         self.conn.commit()
+
+    def clear_auto_extracted_trends(self) -> tuple[int, int]:
+        """Wipes every AUTO-EXTRACTED devices/companies row (never a
+        manually-added or manually-edited one) — for rebuilding the
+        Trends tab from scratch alongside a full re-enrich pass. Exists
+        because add_company/auto_upsert_device never overwrite an
+        existing row (deliberately, so a hand-correction never gets
+        silently clobbered by a later, possibly-wrong re-extraction) —
+        which also means a bad value from before an extraction-quality
+        fix (a wrong unit conversion, say) sticks around FOREVER even
+        after re-enrichment, since there's no matching row to update, only
+        one to skip. Clearing first is what turns 're-check everything'
+        into an actual do-over instead of leaving every already-wrong row
+        in place. Returns (devices_removed, companies_removed)."""
+        dev_cur = self.conn.execute("DELETE FROM devices WHERE auto_extracted = 1")
+        co_cur = self.conn.execute("DELETE FROM companies WHERE auto_extracted = 1")
+        self.conn.commit()
+        return dev_cur.rowcount, co_cur.rowcount
 
     def merge_company(self, keep_name: str, drop_name: str) -> None:
         """Folds `drop_name` into `keep_name` — fills any field that's

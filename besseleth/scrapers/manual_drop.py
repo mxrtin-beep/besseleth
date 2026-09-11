@@ -125,16 +125,19 @@ _DOMAIN_SOURCE_MAP = [
     (("bsky.app", "twitter.com", "x.com"), "social"),
     (("lu.ma", "eventbrite.com", "meetup.com"), "event"),
     (("substack.com",), "blog"),
-    (("arxiv.org",), "arxiv"),
+    (("arxiv.org",), "papers"),
 ]
 
 # Human-facing labels for the source values above, used anywhere the UI
-# shows "detected as: ...".
+# shows "detected as: ...". "arxiv" kept as an alias — harmless dead
+# entry once DB._migrate()'s one-time relabel has run, but safe to leave
+# for a row that somehow still has the old value.
 SOURCE_LABELS = {
     "linkedin": "LinkedIn",
     "social": "Social (Bluesky/X)",
     "event": "Event",
     "blog": "Blog",
+    "papers": "Papers",
     "arxiv": "arXiv",
     "news": "News",
     "clip": "Clipped (unrecognized source)",

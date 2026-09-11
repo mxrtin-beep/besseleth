@@ -94,6 +94,16 @@ class Config:
 
         return load_interests(self.interests_path)
 
+    @property
+    def labs_path(self) -> Path:
+        return Path(self.raw.get("labs_path", "labs.yaml"))
+
+    @property
+    def labs(self) -> list[dict]:
+        from .labs_store import load_labs
+
+        return load_labs(self.labs_path)
+
     def source(self, name: str) -> dict:
         return self.raw.get("sources", {}).get(name, {}) or {}
 

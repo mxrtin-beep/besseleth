@@ -30,8 +30,25 @@ JOB_HINT_RE = re.compile(
 _SOCIAL_PROFILE_TITLE_RE = re.compile(r"\(@[\w.]+\)\s*/\s*(x|twitter)\s*$", re.IGNORECASE)
 
 
+# A workplace/school name that's JUST one of these words (not part of a
+# longer name — "International Neuromodulation Society" is fine, bare
+# "International" is not) is almost certainly bad/truncated data, not a
+# real, specific company — word-boundary matching a single common English
+# word like this against arbitrary article text produces exactly the
+# "why did this match" false positives it looks like on the surface (a
+# paper mentioning "an international collaboration," a journal with
+# "International" in its name, etc.). Skipped rather than matched, same
+# spirit as enrich.py rejecting a bare university/media-outlet name as an
+# "org" — a company name this generic isn't specific enough to act on.
+_TOO_GENERIC_WORKPLACE_NAMES = {
+    "international", "global", "national", "group", "holdings", "partners",
+    "solutions", "systems", "ventures", "enterprises", "industries", "corp",
+    "inc", "llc", "ltd", "company", "the", "worldwide", "consulting",
+}
+
+
 def _mentioned(text: str, phrase: str) -> bool:
-    if not phrase:
+    if not phrase or phrase.strip().lower() in _TOO_GENERIC_WORKPLACE_NAMES:
         return False
     return re.search(rf"\b{re.escape(phrase)}\b", text, re.IGNORECASE) is not None
 

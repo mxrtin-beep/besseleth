@@ -9,7 +9,9 @@ report cadence:
     (default: every 6 hours).
   - `report_cron` — a standard 5-field cron expression for when to render
     the weekly report from whatever's accumulated since the last one
-    (default: Monday 8am — `0 8 * * MON`).
+    (default: Monday 4am — `0 4 * * MON`). Interpreted in `schedule.timezone`
+    if set, otherwise in the host's local timezone — so the default means
+    4am local time, overnight, rather than 4am UTC.
 
 Status (last run time, last error, next scheduled run) is kept in a small
 in-memory object so besseleth.web.app can show it; it's not persisted, so
@@ -22,6 +24,7 @@ import threading
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -43,11 +46,33 @@ class SchedulerStatus:
     last_error: str | None = None
     next_fetch_at: str | None = None
     next_report_at: str | None = None
+    # A very basic progress indicator for whatever run_now/fetch/enrich
+    # is currently doing — a short label (e.g. "Enriching 45/230 items",
+    # "Fetching news...") plus current/total when a real fraction is
+    # known (None/None for a step that doesn't have one, like a single
+    # fetch source — the frontend just shows the label alone then).
+    # Cleared (all None) once nothing is running. In-memory only, same
+    # as the rest of this object — a dashboard reload while something's
+    # running just starts polling fresh, nothing is lost.
+    progress_label: str | None = None
+    progress_current: int | None = None
+    progress_total: int | None = None
+    # Set once a background /api/enrich run finishes, so the dashboard can
+    # show the result after polling detects running_now went back to
+    # false (the old synchronous endpoint returned this directly; now it
+    # has to be picked up on the next status poll instead).
+    last_enrich_result: dict | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def as_dict(self) -> dict:
         with self._lock:
             return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
+
+    def set_progress(self, label: str | None, current: int | None = None, total: int | None = None):
+        with self._lock:
+            self.progress_label = label
+            self.progress_current = current
+            self.progress_total = total
 
 
 def _run_fetch(config: Config, status: SchedulerStatus):
@@ -56,12 +81,11 @@ def _run_fetch(config: Config, status: SchedulerStatus):
     try:
         db = DB(config.db_path)
         try:
-            results = fetch_all(config, db)
-            fetch_finished_at = datetime.now(timezone.utc).isoformat()
-            # Persisted (unlike SchedulerStatus, which is in-memory only)
-            # so a restart can tell how recently this ran — see
-            # _initial_fetch_delay() below.
-            db.set_meta("last_fetch_at", fetch_finished_at)
+            results = fetch_all(config, db, progress_cb=status.set_progress)
+            # fetch_all() itself persists last_fetch_at now (so cli fetch
+            # updates it too, not just this scheduled/Run-now path) —
+            # read it back rather than writing it a second time here.
+            fetch_finished_at = db.get_meta("last_fetch_at")
         finally:
             db.close()
         with status._lock:
@@ -84,12 +108,19 @@ def _run_report(config: Config, status: SchedulerStatus):
     try:
         db = DB(config.db_path)
         try:
-            path = generate_weekly_report(config, db)
+            path = generate_weekly_report(config, db, progress_cb=status.set_progress)
+            # generate_weekly_report() persists last_report_at itself now,
+            # only when a report is actually produced (not on its "nothing
+            # new" early return) — read it back rather than stamping "now"
+            # unconditionally, so this reflects the last real report, not
+            # the last time this job merely ran and found nothing to do.
+            last_report_at = db.get_meta("last_report_at")
         finally:
             db.close()
         with status._lock:
-            status.last_report_at = datetime.now(timezone.utc).isoformat()
-            status.last_report_path = path
+            status.last_report_at = last_report_at
+            if path:
+                status.last_report_path = path
             status.last_error = None
     except Exception as e:
         print(f"[scheduler] report job failed: {e}")
@@ -130,6 +161,18 @@ def _initial_fetch_delay(config: Config, fetch_hours: float) -> datetime:
     return due_at if due_at > now else now
 
 
+def _resolve_timezone(schedule_cfg: dict):
+    """`schedule.timezone` names an IANA zone (e.g. "America/Los_Angeles").
+    Left unset, we fall back to whatever the host's local timezone is
+    (rather than UTC) so a plain time like `report_cron: "0 4 * * MON"`
+    means 4am where besseleth is actually running."""
+    tz_name = schedule_cfg.get("timezone")
+    if tz_name:
+        return ZoneInfo(tz_name)
+    local_tz = datetime.now().astimezone().tzinfo
+    return local_tz or timezone.utc
+
+
 def start_scheduler(config: Config) -> tuple[BackgroundScheduler | None, SchedulerStatus]:
     """Starts the background jobs per `schedule` in config.yaml. Returns
     (scheduler_or_None, status) — scheduler is None if schedule.enabled is
@@ -143,15 +186,16 @@ def start_scheduler(config: Config) -> tuple[BackgroundScheduler | None, Schedul
         return None, status
 
     fetch_hours = schedule_cfg.get("fetch_interval_hours", 6)
-    report_cron = schedule_cfg.get("report_cron", "0 8 * * MON")
+    report_cron = schedule_cfg.get("report_cron", "0 4 * * MON")
+    tz = _resolve_timezone(schedule_cfg)
 
-    scheduler = BackgroundScheduler(timezone="UTC")
+    scheduler = BackgroundScheduler(timezone=tz)
     first_fetch_at = _initial_fetch_delay(config, fetch_hours)
     fetch_job = scheduler.add_job(
         _run_fetch, IntervalTrigger(hours=fetch_hours), args=[config, status], id="fetch", next_run_time=first_fetch_at
     )
     report_job = scheduler.add_job(
-        _run_report, CronTrigger.from_crontab(report_cron), args=[config, status], id="report"
+        _run_report, CronTrigger.from_crontab(report_cron, timezone=tz), args=[config, status], id="report"
     )
     scheduler.start()
 
@@ -164,7 +208,7 @@ def start_scheduler(config: Config) -> tuple[BackgroundScheduler | None, Schedul
     scheduler.add_listener(lambda event: _sync_next_runs())
 
     print(
-        f"[scheduler] Started: fetch every {fetch_hours}h, report on cron '{report_cron}' "
+        f"[scheduler] Started: fetch every {fetch_hours}h, report on cron '{report_cron}' ({tz}) "
         f"(next fetch {status.next_fetch_at}, next report {status.next_report_at})."
     )
     return scheduler, status
