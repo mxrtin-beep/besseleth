@@ -112,7 +112,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         path = reports_dir / f"report-{report_id}.md"
         if not path.exists():
             abort(404)
-        html = md.markdown(path.read_text(), extensions=["tables"])
+        html = md.markdown(path.read_text(encoding="utf-8"), extensions=["tables"])
         return jsonify({"report_id": report_id, "html": html})
 
     @app.delete("/api/report/<report_id>")

@@ -28,7 +28,7 @@ _last_request_at = 0.0
 def _load_cache(path: Path) -> dict:
     if path.exists():
         try:
-            return json.loads(path.read_text())
+            return json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return {}
     return {}
@@ -36,7 +36,7 @@ def _load_cache(path: Path) -> dict:
 
 def _save_cache(path: Path, cache: dict):
     try:
-        path.write_text(json.dumps(cache, indent=2))
+        path.write_text(json.dumps(cache, indent=2), encoding="utf-8")
     except OSError as e:
         print(f"[geocode] failed to save cache: {e}")
 

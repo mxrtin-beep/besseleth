@@ -130,7 +130,7 @@ def load_config(path: str | Path | None = None) -> Config:
             f"Config file not found at {p}. Copy {example} to {p} and edit it "
             f"for your industry, contacts, and sources."
         )
-    with open(p, "r") as f:
+    with open(p, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
     return Config(raw=raw, path=p)
 
@@ -224,12 +224,12 @@ def update_summarizer_settings(config: "Config", **fields: str) -> None:
     so a hand-written config.yaml's comments and formatting survive.
     Also updates `config.raw` in memory so the change takes effect
     immediately, without restarting the process."""
-    text = config.path.read_text()
+    text = config.path.read_text(encoding="utf-8")
     for key, value in fields.items():
         if value is None:
             continue
         text = _set_scalar_in_block(text, "summarizer", key, json.dumps(value))
-    config.path.write_text(text)
+    config.path.write_text(text, encoding="utf-8")
     config.raw.setdefault("summarizer", {}).update({k: v for k, v in fields.items() if v is not None})
 
 
@@ -244,7 +244,7 @@ def update_schedule_settings(
     re-armed with the new interval/cron, which the caller (the
     /api/settings/schedule route) does via SchedulerStatus/reschedule
     rather than this function, which only touches config."""
-    text = config.path.read_text()
+    text = config.path.read_text(encoding="utf-8")
     if fetch_interval_hours is not None:
         text = _set_scalar_in_block(text, "schedule", "fetch_interval_hours", str(fetch_interval_hours))
     if report_cron:
@@ -254,7 +254,7 @@ def update_schedule_settings(
         # than an empty string, since that's what config.raw.get(...) or
         # an unset key both already mean throughout scheduler.py.
         text = _set_scalar_in_block(text, "schedule", "timezone", json.dumps(timezone) if timezone else "null")
-    config.path.write_text(text)
+    config.path.write_text(text, encoding="utf-8")
     sched = config.raw.setdefault("schedule", {})
     if fetch_interval_hours is not None:
         sched["fetch_interval_hours"] = fetch_interval_hours
@@ -269,12 +269,12 @@ def update_industry_settings(config: "Config", name: str | None = None, keywords
     and updates config.raw in memory — takes effect on the next
     fetch/enrich pass, which all read config fresh rather than caching
     these at startup."""
-    text = config.path.read_text()
+    text = config.path.read_text(encoding="utf-8")
     if name:
         text = _set_scalar_in_block(text, "industry", "name", json.dumps(name))
     if keywords is not None:
         text = _set_list_in_block(text, "industry", "keywords", keywords)
-    config.path.write_text(text)
+    config.path.write_text(text, encoding="utf-8")
     industry = config.raw.setdefault("industry", {})
     if name:
         industry["name"] = name

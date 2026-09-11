@@ -249,7 +249,7 @@ def save_report(markdown: str, report_id: str, output_dir: str) -> Path:
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     path = out / f"report-{report_id}.md"
-    path.write_text(markdown)
+    path.write_text(markdown, encoding="utf-8")
     return path
 
 

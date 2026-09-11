@@ -24,12 +24,12 @@ def load_interests(path: str | Path = "interests.yaml") -> list[str]:
     p = Path(path)
     if not p.exists():
         return []
-    with open(p) as f:
+    with open(p, encoding="utf-8") as f:
         raw = yaml.safe_load(f) or []
     return [s.strip() for s in raw if isinstance(s, str) and s.strip()]
 
 
 def save_interests(interests: list[str], path: str | Path = "interests.yaml") -> None:
     cleaned = [s.strip() for s in interests if isinstance(s, str) and s.strip()]
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(cleaned, f, sort_keys=False)
