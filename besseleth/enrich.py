@@ -44,6 +44,7 @@ from urllib.parse import urlparse
 import requests
 
 from . import web_lookup
+from .cancel import FetchCancelled, check_cancelled
 from .config import Config, env
 from .db import DB
 from .feeds_store import load_feeds
@@ -1337,13 +1338,15 @@ def _sync_duplicate_orgs(config: Config, db: DB) -> tuple[int, int]:
 
 def enrich_items_detailed(
     config: Config, db: DB, force: bool = False, run_until_done: bool = False, background: bool = False,
-    progress_cb=None,
+    progress_cb=None, cancel_event=None,
 ) -> dict:
     """Returns {"processed": int, "message": str, "backend": str} — the
     message always explains a 0, so 'nothing happened' is never silent:
     enrichment disabled in config, nothing left to enrich (already
     caught up), no LLM configured (marked unknown instead), or Ollama
-    unreachable (left pending — will retry once it's back).
+    unreachable (left pending — will retry once it's back), or
+    cancelled (see cancel.py — checked once per item, between LLM calls;
+    whatever was already enriched in this run stays enriched).
 
     Modes:
       - default, interactive (force=False, run_until_done=False,
@@ -1589,56 +1592,64 @@ def enrich_items_detailed(
     # backlog size isn't known until it runs dry — so the bar undershoots a
     # bit there rather than promising a total it can't back up.
     progress_total = force_pool_size if force_pool_size is not None else len(first_rows)
-    while rows:
-        total_attempted += len(rows)
-        batch_processed = 0
-        for i, row in enumerate(rows):
-            if progress_cb:
-                progress_cb(f"Enriching item {total_attempted - len(rows) + i + 1}", total_attempted - len(rows) + i + 1, progress_total)
-            item_start = time.time()
-            try:
-                if _enrich_one(row, db, config, summarizer_cfg):
-                    total_processed += 1
-                    batch_processed += 1
-            except Exception as e:
-                print(f"[enrich] Failed on item {row['id']}: {e}")
-            work_seconds += time.time() - item_start
-            # Gives the CPU a breather between LLM calls instead of hammering
-            # it back-to-back for the whole batch — set enrichment.pause_seconds
-            # in config.yaml if enrich runs are making the machine unusable.
-            # Skipped after the last item so it doesn't delay returning.
-            if pause_seconds and i < len(rows) - 1:
-                time.sleep(pause_seconds)
+    cancelled = False
+    try:
+        while rows:
+            total_attempted += len(rows)
+            batch_processed = 0
+            for i, row in enumerate(rows):
+                check_cancelled(cancel_event)  # between items — propagates up; see the except below
+                if progress_cb:
+                    progress_cb(f"Enriching item {total_attempted - len(rows) + i + 1}", total_attempted - len(rows) + i + 1, progress_total)
+                item_start = time.time()
+                try:
+                    if _enrich_one(row, db, config, summarizer_cfg):
+                        total_processed += 1
+                        batch_processed += 1
+                except Exception as e:
+                    print(f"[enrich] Failed on item {row['id']}: {e}")
+                work_seconds += time.time() - item_start
+                # Gives the CPU a breather between LLM calls instead of hammering
+                # it back-to-back for the whole batch — set enrichment.pause_seconds
+                # in config.yaml if enrich runs are making the machine unusable.
+                # Skipped after the last item so it doesn't delay returning.
+                if pause_seconds and i < len(rows) - 1:
+                    time.sleep(pause_seconds)
 
-        if not keep_going:
-            break
-        if not batch_processed:
-            # Nothing in this batch actually got enriched (Ollama up, but
-            # every item errored/timed out) — the next batch would just
-            # hand back this same stuck item(s), so stop instead of
-            # spinning. Whatever succeeded elsewhere is still kept.
-            print(f"[enrich] Stopping: {len(rows)} item(s) in the last batch made no progress (see errors above).")
-            break
-        if force_pool_size is not None and total_attempted >= force_pool_size:
-            print(f"[enrich] Stopping: completed one full pass over all {force_pool_size} item(s) in scope.")
-            break
-        rows = db.items_to_reenrich(sources, max_items) if force else db.unenriched_items(sources, max_items)
-        if rows and force_pool_size is None:
-            # Growing backlog (plain run_until_done) — extend the estimate
-            # rather than let progress "overshoot" past a too-small total.
-            progress_total = total_attempted + len(rows)
-        if rows:
-            print(f"[enrich] Batch done ({total_processed} so far) — {len(rows)}+ item(s) left, continuing...")
-            ok, status_msg = llm_status(summarizer_cfg)
-            if not ok:
-                print(f"[enrich] Stopping: {status_msg}")
+            if not keep_going:
                 break
+            if not batch_processed:
+                # Nothing in this batch actually got enriched (Ollama up, but
+                # every item errored/timed out) — the next batch would just
+                # hand back this same stuck item(s), so stop instead of
+                # spinning. Whatever succeeded elsewhere is still kept.
+                print(f"[enrich] Stopping: {len(rows)} item(s) in the last batch made no progress (see errors above).")
+                break
+            if force_pool_size is not None and total_attempted >= force_pool_size:
+                print(f"[enrich] Stopping: completed one full pass over all {force_pool_size} item(s) in scope.")
+                break
+            rows = db.items_to_reenrich(sources, max_items) if force else db.unenriched_items(sources, max_items)
+            if rows and force_pool_size is None:
+                # Growing backlog (plain run_until_done) — extend the estimate
+                # rather than let progress "overshoot" past a too-small total.
+                progress_total = total_attempted + len(rows)
+            if rows:
+                print(f"[enrich] Batch done ({total_processed} so far) — {len(rows)}+ item(s) left, continuing...")
+                ok, status_msg = llm_status(summarizer_cfg)
+                if not ok:
+                    print(f"[enrich] Stopping: {status_msg}")
+                    break
+    except FetchCancelled:
+        cancelled = True
+        print(f"[enrich] Cancelled — {total_processed}/{total_attempted} item(s) enriched before stopping.")
 
     if total_processed:
         db.record_enrich_run(total_processed, work_seconds)
     stats = db.get_enrich_stats()
 
-    if total_processed < total_attempted:
+    if cancelled:
+        message = f"Cancelled — enriched {total_processed}/{total_attempted} item(s) before stopping."
+    elif total_processed < total_attempted:
         message = f"Enriched {total_processed}/{total_attempted} — the rest failed mid-call and will retry next run (see server log)."
     else:
         message = f"Enriched {total_processed} item(s)."
@@ -1652,12 +1663,22 @@ def enrich_items_detailed(
         "backend": backend,
         "elapsed_seconds": work_seconds,
         "stats": stats,
+        "cancelled": cancelled,
     }
 
 
-def enrich_items(config: Config, db: DB) -> int:
+def enrich_items(config: Config, db: DB, cancel_event=None) -> int:
     """Same as enrich_items_detailed(background=True), returning just the
     count — kept for existing callers (the post-fetch pipeline step, run
     unattended after every fetch, so stays capped rather than picking up
-    the interactive default's uncapped day window)."""
-    return enrich_items_detailed(config, db, background=True)["processed"]
+    the interactive default's uncapped day window).
+
+    enrich_items_detailed() catches its own FetchCancelled internally (so
+    the standalone /api/enrich route gets a clean dict back, not an
+    exception) — re-raised here so fetch_all's caller still sees it and
+    stops the rest of the pipeline (jobs sync, etc.) too, same as a
+    cancel during any other phase of a fetch."""
+    result = enrich_items_detailed(config, db, background=True, cancel_event=cancel_event)
+    if result.get("cancelled"):
+        raise FetchCancelled()
+    return result["processed"]

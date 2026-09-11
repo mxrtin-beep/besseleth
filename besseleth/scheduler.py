@@ -138,12 +138,13 @@ def _run_fetch(config: Config, status: SchedulerStatus):
 
 
 def _run_report(config: Config, status: SchedulerStatus):
+    status.clear_cancel()  # only a real "own it" entry point (scheduled report, or via run_now below) clears it
     with status._lock:
         status.running_now = True
     try:
         db = DB(config.db_path)
         try:
-            path = generate_weekly_report(config, db, progress_cb=status.set_progress)
+            path = generate_weekly_report(config, db, progress_cb=status.set_progress, cancel_event=status.cancel_event)
             # generate_weekly_report() persists last_report_at itself now,
             # only when a report is actually produced (not on its "nothing
             # new" early return) — read it back rather than stamping "now"
@@ -157,12 +158,17 @@ def _run_report(config: Config, status: SchedulerStatus):
             if path:
                 status.last_report_path = path
             status.last_error = None
+    except FetchCancelled:
+        print("[scheduler] report cancelled.")
+        with status._lock:
+            status.last_error = "Report generation cancelled."
     except Exception as e:
         print(f"[scheduler] report job failed: {e}")
         traceback.print_exc()
         with status._lock:
             status.last_error = f"report: {e}"
     finally:
+        status.clear_cancel()
         with status._lock:
             status.running_now = False
 

@@ -179,7 +179,7 @@ def fetch_all(
     print("[pipeline] Enriching papers/news/blog items (org, modality, therapeutic target, novelty)...")
     if progress_cb:
         progress_cb("Enriching newly-fetched items...", None, None)
-    enrich_items(config, db)
+    enrich_items(config, db, cancel_event=cancel_event)
 
     # Runs after enrichment, not before: it needs the orgs enrichment
     # just extracted (db.orgs()) to know who to look up job boards for.
@@ -226,7 +226,7 @@ def _dedupe_and_store(items: list[Item], db: DB) -> list[Item]:
     return new_items
 
 
-def generate_weekly_report(config: Config, db: DB, progress_cb=None) -> str:
+def generate_weekly_report(config: Config, db: DB, progress_cb=None, cancel_event=None) -> str:
     """Builds the report from every item in the last `days_back` days
     (config: `news.days_back`, default 8) — a fresh snapshot of "what's in
     this window right now," recomputed from scratch every time. It does
@@ -235,7 +235,15 @@ def generate_weekly_report(config: Config, db: DB, progress_cb=None) -> str:
     always looks exactly as if no report had ever run before, and never
     skips an item just because an earlier run already showed it. Each run
     still gets its own timestamped file, so re-running never overwrites an
-    earlier report. Returns the saved file path."""
+    earlier report. Returns the saved file path.
+
+    cancel_event, if given, is checked once before the (several) LLM
+    summarizer calls inside build_report start — report generation is
+    normally quick enough (a handful of section summaries, not a
+    paginated fetch) that one checkpoint here, rather than threading
+    cancellation through every summarizer call, covers the case that
+    actually matters: stopping before those calls begin at all."""
+    check_cancelled(cancel_event)
     if progress_cb:
         progress_cb("Building report...", None, None)
     days_back = config.source("news").get("days_back", 8)

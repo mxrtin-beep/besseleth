@@ -35,6 +35,7 @@ from ..contacts_store import Contact, add_contact, import_linkedin_csv, load_con
 from ..db import DB
 from ..feeds_store import add_feed, load_feeds, remove_feed
 from ..interests_store import load_interests, save_interests
+from ..cancel import FetchCancelled
 from ..pipeline import SOURCES as ALL_ITEM_SOURCES
 from ..pipeline import fetch_all
 from ..scheduler import SchedulerStatus, reschedule, run_now, start_scheduler
@@ -719,10 +720,14 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
     @app.post("/api/cancel-run")
     def api_cancel_run():
-        # Cooperative — see cancel.py. Not instant: the running fetch
-        # stops at its next checkpoint (between scrapers, between
-        # paginated pages), not mid-request. A no-op (not an error) if
-        # nothing is running — the button just does nothing useful then.
+        # One cancel button for whatever's actually running — fetch,
+        # backfill, enrich, or report generation, since they all share
+        # this one SchedulerStatus (only one of them can be running_now
+        # at a time anyway) and each checks the same cancel_event at its
+        # own safe points (see cancel.py). Cooperative, not instant: the
+        # running operation stops at its next checkpoint (between
+        # scrapers/pages/items), not mid-request. A no-op (not an error)
+        # if nothing is running — the button just does nothing useful then.
         status = app.config["BESSELETH_STATUS"]
         if not status.running_now:
             return jsonify({"ok": True, "message": "Nothing is running."})
@@ -743,8 +748,14 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # run_until_done this can take a long while (the whole backlog,
         # not one capped batch), so the dashboard polls /api/status rather
         # than the request blocking until it's actually done.
+        #
+        # clear_cancel() atomically with running_now, here in the route —
+        # not just inside enrich_items_detailed moments later on the
+        # background thread — closes the same race /api/run-now's fix
+        # closes (see its comment).
         with status._lock:
             status.running_now = True
+        status.clear_cancel()
         status.set_progress("Starting enrichment...")
 
         def _work():
@@ -753,12 +764,12 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
                 try:
                     result = enrich_items_detailed(
                         config, db, force=force, run_until_done=run_until_done,
-                        progress_cb=status.set_progress,
+                        progress_cb=status.set_progress, cancel_event=status.cancel_event,
                     )
                 finally:
                     db.close()
                 with status._lock:
-                    status.last_error = None
+                    status.last_error = "Enrichment cancelled." if result.get("cancelled") else None
                 status.last_enrich_result = {
                     "ok": True, "enriched": result["processed"], "message": result["message"],
                     "backend": result["backend"], "stats": result.get("stats"),
@@ -767,6 +778,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
                 with status._lock:
                     status.last_error = f"enrich: {e}"
             finally:
+                status.clear_cancel()
                 status.set_progress(None)
                 with status._lock:
                     status.running_now = False
@@ -856,22 +868,27 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
         with status._lock:
             status.running_now = True
+        status.clear_cancel()  # atomic with running_now — see /api/run-now's comment on this
         status.set_progress("Starting backfill...")
 
         def _work():
             try:
                 db = DB(config.db_path)
                 try:
-                    results = fetch_all(config, db, since=since, progress_cb=status.set_progress)
+                    results = fetch_all(config, db, since=since, progress_cb=status.set_progress, cancel_event=status.cancel_event)
                 finally:
                     db.close()
                 with status._lock:
                     status.last_error = None
                 status.last_fetch_counts = {k: len(v) for k, v in results.items()}
+            except FetchCancelled:
+                with status._lock:
+                    status.last_error = "Backfill cancelled."
             except Exception as e:
                 with status._lock:
                     status.last_error = f"backfill: {e}"
             finally:
+                status.clear_cancel()
                 status.set_progress(None)
                 with status._lock:
                     status.running_now = False
