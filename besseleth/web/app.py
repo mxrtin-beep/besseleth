@@ -860,6 +860,97 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             abort(404)
         return jsonify({"ok": True, "deleted": item_id})
 
+    @app.post("/api/papers/upload")
+    def api_upload_paper():
+        # Upload-a-research-PDF: extracted and stored as a normal papers
+        # item (see paper_upload.py) plus an immediate "how this fits in
+        # with current research" write-up — not worth waiting on the next
+        # scheduled enrich pass for.
+        uploaded = request.files.get("file")
+        if not uploaded or not uploaded.filename:
+            return jsonify({"ok": False, "message": "No file uploaded."}), 400
+        if not uploaded.filename.lower().endswith(".pdf"):
+            return jsonify({"ok": False, "message": "Only PDF files are supported."}), 400
+        import tempfile
+
+        from ..paper_upload import ingest_pdf_upload
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as tmp:
+            uploaded.save(tmp.name)
+            try:
+                result = ingest_pdf_upload(config, tmp.name, uploaded.filename)
+            except Exception as e:
+                return jsonify({"ok": False, "message": str(e)}), 400
+        return jsonify({"ok": True, **result})
+
+    @app.get("/api/company-events")
+    def api_company_events():
+        db = DB(config.db_path)
+        try:
+            rows = db.company_events(request.args.get("org") or None)
+        finally:
+            db.close()
+        return jsonify(
+            [
+                {
+                    "id": r["id"],
+                    "org": r["org"],
+                    "event_type": r["event_type"],
+                    "event_date": r["event_date"],
+                    "title": r["title"],
+                    "description": r["description"],
+                    "source_url": r["source_url"],
+                    "auto_extracted": bool(r["auto_extracted"]),
+                }
+                for r in rows
+            ]
+        )
+
+    @app.delete("/api/company-events/<int:event_id>")
+    def api_delete_company_event(event_id):
+        db = DB(config.db_path)
+        try:
+            deleted = db.delete_company_event(event_id)
+        finally:
+            db.close()
+        if not deleted:
+            abort(404)
+        return jsonify({"ok": True, "deleted": event_id})
+
+    @app.post("/api/company-events")
+    def api_add_company_event():
+        # Manual add — for an event you know about but nothing scraped
+        # ever reported in a way enrich.py could pick up (a CEO change
+        # announced only on LinkedIn, a merger you read about elsewhere).
+        payload = request.get_json(silent=True) or {}
+        org = (payload.get("org") or "").strip()
+        title = (payload.get("title") or "").strip()
+        event_type = (payload.get("event_type") or "other").strip()
+        if not org or not title:
+            return jsonify({"ok": False, "message": "'org' and 'title' are required."}), 400
+        db = DB(config.db_path)
+        try:
+            event_id = db.add_company_event(
+                org, event_type, payload.get("event_date") or None, title,
+                description=payload.get("description") or "", source_url=payload.get("source_url") or "",
+                auto_extracted=False,
+            )
+        finally:
+            db.close()
+        return jsonify({"ok": True, "id": event_id})
+
+    @app.get("/api/stock-history")
+    def api_stock_history():
+        orgs = [o for o in (request.args.get("orgs") or "").split(",") if o.strip()]
+        db = DB(config.db_path)
+        try:
+            if not orgs:
+                orgs = [c["name"] for c in db.companies() if c["stock_ticker"]]
+            history = db.stock_history_for_orgs(orgs)
+        finally:
+            db.close()
+        return jsonify(history)
+
     @app.delete("/api/source/<source>")
     def api_clear_source(source):
         # Bulk "delete everything from this source, I'll re-pull what's

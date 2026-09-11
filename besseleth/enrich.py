@@ -49,7 +49,7 @@ from .db import DB
 from .feeds_store import load_feeds
 from .geocode import geocode
 from .trends import company_store
-from .trends.company_store import auto_mark_ipo, auto_upsert_company
+from .trends.company_store import auto_mark_ipo, auto_upsert_company, record_company_event
 from .trends.store import auto_append_device
 from . import summarizer as summarizer_mod
 
@@ -194,6 +194,12 @@ def _build_prompt(row, config: Config, context: str, author_affiliations: str = 
         'funding amount/round for "org"; ipo_date/stock_exchange only if this item reports "org" actually going '
         'public (an IPO that happened or a completed direct listing — e.g. "NASDAQ: XYZ" starts trading), NOT a '
         'mere announcement/rumor of a planned future IPO — use {} if none of this applies\n'
+        '  "org_event": an object {"event_type": one of "regulatory_approval", "merger_acquisition", '
+        '"leadership_change", "other", "event_date": "YYYY-MM-DD" or null, "title": a short human-readable label '
+        '(e.g. "FDA clears X for Y", "Acquires Z", "Names new CEO"), "description": one concise sentence} if this '
+        'item reports "org" reaching a SPECIFIC, DATED-OR-RECENT milestone of one of those kinds that actually '
+        "happened (not a rumor/plan/analyst speculation) and isn't already covered by company_funding above "
+        "(funding rounds and IPOs go there, not here) — use {} if none of this applies\n"
         f"{affiliations_block}"
         f"{benchmarks_block}\n"
         f"Item title: {row['title']}\nItem text: {(row['summary'] or '')[:1500]}\n\n"
@@ -813,6 +819,7 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
 
     funding = data.get("company_funding") or {}
     if org and funding.get("funding_total_usd"):
+        funding_date = funding.get("last_funding_date") or (row["published_at"] or "")[:10]
         auto_upsert_company(
             config.companies_path,
             name=org,
@@ -824,7 +831,15 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
             # with real funding data just never appeared on the Trends
             # tab's date-axis chart (it had table entries but no point to
             # plot).
-            last_funding_date=funding.get("last_funding_date") or (row["published_at"] or "")[:10],
+            last_funding_date=funding_date,
+            source_url=row["url"] or "",
+        )
+        amount = funding.get("funding_total_usd")
+        round_label = funding.get("last_funding_round") or "funding round"
+        record_company_event(
+            config.companies_path, org, "funding", funding_date,
+            title=f"${amount:,.0f} {round_label}" if isinstance(amount, (int, float)) else round_label,
+            description=f"Reported {round_label} for {org}.",
             source_url=row["url"] or "",
         )
     if org and funding.get("ipo_date"):
@@ -833,6 +848,37 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
             name=org,
             ipo_date=funding["ipo_date"],
             stock_exchange=funding.get("stock_exchange") or "",
+        )
+        record_company_event(
+            config.companies_path, org, "ipo", funding["ipo_date"],
+            title=f"IPO{' on ' + funding['stock_exchange'] if funding.get('stock_exchange') else ''}",
+            description=f"{org} went public.",
+            source_url=row["url"] or "",
+        )
+
+    # Merger/leadership-change/regulatory-approval events — see the
+    # "org_event" field in the extraction prompt above. Funding/IPO are
+    # handled separately (they came from company_funding, which has its
+    # own dedicated fields the LLM is more reliable filling in).
+    org_event = data.get("org_event") or {}
+    if org and org_event.get("event_type") and org_event.get("title"):
+        record_company_event(
+            config.companies_path, org, org_event["event_type"], org_event.get("event_date"),
+            title=org_event["title"], description=org_event.get("description") or "",
+            source_url=row["url"] or "",
+        )
+
+    # A paper this novel (relative to other recent items on the same
+    # topic — see the novelty_score instructions above) about a specific
+    # org is itself timeline-worthy, the same way a funding round or IPO
+    # is — this is what lets "important papers" show up on the Events
+    # Timeline alongside the business milestones.
+    if org and row["source"] in ("papers", "arxiv") and novelty and novelty >= 4:
+        record_company_event(
+            config.companies_path, org, "notable_paper", (row["published_at"] or "")[:10],
+            title=row["title"][:140],
+            description=data.get("novelty_rationale") or "",
+            source_url=row["url"] or "",
         )
 
     return True

@@ -123,6 +123,58 @@ CREATE TABLE IF NOT EXISTS companies (
     notes TEXT,
     auto_extracted INTEGER DEFAULT 0
 );
+
+-- A research PDF someone uploaded via the dashboard's Papers tab. The
+-- item itself lives in `items` (source = 'upload') like everything
+-- else scraped/pasted in, so it flows through the same enrichment/
+-- report pipeline as an arXiv/OpenAlex paper; this table holds the
+-- upload-specific extras: the original filename and the "how this fits
+-- into current research" write-up generated at upload time (comparing
+-- it against the closest-matching papers already on file — worth doing
+-- right away rather than waiting on the next scheduled enrich pass).
+CREATE TABLE IF NOT EXISTS paper_uploads (
+    item_id TEXT PRIMARY KEY REFERENCES items(id),
+    filename TEXT NOT NULL,
+    comparison_note TEXT,
+    related_item_ids TEXT,          -- comma-separated ids of the papers it was compared against
+    created_at TEXT NOT NULL
+);
+
+-- Org-level timeline events — funding rounds, IPOs/regulatory
+-- approvals, mergers/acquisitions, leadership changes, and notable
+-- papers, one row per event, sortable by org+date. Separate from
+-- `companies` (one current snapshot per org) and `devices` (per-device
+-- metric readings) since an org can have events with no device involved
+-- at all (a CEO change, a merger). Auto-extracted rows (funding/IPO
+-- mirrored from the `companies` table, a merger/leadership change the
+-- LLM picks up during enrichment, a paper crossing the novelty
+-- threshold) are tagged the same way devices/companies rows are, so a
+-- hand-added correction is never at risk of being treated as one.
+CREATE TABLE IF NOT EXISTS company_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    org TEXT NOT NULL,
+    event_type TEXT NOT NULL,       -- funding | ipo | regulatory_approval | merger_acquisition | leadership_change | notable_paper | other
+    event_date TEXT,                -- ISO8601 date, best-effort
+    title TEXT NOT NULL,            -- short human-readable label, e.g. "$40M Series B"
+    description TEXT,
+    source_url TEXT,
+    auto_extracted INTEGER DEFAULT 0,
+    recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_company_events_org ON company_events(org);
+
+-- Daily closing-price history per company, for the Trends tab's stock
+-- comparison chart — `companies.stock_price` is only ever the latest
+-- quote (a single number), which is fine for a snapshot but not enough
+-- to plot. Backfilled once from Stooq's free daily-history endpoint the
+-- first time a ticker is set, then appended to on every
+-- `company-refresh-stock` run (see trends/company_store.py).
+CREATE TABLE IF NOT EXISTS stock_price_history (
+    org TEXT NOT NULL,
+    date TEXT NOT NULL,             -- ISO8601 date (YYYY-MM-DD)
+    close REAL NOT NULL,
+    PRIMARY KEY (org, date)
+);
 """
 
 # Columns added after the initial release to `devices`/`companies` —
@@ -1176,3 +1228,105 @@ class DB:
             [fields[c] for c in cols] + [name],
         )
         self.conn.commit()
+
+    # --- paper uploads -----------------------------------------------
+
+    def add_paper_upload(self, item_id: str, filename: str, comparison_note: str, related_item_ids: list[str]) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO paper_uploads (item_id, filename, comparison_note, related_item_ids, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (item_id, filename, comparison_note, ",".join(related_item_ids), datetime.now(timezone.utc).isoformat()),
+        )
+        self.conn.commit()
+
+    def get_paper_upload(self, item_id: str) -> sqlite3.Row | None:
+        self.conn.row_factory = sqlite3.Row
+        return self.conn.execute("SELECT * FROM paper_uploads WHERE item_id = ?", (item_id,)).fetchone()
+
+    def paper_uploads(self) -> list[sqlite3.Row]:
+        self.conn.row_factory = sqlite3.Row
+        return list(self.conn.execute("SELECT * FROM paper_uploads ORDER BY created_at DESC").fetchall())
+
+    # --- company/org timeline events ----------------------------------
+
+    def add_company_event(
+        self, org: str, event_type: str, event_date: str | None, title: str,
+        description: str = "", source_url: str = "", auto_extracted: bool = False,
+    ) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO company_events (org, event_type, event_date, title, description, source_url, "
+            "auto_extracted, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                org, event_type, event_date or None, title, description, source_url,
+                1 if auto_extracted else 0, datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def add_company_event_if_new(
+        self, org: str, event_type: str, event_date: str | None, title: str,
+        description: str = "", source_url: str = "", auto_extracted: bool = False,
+    ) -> bool:
+        """Same as add_company_event, but skips inserting if an event with
+        the same (org, event_type, event_date, title) already exists —
+        auto-extraction runs repeatedly over the same items (re-enrich,
+        overlapping fetches), and without this an unchanged funding round
+        or IPO would otherwise get a fresh duplicate row every pass."""
+        existing = self.conn.execute(
+            "SELECT 1 FROM company_events WHERE lower(org) = lower(?) AND event_type = ? "
+            "AND IFNULL(event_date, '') = IFNULL(?, '') AND lower(title) = lower(?)",
+            (org, event_type, event_date, title),
+        ).fetchone()
+        if existing:
+            return False
+        self.add_company_event(org, event_type, event_date, title, description, source_url, auto_extracted)
+        return True
+
+    def company_events(self, org: str | None = None) -> list[sqlite3.Row]:
+        self.conn.row_factory = sqlite3.Row
+        if org:
+            return list(self.conn.execute(
+                "SELECT * FROM company_events WHERE lower(org) = lower(?) ORDER BY IFNULL(event_date, '9999') DESC",
+                (org,),
+            ).fetchall())
+        return list(self.conn.execute(
+            "SELECT * FROM company_events ORDER BY IFNULL(event_date, '9999') DESC"
+        ).fetchall())
+
+    def delete_company_event(self, event_id: int) -> bool:
+        cur = self.conn.execute("DELETE FROM company_events WHERE id = ?", (event_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    # --- stock price history -------------------------------------------
+
+    def add_stock_history_points(self, org: str, points: list[tuple[str, float]]) -> int:
+        """Bulk upsert of (date, close) points for `org`. Returns how many
+        were written (INSERT OR REPLACE, so re-backfilling is harmless)."""
+        if not points:
+            return 0
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO stock_price_history (org, date, close) VALUES (?, ?, ?)",
+            [(org, d, c) for d, c in points],
+        )
+        self.conn.commit()
+        return len(points)
+
+    def stock_history_for_orgs(self, orgs: list[str]) -> dict[str, list[dict]]:
+        if not orgs:
+            return {}
+        self.conn.row_factory = sqlite3.Row
+        placeholders = ",".join("?" for _ in orgs)
+        rows = self.conn.execute(
+            f"SELECT * FROM stock_price_history WHERE org IN ({placeholders}) ORDER BY org, date",
+            orgs,
+        ).fetchall()
+        by_org: dict[str, list[dict]] = {org: [] for org in orgs}
+        for r in rows:
+            by_org.setdefault(r["org"], []).append({"date": r["date"], "close": r["close"]})
+        return by_org
+
+    def has_stock_history(self, org: str) -> bool:
+        row = self.conn.execute("SELECT 1 FROM stock_price_history WHERE org = ? LIMIT 1", (org,)).fetchone()
+        return row is not None

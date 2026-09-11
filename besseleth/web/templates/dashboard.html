@@ -154,6 +154,16 @@
     </p>
     <p class="hint" id="enrichResult"></p>
     <p class="hint" id="enrichStats"></p>
+    <div class="controls" style="align-items:center;">
+      <label for="paperUploadInput" class="btn" style="cursor:pointer;">Upload a paper (PDF)…</label>
+      <input type="file" id="paperUploadInput" accept="application/pdf" style="display:none">
+      <span class="hint" id="paperUploadStatus">Adds it to Sources like any other paper, and writes up how it fits in with what's already here.</span>
+    </div>
+    <div id="paperUploadResult" style="display:none; margin:.6rem 0; padding:.7rem; border:1px solid #3a3a3a; border-radius:6px;">
+      <p><strong id="paperUploadTitle"></strong></p>
+      <p id="paperUploadNote" style="white-space:pre-wrap;"></p>
+      <p class="hint" id="paperUploadRelated"></p>
+    </div>
     <div class="controls filterbar">
       <div><label for="pfFrom">From</label><input type="date" id="pfFrom"></div>
       <div><label for="pfTo">To</label><input type="date" id="pfTo"></div>
@@ -222,7 +232,7 @@
   <div id="trendsPane" style="display:none">
     <div class="controls">
       <div class="dataset-toggle">
-        <button id="dsDevices" class="active">Devices</button><button id="dsCompanies">Companies</button><button id="dsFdaTimeline">FDA timeline</button><button id="dsIpoTimeline">IPO timeline</button>
+        <button id="dsDevices" class="active">Devices</button><button id="dsCompanies">Companies</button><button id="dsFdaTimeline">FDA timeline</button><button id="dsIpoTimeline">IPO timeline</button><button id="dsEventsTimeline">Events timeline</button><button id="dsStockChart">Stock chart</button>
       </div>
       <div id="axisControls">
         <div>
@@ -242,6 +252,10 @@
             <option value="material">Material</option>
           </select>
         </div>
+      </div>
+      <div id="stockPickerWrap" style="display:none;">
+        <label for="stockPicker" title="ctrl/cmd-click for more than one">Companies (with a stock_ticker set)</label>
+        <select id="stockPicker" multiple size="4"></select>
       </div>
     </div>
     <div id="chart"></div>
@@ -1464,6 +1478,40 @@ document.getElementById('clearSourceBtn').onclick = async () => {
   }
 };
 
+document.getElementById('paperUploadInput').onchange = async (ev) => {
+  const file = ev.target.files[0];
+  if (!file) return;
+  const statusEl = document.getElementById('paperUploadStatus');
+  const resultBox = document.getElementById('paperUploadResult');
+  resultBox.style.display = 'none';
+  statusEl.textContent = `Reading and comparing "${file.name}"… this calls the local LLM, so it can take a minute.`;
+  const body = new FormData();
+  body.append('file', file);
+  try {
+    const res = await fetch('/api/papers/upload', { method: 'POST', body });
+    const data = await res.json();
+    if (!data.ok) {
+      statusEl.textContent = `Failed: ${data.message}`;
+      return;
+    }
+    statusEl.textContent = "Adds it to Sources like any other paper, and writes up how it fits in with what's already here.";
+    document.getElementById('paperUploadTitle').textContent = data.title;
+    document.getElementById('paperUploadNote').textContent = data.comparison_note;
+    document.getElementById('paperUploadRelated').innerHTML = data.related.length
+      ? 'Compared against: ' + data.related.map(r => r.url
+          ? `<a href="${r.url}" target="_blank" rel="noopener">${r.title}</a>` : r.title).join(', ')
+      : 'No related papers found on file yet.';
+    resultBox.style.display = 'block';
+    const papersRes = await fetch('/api/papers');
+    papers = await papersRes.json();
+    renderPapers();
+  } catch (e) {
+    statusEl.textContent = 'Failed — see server log.';
+  } finally {
+    ev.target.value = '';
+  }
+};
+
 document.getElementById('papersShowMoreBtn').onclick = () => {
   papersPageSize = Infinity; // show every remaining filtered row, not another capped batch
   renderPapers(false); // false: keep it expanded, don't reset back to 50
@@ -1539,22 +1587,27 @@ let fdaStages = [];
 let currentDataset = 'devices';
 
 let possibleDupes = [];
+let companyEvents = [];
+let stockHistory = {};
 
 async function loadTrends() {
-  const [metricsRes, devicesRes, companiesRes, stagesRes, dupesRes] = await Promise.all([
+  const [metricsRes, devicesRes, companiesRes, stagesRes, dupesRes, eventsRes] = await Promise.all([
     fetch('/api/metrics'), fetch('/api/devices'), fetch('/api/companies'), fetch('/api/trends/fda-stages'),
-    fetch('/api/companies/possible-duplicates'),
+    fetch('/api/companies/possible-duplicates'), fetch('/api/company-events'),
   ]);
   metricsData = await metricsRes.json();
   devices = await devicesRes.json();
   companies = await companiesRes.json();
   fdaStages = await stagesRes.json();
   possibleDupes = await dupesRes.json();
+  companyEvents = await eventsRes.json();
 
   document.getElementById('dsDevices').onclick = () => switchDataset('devices');
   document.getElementById('dsCompanies').onclick = () => switchDataset('companies');
   document.getElementById('dsFdaTimeline').onclick = () => switchDataset('fda_timeline');
   document.getElementById('dsIpoTimeline').onclick = () => switchDataset('ipo_timeline');
+  document.getElementById('dsEventsTimeline').onclick = () => switchDataset('events_timeline');
+  document.getElementById('dsStockChart').onclick = () => switchDataset('stock_chart');
   switchDataset('devices');
 }
 
@@ -1563,6 +1616,8 @@ const TRENDS_HINTS = {
   companies: 'Hover a point for its details and source; click it to open the source link. This accumulates over time.',
   fda_timeline: 'Each line is one org’s devices, ordered by report date, plotted against the FDA stage ladder (see trends/fda_stages.py for what each rung means) — a rising line is regulatory progress; a flat one means no new dated report yet. Hover a point for the device and its exact fda_status text; click to open the source.',
   ipo_timeline: 'One point per company that has gone public, plotted at its IPO date. Hover for the exchange/ticker; click to open the source that reported it.',
+  events_timeline: 'Every org milestone besseleth has recorded — funding rounds, IPOs, regulatory approvals, mergers/acquisitions, leadership changes, and notably novel papers — one row per org, one marker per event, colored by type. Hover for the title/description; click to open the source.',
+  stock_chart: 'Daily closing price for the companies you pick below (only companies with a stock_ticker set are eligible) — pulled free from Stooq, backfilled once per ticker then appended to on every stock refresh (dashboard header, or `cli company-refresh-stock`).',
 };
 
 function switchDataset(which) {
@@ -1571,11 +1626,23 @@ function switchDataset(which) {
   document.getElementById('dsCompanies').classList.toggle('active', which === 'companies');
   document.getElementById('dsFdaTimeline').classList.toggle('active', which === 'fda_timeline');
   document.getElementById('dsIpoTimeline').classList.toggle('active', which === 'ipo_timeline');
+  document.getElementById('dsEventsTimeline').classList.toggle('active', which === 'events_timeline');
+  document.getElementById('dsStockChart').classList.toggle('active', which === 'stock_chart');
   document.getElementById('trendsHint').textContent = TRENDS_HINTS[which];
 
-  const isTimeline = which === 'fda_timeline' || which === 'ipo_timeline';
+  const isTimeline = which === 'fda_timeline' || which === 'ipo_timeline' || which === 'events_timeline' || which === 'stock_chart';
   document.getElementById('axisControls').style.display = isTimeline ? 'none' : 'flex';
   document.getElementById('colorByWrap').style.display = which === 'devices' ? 'block' : 'none';
+  document.getElementById('stockPickerWrap').style.display = which === 'stock_chart' ? 'block' : 'none';
+
+  if (which === 'stock_chart') {
+    const picker = document.getElementById('stockPicker');
+    const tickered = companies.filter(c => c.stock_ticker);
+    picker.innerHTML = tickered.map(c => `<option value="${c.name}">${c.name} (${c.stock_ticker})</option>`).join('');
+    // Default to every ticker'd company selected — most useful first look, comparing whatever's tracked.
+    Array.from(picker.options).forEach(o => o.selected = true);
+    picker.onchange = renderChart;
+  }
 
   if (!isTimeline) {
     const xSel = document.getElementById('xAxis');
@@ -1655,6 +1722,8 @@ function renderChart() {
   }
   if (currentDataset === 'fda_timeline') return renderFdaTimeline();
   if (currentDataset === 'ipo_timeline') return renderIpoTimeline();
+  if (currentDataset === 'events_timeline') return renderEventsTimeline();
+  if (currentDataset === 'stock_chart') return renderStockChart();
 
   const xKey = document.getElementById('xAxis').value;
   const yKey = document.getElementById('yAxis').value;
@@ -1792,6 +1861,96 @@ function renderIpoTimeline() {
   });
 }
 
+const EVENT_TYPE_COLORS = {
+  funding: '#4a90d9', ipo: '#2a9d8f', regulatory_approval: '#e9c46a',
+  merger_acquisition: '#f4a261', leadership_change: '#9d4edd', notable_paper: '#ef476f', other: '#adb5bd',
+};
+const EVENT_TYPE_LABELS = {
+  funding: 'Funding', ipo: 'IPO', regulatory_approval: 'Regulatory approval',
+  merger_acquisition: 'Merger/acquisition', leadership_change: 'Leadership change',
+  notable_paper: 'Notable paper', other: 'Other',
+};
+
+function renderEventsTimeline() {
+  if (!companyEvents.length) {
+    Plotly.purge('chart');
+    document.getElementById('chart').innerHTML =
+      '<p class="hint">No org events recorded yet — these accumulate as enrichment picks up funding rounds, IPOs, ' +
+      'regulatory approvals, mergers, leadership changes, and unusually novel papers, or you add one by hand below.</p>';
+    return;
+  }
+  const dated = companyEvents.filter(e => e.event_date).slice().sort((a, b) => a.event_date.localeCompare(b.event_date));
+  const orgOrder = [...new Set(dated.map(e => e.org))];
+  const byType = {};
+  dated.forEach(e => (byType[e.event_type] ||= []).push(e));
+
+  const traces = Object.entries(byType).map(([type, evs]) => ({
+    x: evs.map(e => e.event_date),
+    y: evs.map(e => e.org),
+    text: evs.map(e => `${e.title}${e.description ? '<br>' + e.description : ''}`),
+    customdata: evs.map(e => e.source_url || ''),
+    mode: 'markers',
+    type: 'scatter',
+    name: EVENT_TYPE_LABELS[type] || type,
+    marker: { size: 13, color: EVENT_TYPE_COLORS[type] || '#adb5bd' },
+    hovertemplate: '%{text}<br>%{x}<extra>' + (EVENT_TYPE_LABELS[type] || type) + '</extra>',
+  }));
+
+  const layout = {
+    xaxis: { title: 'Date', type: 'date' },
+    yaxis: { title: '', automargin: true, categoryorder: 'array', categoryarray: orgOrder },
+    margin: { t: 20, l: 160 },
+    legend: { orientation: 'h' },
+    hovermode: 'closest',
+    hoverlabel: { bgcolor: '#1e1e1eee', bordercolor: '#4a90d9', font: { color: '#f5f5f5', size: 12 } },
+  };
+  Plotly.newPlot('chart', traces, layout, { responsive: true }).then(gd => {
+    gd.removeAllListeners && gd.removeAllListeners('plotly_click');
+    gd.on('plotly_click', (ev) => {
+      const url = ev.points[0].customdata;
+      if (url) window.open(url, '_blank');
+    });
+  });
+}
+
+async function renderStockChart() {
+  const picker = document.getElementById('stockPicker');
+  const selected = Array.from(picker.selectedOptions).map(o => o.value);
+  if (!selected.length) {
+    Plotly.purge('chart');
+    document.getElementById('chart').innerHTML = '<p class="hint">Pick at least one company above.</p>';
+    return;
+  }
+  const res = await fetch(`/api/stock-history?orgs=${selected.map(encodeURIComponent).join(',')}`);
+  stockHistory = await res.json();
+  if (currentDataset === 'stock_chart') renderTable();
+  const traces = selected
+    .filter(org => (stockHistory[org] || []).length)
+    .map(org => ({
+      x: stockHistory[org].map(p => p.date),
+      y: stockHistory[org].map(p => p.close),
+      mode: 'lines',
+      type: 'scatter',
+      name: org,
+    }));
+  if (!traces.length) {
+    Plotly.purge('chart');
+    document.getElementById('chart').innerHTML =
+      '<p class="hint">No price history yet for the selected compan(ies) — it\'s backfilled the first time ' +
+      '"Refresh stock prices" runs for a ticker (dashboard header, or `cli company-refresh-stock`).</p>';
+    return;
+  }
+  const layout = {
+    xaxis: { title: 'Date', type: 'date' },
+    yaxis: { title: 'Close price (native currency)' },
+    margin: { t: 20 },
+    legend: { orientation: 'h' },
+    hovermode: 'x unified',
+    hoverlabel: { bgcolor: '#1e1e1eee', bordercolor: '#4a90d9', font: { color: '#f5f5f5', size: 12 } },
+  };
+  Plotly.newPlot('chart', traces, layout, { responsive: true });
+}
+
 function renderTable() {
   const table = document.getElementById('dataTable');
   table.className = 'datatable resizable';
@@ -1824,6 +1983,62 @@ function renderTable() {
           <td>${c.source_url ? `<a href="${c.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
         </tr>`).join('')}</tbody>`;
     makeTableResizable(table, 'dataTable:ipo_timeline');
+    return;
+  }
+  if (currentDataset === 'events_timeline') {
+    table.innerHTML = `
+      <p style="margin:.4rem 0;"><button class="btn" id="addEventBtn" style="padding:.3rem .7rem; font-size:.85rem;">Add an event by hand…</button></p>
+      <thead><tr><th>Org</th><th>Type</th><th>Title</th><th>Description</th><th>Date</th><th>Source</th><th></th></tr></thead>
+      <tbody>${companyEvents.map(e => `
+        <tr>
+          <td>${e.org}</td>
+          <td>${EVENT_TYPE_LABELS[e.event_type] || e.event_type}</td>
+          <td>${e.title}</td>
+          <td>${e.description || ''}</td>
+          <td>${e.event_date || ''}</td>
+          <td>${e.source_url ? `<a href="${e.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
+          <td><button class="delBtn" data-event-id="${e.id}" title="Delete this event">🗑</button></td>
+        </tr>`).join('')}</tbody>`;
+    makeTableResizable(table, 'dataTable:events_timeline');
+    document.getElementById('addEventBtn').onclick = async () => {
+      const org = prompt('Org name:'); if (!org) return;
+      const title = prompt('Short title (e.g. "Names new CEO"):'); if (!title) return;
+      const event_type = prompt('Type — one of: regulatory_approval, merger_acquisition, leadership_change, other', 'other');
+      const event_date = prompt('Date (YYYY-MM-DD), optional:') || null;
+      const source_url = prompt('Source URL, optional:') || '';
+      const res = await fetch('/api/company-events', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ org, title, event_type, event_date, source_url }),
+      });
+      if ((await res.json()).ok) {
+        const eventsRes = await fetch('/api/company-events');
+        companyEvents = await eventsRes.json();
+        renderTable(); renderChart();
+      }
+    };
+    table.querySelectorAll('[data-event-id]').forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm('Delete this event?')) return;
+        await fetch(`/api/company-events/${btn.dataset.eventId}`, { method: 'DELETE' });
+        companyEvents = companyEvents.filter(e => String(e.id) !== btn.dataset.eventId);
+        renderTable(); renderChart();
+      };
+    });
+    return;
+  }
+  if (currentDataset === 'stock_chart') {
+    const rows = Object.entries(stockHistory).filter(([, pts]) => pts.length);
+    table.innerHTML = `
+      <thead><tr><th>Company</th><th>Days of history</th><th>Earliest</th><th>Latest</th><th>Latest close</th></tr></thead>
+      <tbody>${rows.map(([org, pts]) => `
+        <tr>
+          <td>${org}</td>
+          <td>${pts.length}</td>
+          <td>${pts[0].date}</td>
+          <td>${pts[pts.length - 1].date}</td>
+          <td>${pts[pts.length - 1].close}</td>
+        </tr>`).join('')}</tbody>`;
+    makeTableResizable(table, 'dataTable:stock_chart');
     return;
   }
   if (currentDataset === 'devices') {
