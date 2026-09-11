@@ -11,6 +11,7 @@ Usage:
     python -m besseleth.cli device-suggest --item-id <id>  # draft a devices.yaml entry from a scraped item
     python -m besseleth.cli company-refresh-stock          # update stock_price for companies.yaml's tickers (free)
     python -m besseleth.cli refresh-citations               # re-fetch citation_count for every stored paper with a DOI (free)
+    python -m besseleth.cli standardize-locations            # reformat every stored location to "City[, State], Country" (free)
     python -m besseleth.cli report-delete <report-id>       # e.g. report-delete 2026-09-01
     python -m besseleth.cli item-delete --item-id <id>       # remove a pasted (or any) item outright
     python -m besseleth.cli source-clear --source news       # delete EVERY item for a source (e.g. after a stale
@@ -70,6 +71,7 @@ COMMANDS = [
     "device-suggest",
     "company-refresh-stock",
     "refresh-citations",
+    "standardize-locations",
     "report-delete",
     "item-delete",
     "source-clear",
@@ -161,6 +163,17 @@ def main(argv=None):
             )
         for err in result["errors"]:
             print(f"[cli]   error: {err}")
+        return
+
+    if args.command == "standardize-locations":
+        from .enrich import standardize_location_labels
+
+        db = DB(config.db_path)
+        try:
+            result = standardize_location_labels(db)
+        finally:
+            db.close()
+        print(f"[cli] Checked {result['checked']} distinct location(s): {result['updated']} item(s)/org(s) reformatted.")
         return
 
     if args.command == "enrich":

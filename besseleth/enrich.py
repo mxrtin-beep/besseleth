@@ -47,7 +47,7 @@ from . import web_lookup
 from .config import Config, env
 from .db import DB
 from .feeds_store import load_feeds
-from .geocode import geocode
+from .geocode import geocode, reverse_geocode
 from .trends import company_store
 from .trends.company_store import auto_mark_ipo, auto_upsert_company, record_company_event
 from .trends.store import auto_append_device
@@ -857,6 +857,13 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
         coords = geocode(location_text)
         if coords:
             lat, lon = coords
+            # Standardize to "City[, State], Country" regardless of
+            # however the LLM happened to phrase its own guess ("London,
+            # England", "London, UK", "London" alone all land here) —
+            # falls back to the LLM's original text if the reverse
+            # lookup itself fails, so a location is never lost over a
+            # formatting nicety.
+            location_text = reverse_geocode(lat, lon) or location_text
 
     db.save_enrichment(
         row["id"],
@@ -990,6 +997,7 @@ def _search_org_location(org: str, summarizer_cfg: dict) -> tuple[str, float, fl
     coords = geocode(location_text)
     if not coords:
         return None
+    location_text = reverse_geocode(*coords) or location_text
     return (location_text, *coords)
 
 
@@ -1039,6 +1047,7 @@ def _backfill_org_locations(config: Config, db: DB, max_lookups_override: int | 
         result = web_lookup.lookup_org_location(geocode_query) or _search_org_location(org, config.summarizer)
         if result:
             label, lat, lon = result
+            label = reverse_geocode(lat, lon) or label  # standardize regardless of which tier found it
             db.set_org_location(org, label, lat, lon)
             db.set_org_location_cache(org, found=True, location_text=label, lat=lat, lon=lon)
             filled += 1
@@ -1091,6 +1100,7 @@ def _backfill_contact_locations(config: Config, db: DB, max_lookups_override: in
         result = web_lookup.lookup_org_location(geocode_query) or _search_org_location(org, config.summarizer)
         if result:
             label, lat, lon = result
+            label = reverse_geocode(lat, lon) or label
             db.set_org_location_cache(org, found=True, location_text=label, lat=lat, lon=lon)
             filled += 1
         elif config.summarizer.get("backend", "groq") in summarizer_mod.LLM_BACKENDS:
@@ -1134,6 +1144,38 @@ def _standardize_location_names(db: DB) -> int:
                 v["location_text"], v["lat"], v["lon"], canonical["location_text"], canonical["lat"], canonical["lon"]
             )
     return renamed
+
+
+def standardize_location_labels(db: DB) -> dict:
+    """One-time-or-whenever bulk reformat (Settings tab) of every
+    already-stored location_text to "City[, State], Country" via
+    reverse_geocode() — for a location stored before that standardizing
+    was wired into the extraction paths themselves (see the two direct
+    geocode() call sites and _backfill_org_locations/
+    _backfill_contact_locations above), or one whose original guess
+    (an LLM's own phrasing, a Wikidata/Wikipedia entity label) just
+    never matched the standard format to begin with. Covers both the
+    items table (via location_text_variants()/standardize_location())
+    and the org_location_cache table (the per-org HQ guess reapplied to
+    new items for that org, kept in sync too — otherwise a freshly
+    re-fetched item for an already-cached org would get the OLD,
+    unstandardized label right back). Returns {"checked", "updated"}."""
+    checked = 0
+    updated = 0
+    for row in db.location_text_variants():
+        checked += 1
+        canonical = reverse_geocode(row["lat"], row["lon"])
+        if canonical and canonical != row["location_text"]:
+            updated += db.standardize_location(
+                row["location_text"], row["lat"], row["lon"], canonical, row["lat"], row["lon"]
+            )
+    for row in db.org_location_cache_rows():
+        checked += 1
+        canonical = reverse_geocode(row["lat"], row["lon"])
+        if canonical and canonical != row["location_text"]:
+            db.set_org_location_cache(row["org"], found=True, location_text=canonical, lat=row["lat"], lon=row["lon"])
+            updated += 1
+    return {"checked": checked, "updated": updated}
 
 
 def _apply_location_consensus(db: DB) -> int:

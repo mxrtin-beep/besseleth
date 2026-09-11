@@ -850,6 +850,16 @@ class DB:
         )
         self.conn.commit()
 
+    def org_location_cache_rows(self) -> list[sqlite3.Row]:
+        """Every cached org location that actually resolved to somewhere
+        (found=1) — for the Settings tab's "Standardize location names"
+        action to reformat, same idea as location_text_variants() for
+        the items table."""
+        self.conn.row_factory = sqlite3.Row
+        return list(self.conn.execute(
+            "SELECT org, location_text, lat, lon FROM org_location_cache WHERE found = 1 AND location_text IS NOT NULL"
+        ).fetchall())
+
     def set_org_location(self, org: str, location_text: str, lat: float, lon: float) -> int:
         """Backfills location_text/lat/lon on every item for `org` that
         doesn't already have one — additive only, never overwrites a

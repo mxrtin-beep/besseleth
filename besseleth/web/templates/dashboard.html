@@ -410,6 +410,7 @@
     <div class="controls" style="align-items:center; flex-wrap:wrap">
       <div><button class="btn" id="refreshCitationsBtn">Refresh citation counts</button></div>
       <div><button class="btn" id="refreshStockBtn">Refresh stock prices</button></div>
+      <div><button class="btn" id="standardizeLocationsBtn">Standardize location names</button></div>
     </div>
     <p class="hint" id="dataMaintenanceResult"></p>
 
@@ -1094,6 +1095,24 @@ document.getElementById('refreshStockBtn').onclick = async () => {
     const res = await fetch('/api/companies/refresh-stock', { method: 'POST' });
     const data = await res.json();
     result.textContent = data.log.length ? data.log.join(' · ') : 'No companies with a stock_ticker set — add one via the Trends tab.';
+  } catch (e) {
+    result.textContent = 'Failed — see server log.';
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+document.getElementById('standardizeLocationsBtn').onclick = async () => {
+  const result = document.getElementById('dataMaintenanceResult');
+  const btn = document.getElementById('standardizeLocationsBtn');
+  btn.disabled = true;
+  result.textContent = 'Reformatting every stored location to "City[, State], Country"… one request per distinct location (~1/sec), can take a while for a large map.';
+  try {
+    const res = await fetch('/api/locations/standardize', { method: 'POST' });
+    const data = await res.json();
+    result.textContent = data.ok
+      ? `Checked ${data.checked} distinct location(s): ${data.updated} item(s)/org(s) reformatted.`
+      : `Failed: ${data.message}`;
   } catch (e) {
     result.textContent = 'Failed — see server log.';
   } finally {

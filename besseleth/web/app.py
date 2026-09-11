@@ -530,6 +530,24 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         log = refresh_stock_prices(config.companies_path)
         return jsonify({"ok": True, "log": log})
 
+    @app.post("/api/locations/standardize")
+    def api_standardize_locations():
+        # One-time-or-whenever bulk reformat of every stored location to
+        # "City[, State], Country" — see enrich.standardize_location_labels's
+        # docstring. Free (Nominatim), but one request per distinct
+        # location at ~1/sec, so this can take a while for a large map —
+        # safe to run synchronously since a Settings-tab click is
+        # inherently a "run this once and wait" action, not something
+        # racing a page load.
+        from ..enrich import standardize_location_labels
+
+        db = DB(config.db_path)
+        try:
+            result = standardize_location_labels(db)
+        finally:
+            db.close()
+        return jsonify({"ok": True, **result})
+
     @app.get("/api/settings/schedule")
     def api_get_schedule_settings():
         sched = config.raw.get("schedule", {}) or {}
