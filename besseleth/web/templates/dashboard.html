@@ -227,9 +227,20 @@
   </div>
 
   <div id="mapPane" style="display:none">
-    <label style="display:flex; align-items:center; gap:.4rem; font-size:.9rem; margin-bottom:.5rem;">
-      <input type="checkbox" id="mapShowFriends"> Show friends (from Contacts, at their current employer)
-    </label>
+    <div class="controls" style="align-items:center; margin-bottom:.5rem;">
+      <label style="display:flex; align-items:center; gap:.4rem; font-size:.9rem;">
+        <input type="checkbox" id="mapShowCompanies" checked> Companies
+      </label>
+      <label style="display:flex; align-items:center; gap:.4rem; font-size:.9rem;">
+        <input type="checkbox" id="mapShowLabs" checked> Labs (academic)
+      </label>
+      <label style="display:flex; align-items:center; gap:.4rem; font-size:.9rem;">
+        <input type="checkbox" id="mapShowOtherOrgs" checked> Other (gov/nonprofit/unknown)
+      </label>
+      <label style="display:flex; align-items:center; gap:.4rem; font-size:.9rem;">
+        <input type="checkbox" id="mapShowFriends"> Friends (from Contacts, at their current employer)
+      </label>
+    </div>
     <div id="mapChart"></div>
     <p class="hint" id="mapCount"></p>
     <table class="datatable" id="mapTable"></table>
@@ -1228,7 +1239,20 @@ async function loadMap() {
   friendLocations = await friendRes.json();
   renderMap();
 }
-document.getElementById('mapShowFriends').onchange = renderMap;
+['mapShowFriends', 'mapShowCompanies', 'mapShowLabs', 'mapShowOtherOrgs'].forEach(id =>
+  document.getElementById(id).onchange = renderMap
+);
+
+// Which org_type values each map layer checkbox covers — "Labs" means
+// academic (the Trends tab's own org_type vocabulary), "Companies" means
+// industry, and everything else (government/nonprofit/unknown — orgs
+// that are neither, or where org_type was never determined) is lumped
+// into "Other" rather than silently hidden by the first two checkboxes.
+const MAP_LAYER_TYPES = {
+  mapShowCompanies: ['industry'],
+  mapShowLabs: ['academic'],
+  mapShowOtherOrgs: ['government', 'nonprofit', 'unknown', null, undefined, ''],
+};
 
 function renderMap() {
   document.getElementById('mapCount').textContent = `${mapLocations.length} located org(s).`;
@@ -1251,24 +1275,29 @@ function renderMap() {
       '<p class="hint">Chart library failed to load from the CDN (no internet access?). The table below still works.</p>';
     return;
   }
+  const activeOrgTypes = new Set(
+    Object.entries(MAP_LAYER_TYPES).flatMap(([id, types]) => document.getElementById(id).checked ? types : [])
+  );
+  const filteredLocations = mapLocations.filter(m => activeOrgTypes.has(m.org_type || null) || (!m.org_type && activeOrgTypes.has('')));
   const showFriends = document.getElementById('mapShowFriends').checked;
-  if (!mapLocations.length && !(showFriends && friendLocations.length)) {
-    document.getElementById('mapChart').innerHTML =
-      '<p class="hint">No located orgs yet — run <code>besseleth.cli enrich --all</code> (needs Ollama running) to backfill locations for existing items, or wait for the next fetch.</p>';
+  if (!filteredLocations.length && !(showFriends && friendLocations.length)) {
+    document.getElementById('mapChart').innerHTML = mapLocations.length
+      ? '<p class="hint">Nothing matches the checked layers above — check a box to show orgs again.</p>'
+      : '<p class="hint">No located orgs yet — run <code>besseleth.cli enrich --all</code> (needs Ollama running) to backfill locations for existing items, or wait for the next fetch.</p>';
     return;
   }
 
   const orgTrace = {
     type: 'scattergeo',
     name: 'Sources',
-    lat: mapLocations.map(m => m.lat),
-    lon: mapLocations.map(m => m.lon),
-    text: mapLocations.map(m => `${m.org}<br>${m.location_text || ''}<br>${m.total} item(s)`),
+    lat: filteredLocations.map(m => m.lat),
+    lon: filteredLocations.map(m => m.lon),
+    text: filteredLocations.map(m => `${m.org}<br>${m.location_text || ''}<br>${m.total} item(s)`),
     hoverinfo: 'text',
     mode: 'markers',
     marker: {
-      size: mapLocations.map(m => Math.min(10 + Math.sqrt(m.total) * 6, 40)),
-      color: mapLocations.map(m => ORG_TYPE_COLORS[m.org_type] || ORG_TYPE_COLORS.unknown),
+      size: filteredLocations.map(m => Math.min(10 + Math.sqrt(m.total) * 6, 40)),
+      color: filteredLocations.map(m => ORG_TYPE_COLORS[m.org_type] || ORG_TYPE_COLORS.unknown),
       line: { width: 1, color: '#ffffffaa' },
       opacity: 0.85,
     },
@@ -1287,7 +1316,14 @@ function renderMap() {
     });
   }
   const layout = {
-    geo: { projection: { type: 'natural earth' }, showland: true, landcolor: '#8882', showcountries: true, countrycolor: '#8886' },
+    geo: {
+      projection: { type: 'natural earth' }, showland: true, landcolor: '#8882',
+      showcountries: true, countrycolor: '#8886',
+      // US state (and other countries' province/state, where Plotly's
+      // basemap has that data) borders — subtler than country borders
+      // since there are a lot more of them.
+      showsubunits: true, subunitcolor: '#8884',
+    },
     margin: { t: 10, b: 0, l: 0, r: 0 },
     showlegend: showFriends,
     legend: { x: 0, y: 1, bgcolor: 'rgba(0,0,0,0)' },
@@ -1298,7 +1334,7 @@ function renderMap() {
     gd.on('plotly_click', (ev) => {
       const point = ev.points[0];
       if (point.curveNumber === 0) {
-        const org = mapLocations[point.pointNumber].org;
+        const org = filteredLocations[point.pointNumber].org;
         showTab('papers');
         loadPapers().then(() => {
           document.getElementById('pfOrg').value = org;
