@@ -100,7 +100,7 @@
 <body>
 <aside id="sidebar">
   <button class="collapseBtn" id="collapseSidebarBtn" title="Hide sidebar">&laquo;</button>
-  <h1>{{ industry }}</h1>
+  <h1 id="industryHeading">{{ industry }}</h1>
   <p class="hint">Reports</p>
   <nav id="reportNav">
     {% for rid in report_ids %}
@@ -1046,6 +1046,15 @@ document.getElementById('saveSettingsIndustryBtn').onclick = async () => {
     });
     const data = await res.json();
     result.textContent = data.ok ? 'Saved — takes effect on the next fetch/enrich.' : `Failed: ${data.message}`;
+    if (data.ok && name) {
+      // Reflects immediately, not just on the next full page load — the
+      // tab title/sidebar heading are rendered server-side once at page
+      // load (Flask templates config.industry_name at request time), so
+      // without this a save "worked" per config.yaml but looked like
+      // nothing happened until you refreshed.
+      document.title = `Besseleth — ${name}`;
+      document.getElementById('industryHeading').textContent = name;
+    }
   } catch (e) {
     result.textContent = 'Failed — see server log.';
   }
