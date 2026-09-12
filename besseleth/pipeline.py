@@ -227,7 +227,7 @@ def _dedupe_and_store(items: list[Item], db: DB) -> list[Item]:
                 # Resolved at fetch time (see paper_org.py) — log it here,
                 # the one place a brand-new item's initial org value is
                 # known, rather than at every scraper call site.
-                db.log_change(item.id, item.title, item.source, "org", None, item.org, "paper org resolution (fetch)")
+                db.log_change(item.id, item.title, item.source, "org", None, item.org, "paper org resolution (fetch)", item_url=item.url)
     return new_items
 
 

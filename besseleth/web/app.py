@@ -818,10 +818,13 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         backend = summarizer_cfg.get("backend", "groq")
         ok, status_message = llm_status(summarizer_cfg)
 
+        enrichment_sources = config.raw.get("enrichment", {}).get("sources", ["papers", "news", "blog"])
+
         db = DB(config.db_path)
         try:
             changes = db.recent_changes(limit=100)
             stats = db.get_enrich_stats()
+            counts = db.enrichment_counts(enrichment_sources)
         finally:
             db.close()
 
@@ -832,10 +835,12 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
             "ollama_ok": ok,
             "ollama_message": status_message,
             "stats": stats,
+            "counts": counts,
             "changes": [
                 {
                     "at": c["at"],
                     "item_title": c["item_title"],
+                    "item_url": c["item_url"],
                     "source": c["source"],
                     "field": c["field"],
                     "old_value": c["old_value"],

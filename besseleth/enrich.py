@@ -805,7 +805,7 @@ def _reapply_known_lab_matches(config: Config, db: DB) -> int:
         if known_lab and known_lab != row["org"]:
             known_lab = _canonicalize_new_org(known_lab, db)
             if known_lab != row["org"]:
-                db.log_change(row["id"], row["title"], row["source"], "org", row["org"], known_lab, "labs.yaml re-match")
+                db.log_change(row["id"], row["title"], row["source"], "org", row["org"], known_lab, "labs.yaml re-match", item_url=row["url"])
                 db.sync_org(row["id"], known_lab, row["org_type"], row["org_description"])
                 changed += 1
     return changed
@@ -866,7 +866,7 @@ def reextract_org_names(
         if new_org and new_org != row["org"]:
             new_org = _canonicalize_new_org(new_org, db)
             if new_org != row["org"]:
-                db.log_change(row["id"], row["title"], row["source"], "org", row["org"], new_org, "org re-check (news/blog)")
+                db.log_change(row["id"], row["title"], row["source"], "org", row["org"], new_org, "org re-check (news/blog)", item_url=row["url"])
                 db.sync_org(row["id"], new_org, row["org_type"], row["org_description"])
                 llm_changed += 1
         db.mark_org_rechecked(row["id"])  # spent a call either way — never re-picked ahead of an unchecked item again
@@ -966,7 +966,7 @@ def reextract_paper_orgs(
 
         new_org, new_org_type = paper_org.resolve_paper_org_with_fallback(row["title"], authors_institutions, config)
         if new_org and (new_org, new_org_type) != (row["org"], row["org_type"]):
-            db.log_change(row["id"], row["title"], "papers", "org", row["org"], new_org, "paper org resolution (re-check)")
+            db.log_change(row["id"], row["title"], "papers", "org", row["org"], new_org, "paper org resolution (re-check)", item_url=row["url"])
             db.sync_org(row["id"], new_org, new_org_type, row["org_description"])
             changed += 1
         db.mark_org_rechecked(row["id"])
@@ -1117,17 +1117,17 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
     reason = "enrichment"
     if row["source"] != "papers":
         if org != row["org"]:
-            db.log_change(row["id"], row["title"], row["source"], "org", row["org"], org, reason)
+            db.log_change(row["id"], row["title"], row["source"], "org", row["org"], org, reason, item_url=row["url"])
         if org_type != (row["org_type"] or "unknown"):
-            db.log_change(row["id"], row["title"], row["source"], "org_type", row["org_type"], org_type, reason)
+            db.log_change(row["id"], row["title"], row["source"], "org_type", row["org_type"], org_type, reason, item_url=row["url"])
     if modality != (row["modality"] or None):
-        db.log_change(row["id"], row["title"], row["source"], "modality", row["modality"], modality, reason)
+        db.log_change(row["id"], row["title"], row["source"], "modality", row["modality"], modality, reason, item_url=row["url"])
     if therapeutic_target != (row["therapeutic_target"] or None):
-        db.log_change(row["id"], row["title"], row["source"], "therapeutic_target", row["therapeutic_target"], therapeutic_target, reason)
+        db.log_change(row["id"], row["title"], row["source"], "therapeutic_target", row["therapeutic_target"], therapeutic_target, reason, item_url=row["url"])
     if novelty != row["novelty_score"]:
-        db.log_change(row["id"], row["title"], row["source"], "novelty_score", row["novelty_score"], novelty, reason)
+        db.log_change(row["id"], row["title"], row["source"], "novelty_score", row["novelty_score"], novelty, reason, item_url=row["url"])
     if location_text != (row["location_text"] or None):
-        db.log_change(row["id"], row["title"], row["source"], "location", row["location_text"], location_text, reason)
+        db.log_change(row["id"], row["title"], row["source"], "location", row["location_text"], location_text, reason, item_url=row["url"])
 
     db.save_enrichment(
         row["id"],

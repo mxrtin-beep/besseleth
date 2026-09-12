@@ -192,12 +192,11 @@
   </div>
 
   <div id="enrichLogPane" style="display:none">
-    <h3 style="margin-top:0; font-size:1rem;">Recent activity</h3>
-    <div id="recentActivityStatus"></div>
-    <h3 style="margin-top:2rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Enrichment</h3>
-    <div id="enrichLogStatus"></div>
+    <h3 style="margin-top:0; font-size:1rem;">Change log</h3>
     <p class="hint" id="enrichLogCount"></p>
     <div id="enrichLogTable"></div>
+    <h3 style="margin-top:2rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Program state</h3>
+    <div id="programStateStatus"></div>
   </div>
 
   <div id="orgsPane" style="display:none">
@@ -659,7 +658,6 @@ async function pollStatus() {
     // idea as the progress bar above, just for the recent-activity/
     // change-log content instead of the top status line.
     if (currentTab === 'enrichlog') {
-      renderRecentActivity(s);
       refreshChangeLog();
     }
 
@@ -1931,9 +1929,30 @@ document.getElementById('exportPapersBtn').onclick = () => {
 };
 
 // --- Log (troubleshooting) ------------------------------------------------
-function renderRecentActivity(s) {
-  const el = document.getElementById('recentActivityStatus');
-  const rows = [
+async function loadEnrichLog() {
+  await refreshChangeLog();
+}
+
+// Handles both sections of the Log tab: the change log (from
+// /api/enrich/log) and the program-state summary (fetch/report/
+// running-now from /api/status, folded in alongside the LLM backend/
+// item-count info that was already coming from /api/enrich/log — one
+// "what's going on right now" section instead of two). The main poll
+// loop (pollStatus, below) calls this on every tick WHILE the Log tab
+// is open and something's running, so a change made mid-run (e.g. deep
+// into a 3000-paper "Re-resolve paper orgs") shows up within a couple
+// seconds instead of only once the whole run finishes.
+async function refreshChangeLog() {
+  const [statusRes, logRes] = await Promise.all([fetch('/api/status'), fetch('/api/enrich/log')]);
+  const s = await statusRes.json();
+  const data = await logRes.json();
+
+  document.getElementById('enrichLogCount').textContent =
+    `Last ${data.changes.length} change(s), newest first.`;
+  document.getElementById('enrichLogTable').innerHTML = data.changes.map(renderChangeLogLine).join('')
+    || '<p class="hint">No changes recorded yet — this fills in as fetches/enrichment/re-checks actually change something.</p>';
+
+  const activityRows = [
     {
       label: 'Fetch / backfill', at: s.last_fetch_at, next: s.next_fetch_at,
       detail: s.last_fetch_counts
@@ -1946,7 +1965,7 @@ function renderRecentActivity(s) {
       detail: s.last_report_path ? s.last_report_path.split('/').pop() : '',
     },
   ];
-  el.innerHTML = rows.map(r => `
+  let html = activityRows.map(r => `
     <p>
       <strong>${r.label}:</strong> ${fmtAgo(r.at)}${r.next ? ` &nbsp; <span class="hint">next ${fmtUntil(r.next)}</span>` : ''}
       ${r.detail ? ` &nbsp; <span class="hint">${r.detail}</span>` : ''}
@@ -1958,47 +1977,26 @@ function renderRecentActivity(s) {
           + (s.progress_current != null && s.progress_total ? ` (${s.progress_current}/${s.progress_total})` : '')
           + `</p>`
         : '');
-}
 
-async function loadEnrichLog() {
-  const statusRes = await fetch('/api/status');
-  renderRecentActivity(await statusRes.json());
-  await refreshChangeLog();
-}
-
-// Split out from loadEnrichLog so the main poll loop (pollStatus, below)
-// can call this on every tick WHILE the Log tab is open and something's
-// running — a change made mid-run (e.g. deep into a 3000-paper
-// "Re-resolve paper orgs") now shows up within a couple seconds instead
-// of only appearing once the whole run finishes and you happen to
-// reopen/reload the tab.
-async function refreshChangeLog() {
-  const res = await fetch('/api/enrich/log');
-  const data = await res.json();
-
-  const statusEl = document.getElementById('enrichLogStatus');
-  let statusHtml = `<p><strong>backend:</strong> ${data.backend} &nbsp; <strong>model:</strong> ${data.model} `
+  html += `<p><strong>backend:</strong> ${data.backend} &nbsp; <strong>model:</strong> ${data.model} `
     + (data.backend === 'ollama' ? `&nbsp; <strong>ollama_url:</strong> ${data.ollama_url}` : '') + `</p>`;
   if (data.backend !== 'groq' && data.backend !== 'ollama') {
-    statusHtml += `<p style="color:#c0392b">summarizer.backend is "${data.backend}" — every item gets marked `
+    html += `<p style="color:#c0392b">summarizer.backend is "${data.backend}" — every item gets marked `
       + `"unknown" rather than actually extracted. Set <code>summarizer.backend: "groq"</code> (default — free, `
       + `hosted, no install) or <code>"ollama"</code> in config.yaml and restart besseleth.</p>`;
   } else if (data.ollama_ok) {
-    statusHtml += `<p style="color:#2a7d2a">✓ ${data.ollama_message}</p>`;
+    html += `<p style="color:#2a7d2a">✓ ${data.ollama_message}</p>`;
   } else {
-    statusHtml += `<p style="color:#c0392b">✗ ${data.ollama_message}</p>`;
+    html += `<p style="color:#c0392b">✗ ${data.ollama_message}</p>`;
+  }
+  if (data.counts) {
+    html += `<p class="hint">${data.counts.enriched}/${data.counts.total} item(s) enriched.</p>`;
   }
   if (data.stats && data.stats.total_items) {
     const avg = data.stats.total_seconds / data.stats.total_items;
-    statusHtml += `<p class="hint">Enriched ${data.stats.total_items} item(s) all-time (avg ${avg.toFixed(1)}s/item).</p>`;
+    html += `<p class="hint">Enriched ${data.stats.total_items} item(s) all-time (avg ${avg.toFixed(1)}s/item).</p>`;
   }
-  statusEl.innerHTML = statusHtml;
-
-  document.getElementById('enrichLogCount').textContent =
-    `Last ${data.changes.length} change(s), newest first.`;
-
-  document.getElementById('enrichLogTable').innerHTML = data.changes.map(renderChangeLogLine).join('')
-    || '<p class="hint">No changes recorded yet — this fills in as fetches/enrichment/re-checks actually change something.</p>';
+  document.getElementById('programStateStatus').innerHTML = html;
 }
 
 // A real change log — one short line per actual mutation (see
@@ -2012,7 +2010,10 @@ function renderChangeLogLine(c) {
   const valueText = c.old_value == null
     ? `<strong>${c.new_value}</strong>`
     : `from <s class="hint">${c.old_value}</s> to <strong>${c.new_value}</strong>`;
-  const title = c.item_title ? ` on "${c.item_title}"` : '';
+  const titleText = c.item_url
+    ? `<a href="${c.item_url}" target="_blank" rel="noopener">${c.item_title}</a>`
+    : c.item_title;
+  const title = c.item_title ? ` on "${titleText}"` : '';
   return `
     <div style="padding:.3rem 0; border-bottom:1px solid #8883; font-size:.9rem;">
       <span class="hint">${fmtAgo(c.at)}</span> &nbsp;

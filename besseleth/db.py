@@ -223,6 +223,7 @@ CREATE TABLE IF NOT EXISTS change_log (
     at TEXT NOT NULL,
     item_id TEXT,
     item_title TEXT,
+    item_url TEXT,
     source TEXT,
     field TEXT NOT NULL,
     old_value TEXT,
@@ -560,6 +561,17 @@ class DB:
         row = self.conn.execute(f"SELECT COUNT(*) FROM items WHERE source IN ({placeholders})", sources).fetchone()
         return row[0] if row else 0
 
+    def enrichment_counts(self, sources: list[str]) -> dict:
+        """{"total": n, "enriched": m} across `sources` — the Log tab's
+        "Program state" section uses this for "X/Y items enriched",
+        alongside get_enrich_stats()'s timing info."""
+        placeholders = ",".join("?" for _ in sources)
+        total = self.conn.execute(f"SELECT COUNT(*) FROM items WHERE source IN ({placeholders})", sources).fetchone()[0]
+        enriched = self.conn.execute(
+            f"SELECT COUNT(*) FROM items WHERE source IN ({placeholders}) AND enriched_at IS NOT NULL", sources
+        ).fetchone()[0]
+        return {"total": total, "enriched": enriched}
+
     def items_to_reenrich(self, sources: list[str], limit: int) -> list[sqlite3.Row]:
         """Every item in the given sources, oldest-enriched (or never
         enriched) first — for the dashboard's "re-check already-enriched
@@ -609,7 +621,7 @@ class DB:
 
     def log_change(
         self, item_id: Optional[str], item_title: Optional[str], source: Optional[str],
-        field: str, old_value, new_value, reason: str,
+        field: str, old_value, new_value, reason: str, item_url: Optional[str] = None,
     ) -> None:
         """Appends one row to change_log — see its schema comment. Call
         sites decide FOR THEMSELVES whether old_value != new_value is
@@ -617,10 +629,10 @@ class DB:
         conversion is applied to both so a caller can pass a raw int/
         None straight through."""
         self.conn.execute(
-            "INSERT INTO change_log (at, item_id, item_title, source, field, old_value, new_value, reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO change_log (at, item_id, item_title, item_url, source, field, old_value, new_value, reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                datetime.now(timezone.utc).isoformat(), item_id, item_title, source, field,
+                datetime.now(timezone.utc).isoformat(), item_id, item_title, item_url, source, field,
                 None if old_value is None else str(old_value),
                 None if new_value is None else str(new_value),
                 reason,
