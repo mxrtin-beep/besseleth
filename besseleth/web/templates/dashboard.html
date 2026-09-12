@@ -486,7 +486,9 @@ const tabPaste = document.getElementById('tabPaste');
 const tabContacts = document.getElementById('tabContacts');
 const tabSettings = document.getElementById('tabSettings');
 
+let currentTab = null;
 function showTab(which) {
+  currentTab = which;
   reportPane.style.display = which === 'report' ? 'block' : 'none';
   papersPane.style.display = which === 'papers' ? 'block' : 'none';
   enrichLogPane.style.display = which === 'enrichlog' ? 'block' : 'none';
@@ -651,6 +653,15 @@ async function pollStatus() {
     backfillBtn.disabled = s.running_now;
     runNowBtn.textContent = s.running_now ? 'Running…' : 'Run now';
     updateProgressBar(s);
+
+    // Keep the Log tab live while it's the one open, especially during a
+    // long-running "Re-check org names"/"Re-resolve paper orgs" — same
+    // idea as the progress bar above, just for the recent-activity/
+    // change-log content instead of the top status line.
+    if (currentTab === 'enrichlog') {
+      renderRecentActivity(s);
+      refreshChangeLog();
+    }
 
     if (!s.enabled) {
       statusText.textContent = 'Auto-schedule disabled — fetch/report only run when triggered manually.';
@@ -1950,8 +1961,19 @@ function renderRecentActivity(s) {
 }
 
 async function loadEnrichLog() {
-  const [statusRes, res] = await Promise.all([fetch('/api/status'), fetch('/api/enrich/log')]);
+  const statusRes = await fetch('/api/status');
   renderRecentActivity(await statusRes.json());
+  await refreshChangeLog();
+}
+
+// Split out from loadEnrichLog so the main poll loop (pollStatus, below)
+// can call this on every tick WHILE the Log tab is open and something's
+// running — a change made mid-run (e.g. deep into a 3000-paper
+// "Re-resolve paper orgs") now shows up within a couple seconds instead
+// of only appearing once the whole run finishes and you happen to
+// reopen/reload the tab.
+async function refreshChangeLog() {
+  const res = await fetch('/api/enrich/log');
   const data = await res.json();
 
   const statusEl = document.getElementById('enrichLogStatus');
