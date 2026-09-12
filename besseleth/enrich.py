@@ -884,7 +884,7 @@ def _reextract_org_via_llm(row, config: Config, db: DB) -> str | None:
         'researchers"). Respond with ONLY the name, or exactly "unknown" if none is clearly named — never guess.'
     )
     result = summarizer_mod._llm_generate(
-        prompt, config.summarizer, timeout=30, num_thread=config.summarizer.get("num_thread")
+        prompt, config.summarizer, timeout=60, num_thread=config.summarizer.get("num_thread")
     )
     if not result:
         return None
