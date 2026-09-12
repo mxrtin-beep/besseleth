@@ -853,8 +853,6 @@ def reextract_org_names(
         if llm_budget <= 0 or not backend_available:
             break
         check_cancelled(cancel_event)
-        if progress_cb and i % 10 == 0:
-            progress_cb(f"Re-checking org for item {i + 1}/{len(rows)}...", i, len(rows))
         # Already fixed for free above, or would be re-derived to the
         # exact same known_lab again — skip straight to the ones only an
         # LLM call could possibly change.
@@ -870,6 +868,8 @@ def reextract_org_names(
                 db.sync_org(row["id"], new_org, row["org_type"], row["org_description"])
                 llm_changed += 1
         db.mark_org_rechecked(row["id"])  # spent a call either way — never re-picked ahead of an unchecked item again
+        if progress_cb:
+            progress_cb(f"Re-checking org for item {i + 1}/{len(rows)}... ({llm_changed} changed)", llm_checked, None)
 
     return {"checked": len(rows), "changed": free_changed + llm_changed, "llm_checked": llm_checked}
 
@@ -948,8 +948,6 @@ def reextract_paper_orgs(
         if budget <= 0:
             break
         check_cancelled(cancel_event)
-        if progress_cb and i % 5 == 0:
-            progress_cb(f"Re-resolving paper org {i + 1}/{len(rows)}...", i, len(rows))
         budget -= 1
         checked += 1
 
@@ -970,6 +968,18 @@ def reextract_paper_orgs(
             db.sync_org(row["id"], new_org, new_org_type, row["org_description"])
             changed += 1
         db.mark_org_rechecked(row["id"])
+
+        # Every item, not every N — this is a cheap in-memory write (see
+        # SchedulerStatus.set_progress), and the whole point is a live,
+        # trustworthy "checked/changed" counter on the Log tab rather
+        # than a count that only updates in occasional jumps while a
+        # single paper's LLM call can itself take a minute+ on a slow
+        # local model.
+        if progress_cb:
+            # The (current/total) fraction is appended separately by the
+            # dashboard from progress_current/progress_total below — the
+            # label itself only adds what those two numbers don't say.
+            progress_cb(f"Re-resolving paper orgs... ({changed} changed)", i + 1, len(rows))
 
     return {"checked": checked, "changed": changed}
 
