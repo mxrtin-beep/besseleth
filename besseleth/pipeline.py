@@ -325,7 +325,7 @@ def generate_weekly_report(config: Config, db: DB, progress_cb=None, cancel_even
         clip_items=items_by_source["clip"][:max_n],
         personalized_items=personalized,
         summarizer_cfg=config.summarizer,
-        history=db.accumulated_knowledge_stats(),
+        history=db.accumulated_knowledge_stats(window_days_back=days_back),
         top_findings_min_novelty=report_cfg.get("top_findings_min_novelty", 3),
         top_findings_max_count=report_cfg.get("top_findings_max_count", 5),
     )

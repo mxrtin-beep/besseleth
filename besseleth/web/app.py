@@ -213,9 +213,32 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
     def api_possible_duplicate_companies():
         # Flagged, never auto-merged — see company_store's module
         # docstring for why a name-similarity score alone can't be
-        # trusted to decide two companies are the same one.
+        # trusted to decide two companies are the same one. Pairs a
+        # human already said "not duplicates" on are excluded (see
+        # db.dismissed_duplicate_pairs's docstring) — without this a
+        # dismissal didn't persist and the same pair reappeared on
+        # every reload/restart.
         pairs = find_possible_duplicate_companies(config.companies_path)
+        db = DB(config.db_path)
+        try:
+            dismissed = db.dismissed_duplicate_pairs("company")
+        finally:
+            db.close()
+        pairs = [(a, b, ratio) for a, b, ratio in pairs if frozenset((a, b)) not in dismissed]
         return jsonify([{"a": a, "b": b, "ratio": round(ratio, 2)} for a, b, ratio in pairs])
+
+    @app.post("/api/duplicates/dismiss")
+    def api_dismiss_duplicate():
+        payload = request.get_json(force=True) or {}
+        kind, a, b = payload.get("kind"), payload.get("a"), payload.get("b")
+        if kind not in ("org", "company") or not a or not b:
+            return jsonify({"ok": False, "message": "'kind' (org|company), 'a', and 'b' are required."}), 400
+        db = DB(config.db_path)
+        try:
+            db.dismiss_duplicate_pair(kind, a, b)
+        finally:
+            db.close()
+        return jsonify({"ok": True})
 
     @app.post("/api/companies/merge")
     def api_merge_companies():
@@ -237,8 +260,10 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         db = DB(config.db_path)
         try:
             pairs = db.find_possible_duplicate_orgs()
+            dismissed = db.dismissed_duplicate_pairs("org")
         finally:
             db.close()
+        pairs = [(a, b, reason) for a, b, reason in pairs if frozenset((a, b)) not in dismissed]
         return jsonify([{"a": a, "b": b, "reason": reason} for a, b, reason in pairs])
 
     @app.post("/api/orgs/merge")

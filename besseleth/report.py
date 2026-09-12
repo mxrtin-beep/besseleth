@@ -77,15 +77,13 @@ def _paper_lines(items: list[Item]) -> str:
     published papers alike (see pipeline.py: both scrapers feed the same
     "papers" source now, since to a reader they're the same thing:
     research papers, just via two complementary feeds with different
-    tradeoffs). Already sorted newest-first by the caller. Shows the
-    author list directly rather than running it through an LLM summary:
-    an author list is an already-final fact, not something to
-    paraphrase, and an abstract is the paper's own text (nothing left to
-    extract beyond what the link already conveys at a glance)."""
+    tradeoffs). Already sorted newest-first by the caller. Title + link
+    only — no author list, to keep this section scannable; the full
+    author list is still shown in the dashboard's Papers table for
+    anyone who wants it."""
     lines = []
     for i in items:
-        authors = f" — {i.authors}" if i.authors else ""
-        lines.append(f"- **{i.title}**{authors}" + (f" ([link]({i.url}))" if i.url else ""))
+        lines.append(f"- **{i.title}**" + (f" ([link]({i.url}))" if i.url else ""))
     return "\n".join(lines) or "_None this week._"
 
 

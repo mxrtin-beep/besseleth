@@ -97,6 +97,22 @@ CREATE TABLE IF NOT EXISTS org_location_cache (
     checked_at TEXT NOT NULL
 );
 
+-- Remembers a "Not duplicates" decision from the Orgs/Companies tabs'
+-- possible-duplicate flags (see find_possible_duplicate_orgs and
+-- company_store.find_possible_duplicate_companies) — without this,
+-- both are recomputed fresh from current names on every page load with
+-- no memory of what a human already looked at and dismissed, so a
+-- dismissed pair just comes right back on the next visit/restart. kind
+-- is "org" or "company"; a and b are stored with the alphabetically
+-- smaller name first so a lookup doesn't care which order a pair was
+-- computed in this time.
+CREATE TABLE IF NOT EXISTS dismissed_duplicate_pairs (
+    kind TEXT NOT NULL,
+    a TEXT NOT NULL,
+    b TEXT NOT NULL,
+    PRIMARY KEY (kind, a, b)
+);
+
 -- Devices/systems tracked over time (trends/store.py) — e.g. for
 -- neurotech, each BCI's information transfer rate, implant longevity,
 -- FDA regulatory status. Used to live in a hand-copied devices.yaml;
@@ -634,24 +650,50 @@ class DB:
         rows = self.conn.execute("SELECT DISTINCT org FROM items WHERE org IS NOT NULL AND org != ''").fetchall()
         return [r[0] for r in rows]
 
-    def accumulated_knowledge_stats(self) -> dict:
+    def accumulated_knowledge_stats(self, window_days_back: int | None = None) -> dict:
         """A snapshot of everything besseleth has accumulated across all
         runs, ever — not just this week's items. Used to give the report's
         closing 'big picture' section something to place new items
-        against (an org that's been quiet suddenly active again, a trend
-        that's been building for months, etc.)."""
+        against: an org that's been quiet suddenly active again, a trend
+        that's been building for months, AND (when `window_days_back` is
+        given, matching the report's own window) actual past claims —
+        see top_findings_before() — for it to say whether today's items
+        agree or disagree with, not just aggregate activity counts."""
         total_items = self.conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
         earliest = self.conn.execute(
             "SELECT MIN(published_at) FROM items WHERE published_at IS NOT NULL AND published_at != ''"
         ).fetchone()[0]
         org_counts = self.org_item_counts()
         top_orgs = sorted(org_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        past_findings = (
+            [dict(row) for row in self.top_findings_before(window_days_back)] if window_days_back else []
+        )
         return {
             "total_items": total_items,
             "total_orgs": len(org_counts),
             "top_orgs": top_orgs,
             "earliest_date": (earliest or "")[:10],
+            "past_findings": past_findings,
         }
+
+    def top_findings_before(self, cutoff_days_back: int, min_score: int = 4, limit: int = 5) -> list[sqlite3.Row]:
+        """Past high-novelty findings from BEFORE the current report's
+        window (same cutoff math as items_in_window, so this and the
+        window never overlap — otherwise "past" findings would just be
+        today's own items talking to themselves). Used to give the
+        report's closing 'Big picture' section actual prior claims to
+        agree or disagree with, not just aggregate org-activity stats —
+        (title, novelty_rationale, published_at), highest novelty then
+        most recent first."""
+        self.conn.row_factory = sqlite3.Row
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=cutoff_days_back)).isoformat()
+        return list(self.conn.execute(
+            "SELECT title, novelty_rationale, published_at FROM items "
+            "WHERE COALESCE(NULLIF(published_at, ''), fetched_at) < ? AND novelty_score >= ? "
+            "AND novelty_rationale IS NOT NULL AND novelty_rationale != '' "
+            "ORDER BY novelty_score DESC, published_at DESC LIMIT ?",
+            (cutoff, min_score, limit),
+        ).fetchall())
 
     def org_item_counts(self) -> dict[str, int]:
         """{org: item count} for every distinct org — used to pick which
@@ -802,6 +844,22 @@ class DB:
                         _add(name, other, "suffix")
 
         return pairs
+
+    def dismissed_duplicate_pairs(self, kind: str) -> set[frozenset]:
+        """{frozenset({a, b}), ...} of pairs a human already looked at and
+        said "not duplicates" for (see dismissed_duplicate_pairs table's
+        comment in the schema) — the caller filters a freshly-computed
+        possible-duplicates list against this so a dismissed pair stops
+        being flagged instead of coming back on every reload."""
+        rows = self.conn.execute("SELECT a, b FROM dismissed_duplicate_pairs WHERE kind = ?", (kind,)).fetchall()
+        return {frozenset((a, b)) for a, b in rows}
+
+    def dismiss_duplicate_pair(self, kind: str, a: str, b: str) -> None:
+        lo, hi = sorted((a, b))
+        self.conn.execute(
+            "INSERT OR IGNORE INTO dismissed_duplicate_pairs (kind, a, b) VALUES (?, ?, ?)", (kind, lo, hi)
+        )
+        self.conn.commit()
 
     def items_with_org(self) -> list[sqlite3.Row]:
         """(id, org, url) for every item with an org set — for a per-item

@@ -226,7 +226,11 @@ def summarize_context(new_items: list[Item], history: dict, industry_name: str, 
     everything accumulated across every past run (`history`, from
     DB.accumulated_knowledge_stats()): is a quiet org suddenly active
     again, does this continue a trend already being tracked, is it a
-    genuinely new direction. Empty if there's nothing new to place."""
+    genuinely new direction, and — when history["past_findings"] has any
+    (past high-novelty items from before this run's window, with their
+    own novelty_rationale) — does today's news actually AGREE or
+    DISAGREE with one of those specific past claims, not just orgs in
+    the abstract. Empty if there's nothing new to place."""
     if not new_items:
         return ""
 
@@ -235,6 +239,7 @@ def summarize_context(new_items: list[Item], history: dict, industry_name: str, 
     top_orgs = history.get("top_orgs", [])
     top_orgs_str = ", ".join(f"{org} ({n})" for org, n in top_orgs)
     earliest = history.get("earliest_date") or "an earlier date"
+    past_findings = history.get("past_findings", [])
 
     # A concrete hook for the LLM to reason about, rather than just handing
     # it aggregate counts to paraphrase: which of today's items involve an
@@ -260,25 +265,35 @@ def summarize_context(new_items: list[Item], history: dict, industry_name: str, 
     new_titles = "\n".join(f"- {i.title}" for i in new_items[:max_items])
     returning_note = f" (here: {', '.join(returning_orgs)})" if returning_orgs else ""
     fresh_note = f" (here: {', '.join(fresh_orgs)})" if fresh_orgs else ""
+    past_findings_block = (
+        "\n\nSome specific major findings from BEFORE this window (highest-novelty items besseleth already "
+        "flagged in an earlier report) — if any of today's items actually bear on one of these (support it, "
+        "extend it, or contradict it), say so explicitly by name; don't force a connection that isn't really "
+        "there:\n" + "\n".join(f'- "{f["title"]}" — {f["novelty_rationale"]}' for f in past_findings)
+        if past_findings
+        else ""
+    )
     prompt = (
         f"You are writing the closing 'Big picture' section of a weekly {industry_name} "
         f"briefing — analysis for someone who already read the sections above, not a recap "
         f"of the database. You have background stats on everything besseleth has ever "
         f"tracked: {total_items} items since {earliest}, across {total_orgs} organizations, "
-        f"most active historically: {top_orgs_str or 'none tracked yet'}.\n\n"
+        f"most active historically: {top_orgs_str or 'none tracked yet'}.{past_findings_block}\n\n"
         f"Do NOT write a sentence that just restates these numbers (e.g. never write anything "
         f"shaped like 'Besseleth has accumulated N items... most active: X (Y), Z (W)' — that "
         f"is a database dump, not analysis, and the reader already has that data if they want "
         f"it). Instead, in 2-4 sentences, say what today's new items actually MEAN given that "
-        f"history — pick ONE genuine angle and commit to it, e.g.: an org among today's items "
-        f"that's normally one of the most active ones{returning_note} showing up again — is "
-        f"this more of the same, or does it look like a shift in what they're doing; an org in "
-        f"today's items that's rare or new in the whole record{fresh_note} — is this a new "
-        f"entrant worth watching; or, if neither applies cleanly, whether today's items "
-        f"continue a pattern you'd expect from this field's history or actually cut against "
-        f"it. If you genuinely can't identify a real angle from what's given, say plainly that "
-        f"this week doesn't point to a clear shift, rather than manufacturing one. No preamble "
-        f"like 'Here is a summary', no fluff.\n\n"
+        f"history — pick ONE genuine angle and commit to it, in this priority order: (1) if a "
+        f"past finding above is directly relevant, whether today's items agree with it, extend "
+        f"it, or actually cut against it — name the past finding, don't just gesture at it; (2) "
+        f"otherwise, an org among today's items that's normally one of the most active ones"
+        f"{returning_note} showing up again — is this more of the same, or a shift in what "
+        f"they're doing; an org in today's items that's rare or new in the whole record"
+        f"{fresh_note} — is this a new entrant worth watching; (3) or, if none of that applies "
+        f"cleanly, whether today's items continue a pattern you'd expect from this field's "
+        f"history or actually cut against it. If you genuinely can't identify a real angle from "
+        f"what's given, say plainly that this week doesn't point to a clear shift, rather than "
+        f"manufacturing one. No preamble like 'Here is a summary', no fluff.\n\n"
         f"Today's new items:\n{new_titles}\n\nBig picture:"
     )
     result = _llm_generate(prompt, cfg, num_thread=cfg.get("num_thread"))

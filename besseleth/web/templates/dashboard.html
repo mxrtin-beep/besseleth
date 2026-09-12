@@ -1438,7 +1438,12 @@ function renderPossibleDupeOrgs() {
   document.querySelectorAll('#possibleDupeOrgsList button').forEach(btn => {
     btn.onclick = async () => {
       const dupe = possibleDupeOrgs[Number(btn.dataset.i)];
-      if (btn.dataset.keep !== 'neither') {
+      if (btn.dataset.keep === 'neither') {
+        await fetch('/api/duplicates/dismiss', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind: 'org', a: dupe.a, b: dupe.b }),
+        });
+      } else {
         const keep = btn.dataset.keep === 'a' ? dupe.a : dupe.b;
         const drop = btn.dataset.keep === 'a' ? dupe.b : dupe.a;
         await fetch('/api/orgs/merge', {
@@ -2022,7 +2027,12 @@ function renderPossibleDupes() {
   document.querySelectorAll('#possibleDupesList button').forEach(btn => {
     btn.onclick = async () => {
       const dupe = possibleDupes[Number(btn.dataset.i)];
-      if (btn.dataset.keep !== 'neither') {
+      if (btn.dataset.keep === 'neither') {
+        await fetch('/api/duplicates/dismiss', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind: 'company', a: dupe.a, b: dupe.b }),
+        });
+      } else {
         const keep = btn.dataset.keep === 'a' ? dupe.a : dupe.b;
         const drop = btn.dataset.keep === 'a' ? dupe.b : dupe.a;
         await fetch('/api/companies/merge', {
