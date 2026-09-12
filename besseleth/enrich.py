@@ -44,12 +44,13 @@ from urllib.parse import urlparse
 import requests
 
 from . import web_lookup
+from .cancel import FetchCancelled, check_cancelled
 from .config import Config, env
 from .db import DB
 from .feeds_store import load_feeds
-from .geocode import geocode
+from .geocode import geocode, reverse_geocode
 from .trends import company_store
-from .trends.company_store import auto_mark_ipo, auto_upsert_company
+from .trends.company_store import auto_mark_ipo, auto_upsert_company, record_company_event
 from .trends.store import auto_append_device
 from . import summarizer as summarizer_mod
 
@@ -87,6 +88,34 @@ def ollama_status(summarizer_cfg: dict) -> tuple[bool, str]:
             f"Ollama is running, but model {model!r} isn't pulled. Run: ollama pull {model}"
         )
     return True, f"Ollama reachable at {ollama_url}, model {model!r} available."
+
+
+def llm_status(summarizer_cfg: dict) -> tuple[bool, str]:
+    """Same idea as ollama_status, generalized to whichever backend is
+    actually configured. For "groq" (the default), just checks a key is
+    present — not worth spending a real API call (and a slice of the
+    free tier's per-minute quota) on a reachability probe before every
+    enrich batch, so a bad/expired key or an actual Groq outage is
+    caught by the per-item call itself (which falls back to Ollama, if
+    configured, automatically — see summarizer._llm_generate) rather
+    than here."""
+    backend = summarizer_cfg.get("backend", "groq")
+    if backend == "groq":
+        import os
+
+        if summarizer_cfg.get("groq_api_key") or os.environ.get("GROQ_API_KEY"):
+            return True, "Groq API key configured."
+        if summarizer_cfg.get("groq_fallback_to_ollama", True):
+            # No key, but Ollama fallback is on — fine as long as Ollama
+            # itself is actually reachable.
+            return ollama_status(summarizer_cfg)
+        return False, (
+            "No Groq API key configured (summarizer.groq_api_key or GROQ_API_KEY env var) and "
+            "groq_fallback_to_ollama is off — nothing to enrich with."
+        )
+    if backend == "ollama":
+        return ollama_status(summarizer_cfg)
+    return False, f"summarizer.backend is {backend!r} — no LLM configured."
 
 
 def _build_prompt(row, config: Config, context: str, author_affiliations: str = "", known_benchmarks: str = "") -> str:
@@ -194,6 +223,12 @@ def _build_prompt(row, config: Config, context: str, author_affiliations: str = 
         'funding amount/round for "org"; ipo_date/stock_exchange only if this item reports "org" actually going '
         'public (an IPO that happened or a completed direct listing — e.g. "NASDAQ: XYZ" starts trading), NOT a '
         'mere announcement/rumor of a planned future IPO — use {} if none of this applies\n'
+        '  "org_event": an object {"event_type": one of "regulatory_approval", "merger_acquisition", '
+        '"leadership_change", "other", "event_date": "YYYY-MM-DD" or null, "title": a short human-readable label '
+        '(e.g. "FDA clears X for Y", "Acquires Z", "Names new CEO"), "description": one concise sentence} if this '
+        'item reports "org" reaching a SPECIFIC, DATED-OR-RECENT milestone of one of those kinds that actually '
+        "happened (not a rumor/plan/analyst speculation) and isn't already covered by company_funding above "
+        "(funding rounds and IPOs go there, not here) — use {} if none of this applies\n"
         f"{affiliations_block}"
         f"{benchmarks_block}\n"
         f"Item title: {row['title']}\nItem text: {(row['summary'] or '')[:1500]}\n\n"
@@ -206,7 +241,7 @@ _NON_ORG_EXACT = {
     "unknown", "n/a", "na", "none", "null", "nil", "various", "unspecified", "not specified", "not mentioned",
     "not applicable", "researchers", "scientists", "the researchers", "the scientists", "authors",
     "the authors", "the team", "the company", "the companies", "the university", "the lab", "the labs",
-    "investigators", "academics",
+    "investigators", "academics", "general",
 }
 # Generic media/journal-publisher names common enough across almost any
 # science/tech-news feed mix that they're worth rejecting outright,
@@ -348,6 +383,17 @@ _SPECIFIC_UNIT_RE = re.compile(
     r"\b(lab|labs|laboratory|institute|center|centre|group|department|dept|program|initiative)\b",
     re.IGNORECASE,
 )
+# "Stanford-affiliated research group", "a Berkeley-affiliated research
+# lab" — names an institution but, just like a bare university name
+# alone, no actual specific lab/PI — the word "group"/"lab" here doesn't
+# save it from being too coarse the way it would for _SPECIFIC_UNIT_RE's
+# purpose elsewhere (that check assumes the specific-sounding word means
+# a REAL unit was named; "research group" here is exactly as generic as
+# "the university" itself, not a name).
+_AFFILIATED_GROUP_RE = re.compile(
+    r"-affiliated\s+research\s+(group|team|lab|labs|laboratory|center|centre)s?\s*$",
+    re.IGNORECASE,
+)
 
 
 def _is_bare_university(org: str) -> bool:
@@ -371,7 +417,14 @@ _HEDGING_PHRASES = (
     "not a specific", "not specific", "no specific", "didn't mention", "did not mention",
     "doesn't mention", "does not mention", "unspecified", "n/a", "note:", "possibly",
     "according to another", "isn't clear", "is not clear", "unclear from",
+    "undisclosed", "implied", "not disclosed", "not stated", "not indicated", "not identified",
 )
+# A real org/lab name never trails off ending in a bare preposition/
+# article/conjunction — that shape means the actual name got cut off
+# somewhere upstream (a truncated hedge like "the research institution/
+# clinics of", or a sentence fragment), not that the name itself ends
+# there.
+_DANGLING_END_RE = re.compile(r"\b(of|at|in|for|and|or|the|a|an|to|with|by)\s*[/,]?\s*$", re.IGNORECASE)
 
 
 def _clean_org_value(raw: str | None) -> str | None:
@@ -420,6 +473,18 @@ def _clean_org_value(raw: str | None) -> str | None:
         if any(phrase in inner.lower() for phrase in _HEDGING_PHRASES) or len(inner.split()) > 3:
             org = org[: trailing_paren.start()].strip()
 
+    # "Merge Labs [undisclosed]", "University of [not specified]" — a
+    # bracket-wrapped placeholder is NEVER part of a real org's name
+    # (unlike parens, which sometimes legitimately hold an institution),
+    # so it's always safe to strip outright rather than reject the whole
+    # string over it — that salvages "Merge Labs" instead of losing a
+    # real name to an unrelated annotation. Whatever's left still goes
+    # through every check below, so "University of [not specified]" →
+    # "University of" still gets caught by the dangling-fragment check.
+    if "[" in org:
+        org = re.sub(r"\[[^\]]*\]?", "", org)
+        org = re.sub(r"\s+", " ", org).strip()
+
     if not org:
         return None
     lowered = org.lower()
@@ -429,6 +494,12 @@ def _clean_org_value(raw: str | None) -> str | None:
     # catches hedging prose the checks above didn't happen to unwrap.
     if len(org.split()) > 8:
         return None
+    # "the research institution/clinics of" — a fragment that got cut off
+    # before naming anything, most often "<vague description> of" with
+    # the actual name missing. A real org name never trails off ending in
+    # a bare preposition/article/conjunction like this.
+    if _DANGLING_END_RE.search(org):
+        return None
     return org
 
 
@@ -436,14 +507,25 @@ def _match_known_lab(text: str, config: Config) -> str | None:
     """Deterministic override using labs.yaml (see labs_store.py) — real
     ground truth you supplied, not an LLM guess. If `text` mentions a
     listed PI's surname, AND (when the entry gives one) their university,
-    returns the canonical "<PI> Lab at <University>" form directly;
-    checked BEFORE the LLM's own org extraction is used, so a listed lab
-    is never subject to however the LLM's phrasing or normalization
-    happens to shake out. Requiring the university too (when given) is
-    what keeps a common surname from matching every item that happens to
-    share it — "Chen" alone proves nothing, "Chen" + "USC" is specific.
-    None if nothing in labs.yaml matches (falls through to the LLM's own
+    returns the canonical "<University>, <PI> Lab" form directly (same
+    format _normalize_lab_name produces — routed through it here too, so
+    labs.yaml-sourced and LLM-extracted orgs for the same lab always
+    match exactly rather than merely being squash-equivalent); checked
+    BEFORE the LLM's own org extraction is used, so a listed lab is
+    never subject to however the LLM's phrasing or normalization happens
+    to shake out. Requiring the university too (when given) is what
+    keeps a common surname from matching every item that happens to
+    share it — "Chen" alone proves nothing, "Chen" + "USC" is specific —
+    but only when labs.yaml itself has more than one PI with that
+    surname: a surname that's unique across labs.yaml is already
+    unambiguous ground truth on its own (e.g. a plain "Poon Lab" mention
+    with no "Stanford" anywhere in that item's own text otherwise fell
+    through to the LLM, which has no way to know which of the many real-
+    world Poon labs is meant, and correctly gave up with "Undetermined"
+    instead of guessing — this is what actually resolves it). None if
+    nothing in labs.yaml matches (falls through to the LLM's own
     extraction, exactly as before labs.yaml existed)."""
+    surnames = [lab["pi"].split()[-1] for lab in config.labs if lab.get("pi")]
     for lab in config.labs:
         pi = lab["pi"]
         if not pi:
@@ -452,9 +534,10 @@ def _match_known_lab(text: str, config: Config) -> str | None:
         if not re.search(rf"\b{re.escape(surname)}\b", text, re.IGNORECASE):
             continue
         university = lab["university"]
-        if university and not re.search(rf"\b{re.escape(university)}\b", text, re.IGNORECASE):
+        ambiguous_surname = surnames.count(surname) > 1
+        if university and ambiguous_surname and not re.search(rf"\b{re.escape(university)}\b", text, re.IGNORECASE):
             continue
-        return f"{pi} Lab at {university}" if university else f"{pi} Lab"
+        return _normalize_lab_name(f"{pi} Lab at {university}" if university else f"{pi} Lab")
     return None
 
 
@@ -500,6 +583,8 @@ def _looks_like_a_named_org(org: str, config: Config) -> bool:
     if normalized in _COUNTRIES or _COUNTRY_POSSESSIVE_RE.match(org.strip()):
         return False
     if _is_bare_university(org):
+        return False
+    if _AFFILIATED_GROUP_RE.search(org.strip()):
         return False
     if _LOOKS_LIKE_A_DOMAIN_RE.match(org.strip()):
         return False
@@ -559,29 +644,76 @@ _LAB_NAME_RE = re.compile(
     r"(?:\s*(?:at|@|,|\()\s*(?P<inst>[^)]+?)\)?)?$",
     re.IGNORECASE,
 )
+# Same idea, institution named FIRST — "Stanford University, Shenoy Lab",
+# "Stanford University's Shenoy Lab". Without this, only the PI-first
+# ordering above got normalized, so these two (and "Shenoy Lab at
+# Stanford") landed in three different Orgs-table rows instead of one —
+# exactly the kind of duplicate-by-phrasing this whole mechanism exists
+# to prevent, just missed for the other word order.
+_INSTITUTION_FIRST_LAB_RE = re.compile(
+    r"^(?P<inst>[A-Za-z][\w&.\-' ]*?)(?:'s|\s*,)\s+(?:the\s+)?(?P<pi>[A-Za-z][\w-]*)(?:'s)?\s+lab(?:oratory)?$",
+    re.IGNORECASE,
+)
+
+
+UNDETERMINED_LAB_INSTITUTION = "Undetermined"
 
 
 def _normalize_lab_name(org: str) -> str:
     """Collapses the handful of ways a PI-named lab gets phrased — "the
     Shenoy Lab at Stanford", "Shenoy's lab at Stanford", "Shenoy Lab",
     "the Shenoy Laboratory", "Shenoy Lab (Stanford)", "Shenoy Lab,
-    Stanford" — into one consistent "<PI> Lab[ at <institution>]" form,
-    so the same lab doesn't fork into multiple Orgs-table rows just
-    because the LLM (or the source text) phrased it differently from one
-    item to the next. A no-op (returns `org` unchanged) for anything
-    that doesn't match this specific shape — never guesses at a name it
-    isn't confident is a PI-named lab."""
-    match = _LAB_NAME_RE.match(org.strip())
-    if not match:
-        return org
-    pi = match.group("pi").strip()
+    Stanford", "Stanford University, Shenoy Lab", "Stanford University's
+    Shenoy Lab" — into ONE consistent "<Institution>, <PI> Lab" form,
+    institution always first, so the same lab doesn't fork into multiple
+    Orgs-table rows just because the LLM (or the source text) phrased it
+    differently from one item to the next — and so every lab org reads
+    the same shape at a glance instead of some being "X Lab at Y" and
+    others "Y, X Lab". When no institution was ever given, that segment
+    becomes the literal word "Undetermined" (see
+    UNDETERMINED_LAB_INSTITUTION) rather than being dropped — "Shenoy
+    Lab" alone is ambiguous with every other Shenoy across every
+    university; "Undetermined, Shenoy Lab" says plainly that the
+    institution just hasn't been established yet, and is one exact
+    string away from being merged into the real thing once it is
+    (rename_org/merge_org, same as any other org). A no-op (returns
+    `org` unchanged) for anything that doesn't match either lab shape —
+    never guesses at a name it isn't confident is a PI-named lab."""
+    stripped = org.strip()
+    match = _LAB_NAME_RE.match(stripped)
+    inst = None
+    if match:
+        pi = match.group("pi").strip()
+        inst = match.group("inst")
+    else:
+        match = _INSTITUTION_FIRST_LAB_RE.match(stripped)
+        if not match:
+            return org
+        pi = match.group("pi").strip()
+        inst = match.group("inst")
     if pi.islower() or pi.isupper():
         pi = pi.capitalize()  # leaves mixed-case names ("McCarthy") alone
-    inst = re.sub(r"\s+", " ", (match.group("inst") or "").strip()).rstrip(".")
-    canonical = f"{pi} Lab"
-    if inst:
-        canonical += f" at {inst}"
-    return canonical
+    inst = re.sub(r"\s+", " ", (inst or "").strip()).rstrip(".") or UNDETERMINED_LAB_INSTITUTION
+    return f"{inst}, {pi} Lab"
+
+
+def _institution_for_geocoding(org: str) -> str | None:
+    """The parent institution behind a PI-named lab (see
+    _normalize_lab_name) — e.g. "Stanford" out of "Shenoy Lab at
+    Stanford" — for geocoding to use INSTEAD of the full lab name. A
+    specific PI's lab is essentially never itself in Wikidata/Wikipedia
+    (only the university is), so looking up the lab string directly
+    routinely fails and falls through to the slower/less reliable web-
+    search-plus-LLM tier for something that has one well-known, easy-to-
+    find physical location. None if `org` isn't a normalizable lab name,
+    or normalizes to one with no real (established) institution part —
+    "Undetermined, ... Lab" included, since geocoding the literal word
+    "Undetermined" would be worse than not trying at all."""
+    canonical = _normalize_lab_name(org)
+    match = re.match(r"^(.+), .+ Lab$", canonical)
+    if not match or match.group(1) == UNDETERMINED_LAB_INSTITUTION:
+        return None
+    return match.group(1).strip()
 
 
 def _canonicalize_new_org(org: str, db: DB) -> str:
@@ -722,15 +854,11 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
     known_benchmarks = _known_benchmarks_block(config, db)
 
     prompt = _build_prompt(row, config, context, author_affiliations, known_benchmarks)
-    result = summarizer_mod._ollama_generate(
-        prompt,
-        summarizer_cfg.get("ollama_url", "http://localhost:11434"),
-        summarizer_cfg.get("model", "llama3.1"),
-        timeout=60,
-        num_thread=summarizer_cfg.get("num_thread"),
+    result = summarizer_mod._llm_generate(
+        prompt, summarizer_cfg, timeout=60, num_thread=summarizer_cfg.get("num_thread"),
     )
     if result is None:
-        return False  # Ollama unreachable — retry next time
+        return False  # no LLM backend reachable — retry next time
 
     data = _extract_json(result) or {}
     novelty = data.get("novelty_score")
@@ -775,6 +903,13 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
         coords = geocode(location_text)
         if coords:
             lat, lon = coords
+            # Standardize to "City[, State], Country" regardless of
+            # however the LLM happened to phrase its own guess ("London,
+            # England", "London, UK", "London" alone all land here) —
+            # falls back to the LLM's original text if the reverse
+            # lookup itself fails, so a location is never lost over a
+            # formatting nicety.
+            location_text = reverse_geocode(lat, lon) or location_text
 
     db.save_enrichment(
         row["id"],
@@ -813,6 +948,7 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
 
     funding = data.get("company_funding") or {}
     if org and funding.get("funding_total_usd"):
+        funding_date = funding.get("last_funding_date") or (row["published_at"] or "")[:10]
         auto_upsert_company(
             config.companies_path,
             name=org,
@@ -824,7 +960,15 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
             # with real funding data just never appeared on the Trends
             # tab's date-axis chart (it had table entries but no point to
             # plot).
-            last_funding_date=funding.get("last_funding_date") or (row["published_at"] or "")[:10],
+            last_funding_date=funding_date,
+            source_url=row["url"] or "",
+        )
+        amount = funding.get("funding_total_usd")
+        round_label = funding.get("last_funding_round") or "funding round"
+        record_company_event(
+            config.companies_path, org, "funding", funding_date,
+            title=f"${amount:,.0f} {round_label}" if isinstance(amount, (int, float)) else round_label,
+            description=f"Reported {round_label} for {org}.",
             source_url=row["url"] or "",
         )
     if org and funding.get("ipo_date"):
@@ -833,6 +977,37 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
             name=org,
             ipo_date=funding["ipo_date"],
             stock_exchange=funding.get("stock_exchange") or "",
+        )
+        record_company_event(
+            config.companies_path, org, "ipo", funding["ipo_date"],
+            title=f"IPO{' on ' + funding['stock_exchange'] if funding.get('stock_exchange') else ''}",
+            description=f"{org} went public.",
+            source_url=row["url"] or "",
+        )
+
+    # Merger/leadership-change/regulatory-approval events — see the
+    # "org_event" field in the extraction prompt above. Funding/IPO are
+    # handled separately (they came from company_funding, which has its
+    # own dedicated fields the LLM is more reliable filling in).
+    org_event = data.get("org_event") or {}
+    if org and org_event.get("event_type") and org_event.get("title"):
+        record_company_event(
+            config.companies_path, org, org_event["event_type"], org_event.get("event_date"),
+            title=org_event["title"], description=org_event.get("description") or "",
+            source_url=row["url"] or "",
+        )
+
+    # A paper this novel (relative to other recent items on the same
+    # topic — see the novelty_score instructions above) about a specific
+    # org is itself timeline-worthy, the same way a funding round or IPO
+    # is — this is what lets "important papers" show up on the Events
+    # Timeline alongside the business milestones.
+    if org and row["source"] in ("papers", "arxiv") and novelty and novelty >= 4:
+        record_company_event(
+            config.companies_path, org, "notable_paper", (row["published_at"] or "")[:10],
+            title=row["title"][:140],
+            description=data.get("novelty_rationale") or "",
+            source_url=row["url"] or "",
         )
 
     return True
@@ -843,11 +1018,11 @@ def _search_org_location(org: str, summarizer_cfg: dict) -> tuple[str, float, fl
     read the results, for an org Wikidata doesn't know about — covers
     the small/early-stage companies tier 1 misses, at the cost of an
     LLM call, so this only runs after that one comes back empty.
-    Requires Ollama; returns None on any failure at any step (no
-    results, Ollama unreachable, the model saying it can't tell, or a
+    Requires an LLM backend; returns None on any failure at any step (no
+    results, backend unreachable, the model saying it can't tell, or a
     location that fails the same validity check as the LLM's own item-
     level extraction)."""
-    if summarizer_cfg.get("backend") != "ollama":
+    if summarizer_cfg.get("backend", "groq") not in summarizer_mod.LLM_BACKENDS:
         return None
     snippets = web_lookup.duckduckgo_search(f"{org} headquarters location city")
     if not snippets:
@@ -858,13 +1033,7 @@ def _search_org_location(org: str, summarizer_cfg: dict) -> tuple[str, float, fl
         f'office in? Respond with ONLY "City, Country" (e.g. "San Francisco, USA"), or exactly "unknown" if the '
         f"snippets don't make it clear — never guess.\n\nSnippets:\n" + "\n".join(f"- {s}" for s in snippets)
     )
-    result = summarizer_mod._ollama_generate(
-        prompt,
-        summarizer_cfg.get("ollama_url", "http://localhost:11434"),
-        summarizer_cfg.get("model", "llama3.1"),
-        timeout=30,
-        num_thread=summarizer_cfg.get("num_thread"),
-    )
+    result = summarizer_mod._llm_generate(prompt, summarizer_cfg, timeout=30, num_thread=summarizer_cfg.get("num_thread"))
     if not result:
         return None
 
@@ -874,10 +1043,13 @@ def _search_org_location(org: str, summarizer_cfg: dict) -> tuple[str, float, fl
     coords = geocode(location_text)
     if not coords:
         return None
+    location_text = reverse_geocode(*coords) or location_text
     return (location_text, *coords)
 
 
-def _backfill_org_locations(config: Config, db: DB, max_lookups_override: int | None = None) -> int:
+def _backfill_org_locations(
+    config: Config, db: DB, max_lookups_override: int | None = None, cancel_event=None, progress_cb=None
+) -> int:
     """Fills in a missing location for orgs that have none, independent
     of the LLM pass above (that one only ever knows what a given item's
     own text says, so an org whose location was never mentioned in any
@@ -912,25 +1084,45 @@ def _backfill_org_locations(config: Config, db: DB, max_lookups_override: int | 
 
         if attempted >= max_lookups:
             continue
+        # Checked per-org, not just once before this whole function — each
+        # iteration can be a real web request plus an LLM call (tier 3),
+        # so this loop alone is exactly the kind of "stuck for a while
+        # with no per-item progress update" phase where a Cancel click
+        # otherwise had nothing to catch it until the WHOLE backfill (up
+        # to max_lookups orgs) finished.
+        check_cancelled(cancel_event)
         attempted += 1
-        result = web_lookup.lookup_org_location(org) or _search_org_location(org, config.summarizer)
+        if progress_cb:
+            progress_cb(f"Looking up location for {org}...", None, None)
+        # A PI-named lab is essentially never itself in Wikidata — its
+        # parent institution always is, and that's a perfectly good,
+        # well-established physical location to plot a lab at (see
+        # _institution_for_geocoding's docstring). Try that first; fall
+        # back to the org's own name (then the web-search+LLM tier) if
+        # `org` doesn't parse as a lab name at all.
+        geocode_query = _institution_for_geocoding(org) or org
+        result = web_lookup.lookup_org_location(geocode_query) or _search_org_location(org, config.summarizer)
         if result:
             label, lat, lon = result
+            label = reverse_geocode(lat, lon) or label  # standardize regardless of which tier found it
             db.set_org_location(org, label, lat, lon)
             db.set_org_location_cache(org, found=True, location_text=label, lat=lat, lon=lon)
             filled += 1
-        elif config.summarizer.get("backend") == "ollama":
+        elif config.summarizer.get("backend", "groq") in summarizer_mod.LLM_BACKENDS:
             # Only cache a miss once tier 3 (the LLM-read web search) got
-            # a genuine shot — with backend != "ollama", _search_org_location
-            # returns None immediately without trying, so caching that as
-            # "not found" would wrongly lock the org out of a real check
-            # for location_recheck_days once Ollama is actually available.
+            # a genuine shot — with no LLM backend configured,
+            # _search_org_location returns None immediately without
+            # trying, so caching that as "not found" would wrongly lock
+            # the org out of a real check for location_recheck_days once
+            # a backend is actually available.
             db.set_org_location_cache(org, found=False)
 
     return filled
 
 
-def _backfill_contact_locations(config: Config, db: DB, max_lookups_override: int | None = None) -> int:
+def _backfill_contact_locations(
+    config: Config, db: DB, max_lookups_override: int | None = None, cancel_event=None, progress_cb=None
+) -> int:
     """Same free Wikidata/Wikipedia (then web-search+LLM) lookup as
     _backfill_org_locations, but for your contacts' current employers —
     powers the Map tab's "friends" layer, which needs a location for a
@@ -962,13 +1154,18 @@ def _backfill_contact_locations(config: Config, db: DB, max_lookups_override: in
             continue  # already resolved (or already tried and came up empty) — cache handles recheck
         if attempted >= max_lookups:
             continue
+        check_cancelled(cancel_event)  # see _backfill_org_locations's comment on why this needs to be per-org
         attempted += 1
-        result = web_lookup.lookup_org_location(org) or _search_org_location(org, config.summarizer)
+        if progress_cb:
+            progress_cb(f"Looking up location for {org}...", None, None)
+        geocode_query = _institution_for_geocoding(org) or org
+        result = web_lookup.lookup_org_location(geocode_query) or _search_org_location(org, config.summarizer)
         if result:
             label, lat, lon = result
+            label = reverse_geocode(lat, lon) or label
             db.set_org_location_cache(org, found=True, location_text=label, lat=lat, lon=lon)
             filled += 1
-        elif config.summarizer.get("backend") == "ollama":
+        elif config.summarizer.get("backend", "groq") in summarizer_mod.LLM_BACKENDS:
             db.set_org_location_cache(org, found=False)  # see _backfill_org_locations's comment on this condition
 
     return filled
@@ -1009,6 +1206,38 @@ def _standardize_location_names(db: DB) -> int:
                 v["location_text"], v["lat"], v["lon"], canonical["location_text"], canonical["lat"], canonical["lon"]
             )
     return renamed
+
+
+def standardize_location_labels(db: DB) -> dict:
+    """One-time-or-whenever bulk reformat (Settings tab) of every
+    already-stored location_text to "City[, State], Country" via
+    reverse_geocode() — for a location stored before that standardizing
+    was wired into the extraction paths themselves (see the two direct
+    geocode() call sites and _backfill_org_locations/
+    _backfill_contact_locations above), or one whose original guess
+    (an LLM's own phrasing, a Wikidata/Wikipedia entity label) just
+    never matched the standard format to begin with. Covers both the
+    items table (via location_text_variants()/standardize_location())
+    and the org_location_cache table (the per-org HQ guess reapplied to
+    new items for that org, kept in sync too — otherwise a freshly
+    re-fetched item for an already-cached org would get the OLD,
+    unstandardized label right back). Returns {"checked", "updated"}."""
+    checked = 0
+    updated = 0
+    for row in db.location_text_variants():
+        checked += 1
+        canonical = reverse_geocode(row["lat"], row["lon"])
+        if canonical and canonical != row["location_text"]:
+            updated += db.standardize_location(
+                row["location_text"], row["lat"], row["lon"], canonical, row["lat"], row["lon"]
+            )
+    for row in db.org_location_cache_rows():
+        checked += 1
+        canonical = reverse_geocode(row["lat"], row["lon"])
+        if canonical and canonical != row["location_text"]:
+            db.set_org_location_cache(row["org"], found=True, location_text=canonical, lat=row["lat"], lon=row["lon"])
+            updated += 1
+    return {"checked": checked, "updated": updated}
 
 
 def _apply_location_consensus(db: DB) -> int:
@@ -1134,13 +1363,15 @@ def _sync_duplicate_orgs(config: Config, db: DB) -> tuple[int, int]:
 
 def enrich_items_detailed(
     config: Config, db: DB, force: bool = False, run_until_done: bool = False, background: bool = False,
-    progress_cb=None,
+    progress_cb=None, cancel_event=None,
 ) -> dict:
     """Returns {"processed": int, "message": str, "backend": str} — the
     message always explains a 0, so 'nothing happened' is never silent:
     enrichment disabled in config, nothing left to enrich (already
     caught up), no LLM configured (marked unknown instead), or Ollama
-    unreachable (left pending — will retry once it's back).
+    unreachable (left pending — will retry once it's back), or
+    cancelled (see cancel.py — checked once per item, between LLM calls;
+    whatever was already enriched in this run stays enriched).
 
     Modes:
       - default, interactive (force=False, run_until_done=False,
@@ -1279,11 +1510,11 @@ def enrich_items_detailed(
     # so "not found" wasn't a real answer — see the comment where this is
     # now guarded against in _backfill_org_locations). Gated on a meta
     # flag so this only ever runs once, not every enrich call.
-    if config.summarizer.get("backend") == "ollama" and not db.get_meta("location_cache_backend_fix_applied"):
+    if config.summarizer.get("backend", "groq") in summarizer_mod.LLM_BACKENDS and not db.get_meta("location_cache_backend_fix_applied"):
         reset = db.clear_negative_location_cache()
         db.set_meta("location_cache_backend_fix_applied", "1")
         if reset:
-            print(f"[enrich] Reset {reset} cached 'not found' location(s) so they get a real check now that Ollama is available.")
+            print(f"[enrich] Reset {reset} cached 'not found' location(s) so they get a real check now that an LLM backend is available.")
 
     invalid_locations = [loc for loc in db.distinct_locations() if not _looks_like_a_real_location(loc)]
     locations_cleared = db.clear_location_matches(invalid_locations)
@@ -1313,13 +1544,36 @@ def enrich_items_detailed(
     # Lower enrichment.run_until_done_location_lookup_cap if this run is
     # too heavy for your machine.
     location_lookup_cap = cfg.get("run_until_done_location_lookup_cap", 50) if run_until_done else None
-    locations_filled = _backfill_org_locations(config, db, max_lookups_override=location_lookup_cap)
-    contact_locations_filled = _backfill_contact_locations(config, db, max_lookups_override=location_lookup_cap)
+    # Initialized here (before the expanded try/except FetchCancelled
+    # below, which now covers the location backfill too, not just the
+    # per-item loop) so they're always defined for the message-building
+    # code after the try block, however early a cancel interrupts it.
+    total_processed = 0
+    total_attempted = 0
+    work_seconds = 0.0  # excludes the deliberate pause_seconds sleeps — this is actual enrich time, not throttling
+    cancelled = False
+    try:
+        locations_filled = _backfill_org_locations(
+            config, db, max_lookups_override=location_lookup_cap, cancel_event=cancel_event, progress_cb=progress_cb
+        )
+        contact_locations_filled = _backfill_contact_locations(
+            config, db, max_lookups_override=location_lookup_cap, cancel_event=cancel_event, progress_cb=progress_cb
+        )
+    except FetchCancelled:
+        cancelled = True
+        locations_filled = contact_locations_filled = 0
+        print("[enrich] Cancelled during org location backfill.")
     location_note = (
         f" Filled in a location for {locations_filled} org(s) via web lookup." if locations_filled else ""
     )
     if contact_locations_filled:
         location_note += f" Filled in a location for {contact_locations_filled} contact employer(s)."
+
+    if cancelled:
+        stats = db.get_enrich_stats()
+        message = "Cancelled during org location backfill (before item enrichment started)." + location_note
+        print(f"[enrich] {message}")
+        return {"processed": 0, "message": message, "backend": backend, "stats": stats, "cancelled": True}
 
     sources = cfg.get("sources", DEFAULT_SOURCES)
     max_items = cfg.get("max_items_per_run", 20)
@@ -1352,7 +1606,7 @@ def enrich_items_detailed(
             "backend": backend,
         }
 
-    if backend != "ollama":
+    if backend not in summarizer_mod.LLM_BACKENDS:
         rows = first_rows
         for row in rows:
             db.save_enrichment(
@@ -1360,14 +1614,14 @@ def enrich_items_detailed(
                 therapeutic_target="unknown", novelty_score=None, novelty_rationale=None,
             )
         msg = (
-            f"summarizer.backend is {backend!r}, not 'ollama' — marked {len(rows)} item(s) 'unknown' rather than "
-            f"leaving them pending. Set summarizer.backend: \"ollama\" in config.yaml and have Ollama running to "
+            f"summarizer.backend is {backend!r} — marked {len(rows)} item(s) 'unknown' rather than leaving them "
+            f'pending. Set summarizer.backend to "groq" (default — free, hosted, no install) or "ollama" to '
             f"actually extract org/modality/location/etc.{location_note}"
         )
         print(f"[enrich] {msg}")
         return {"processed": len(rows), "message": msg, "backend": backend}
 
-    ok, status_msg = ollama_status(summarizer_cfg)
+    ok, status_msg = llm_status(summarizer_cfg)
     if not ok:
         status_msg += location_note
         print(f"[enrich] {status_msg}")
@@ -1375,9 +1629,6 @@ def enrich_items_detailed(
 
     pause_seconds = cfg.get("pause_seconds", 0)
 
-    total_processed = 0
-    total_attempted = 0
-    work_seconds = 0.0  # excludes the deliberate pause_seconds sleeps — this is actual enrich time, not throttling
     rows = first_rows
     # A very basic total estimate — exact for force+run_until_done (a
     # snapshot count taken above) and for the plain interactive/background
@@ -1386,56 +1637,63 @@ def enrich_items_detailed(
     # backlog size isn't known until it runs dry — so the bar undershoots a
     # bit there rather than promising a total it can't back up.
     progress_total = force_pool_size if force_pool_size is not None else len(first_rows)
-    while rows:
-        total_attempted += len(rows)
-        batch_processed = 0
-        for i, row in enumerate(rows):
-            if progress_cb:
-                progress_cb(f"Enriching item {total_attempted - len(rows) + i + 1}", total_attempted - len(rows) + i + 1, progress_total)
-            item_start = time.time()
-            try:
-                if _enrich_one(row, db, config, summarizer_cfg):
-                    total_processed += 1
-                    batch_processed += 1
-            except Exception as e:
-                print(f"[enrich] Failed on item {row['id']}: {e}")
-            work_seconds += time.time() - item_start
-            # Gives the CPU a breather between LLM calls instead of hammering
-            # it back-to-back for the whole batch — set enrichment.pause_seconds
-            # in config.yaml if enrich runs are making the machine unusable.
-            # Skipped after the last item so it doesn't delay returning.
-            if pause_seconds and i < len(rows) - 1:
-                time.sleep(pause_seconds)
+    try:
+        while rows:
+            total_attempted += len(rows)
+            batch_processed = 0
+            for i, row in enumerate(rows):
+                check_cancelled(cancel_event)  # between items — propagates up; see the except below
+                if progress_cb:
+                    progress_cb(f"Enriching item {total_attempted - len(rows) + i + 1}", total_attempted - len(rows) + i + 1, progress_total)
+                item_start = time.time()
+                try:
+                    if _enrich_one(row, db, config, summarizer_cfg):
+                        total_processed += 1
+                        batch_processed += 1
+                except Exception as e:
+                    print(f"[enrich] Failed on item {row['id']}: {e}")
+                work_seconds += time.time() - item_start
+                # Gives the CPU a breather between LLM calls instead of hammering
+                # it back-to-back for the whole batch — set enrichment.pause_seconds
+                # in config.yaml if enrich runs are making the machine unusable.
+                # Skipped after the last item so it doesn't delay returning.
+                if pause_seconds and i < len(rows) - 1:
+                    time.sleep(pause_seconds)
 
-        if not keep_going:
-            break
-        if not batch_processed:
-            # Nothing in this batch actually got enriched (Ollama up, but
-            # every item errored/timed out) — the next batch would just
-            # hand back this same stuck item(s), so stop instead of
-            # spinning. Whatever succeeded elsewhere is still kept.
-            print(f"[enrich] Stopping: {len(rows)} item(s) in the last batch made no progress (see errors above).")
-            break
-        if force_pool_size is not None and total_attempted >= force_pool_size:
-            print(f"[enrich] Stopping: completed one full pass over all {force_pool_size} item(s) in scope.")
-            break
-        rows = db.items_to_reenrich(sources, max_items) if force else db.unenriched_items(sources, max_items)
-        if rows and force_pool_size is None:
-            # Growing backlog (plain run_until_done) — extend the estimate
-            # rather than let progress "overshoot" past a too-small total.
-            progress_total = total_attempted + len(rows)
-        if rows:
-            print(f"[enrich] Batch done ({total_processed} so far) — {len(rows)}+ item(s) left, continuing...")
-            ok, status_msg = ollama_status(summarizer_cfg)
-            if not ok:
-                print(f"[enrich] Stopping: {status_msg}")
+            if not keep_going:
                 break
+            if not batch_processed:
+                # Nothing in this batch actually got enriched (Ollama up, but
+                # every item errored/timed out) — the next batch would just
+                # hand back this same stuck item(s), so stop instead of
+                # spinning. Whatever succeeded elsewhere is still kept.
+                print(f"[enrich] Stopping: {len(rows)} item(s) in the last batch made no progress (see errors above).")
+                break
+            if force_pool_size is not None and total_attempted >= force_pool_size:
+                print(f"[enrich] Stopping: completed one full pass over all {force_pool_size} item(s) in scope.")
+                break
+            rows = db.items_to_reenrich(sources, max_items) if force else db.unenriched_items(sources, max_items)
+            if rows and force_pool_size is None:
+                # Growing backlog (plain run_until_done) — extend the estimate
+                # rather than let progress "overshoot" past a too-small total.
+                progress_total = total_attempted + len(rows)
+            if rows:
+                print(f"[enrich] Batch done ({total_processed} so far) — {len(rows)}+ item(s) left, continuing...")
+                ok, status_msg = llm_status(summarizer_cfg)
+                if not ok:
+                    print(f"[enrich] Stopping: {status_msg}")
+                    break
+    except FetchCancelled:
+        cancelled = True
+        print(f"[enrich] Cancelled — {total_processed}/{total_attempted} item(s) enriched before stopping.")
 
     if total_processed:
         db.record_enrich_run(total_processed, work_seconds)
     stats = db.get_enrich_stats()
 
-    if total_processed < total_attempted:
+    if cancelled:
+        message = f"Cancelled — enriched {total_processed}/{total_attempted} item(s) before stopping."
+    elif total_processed < total_attempted:
         message = f"Enriched {total_processed}/{total_attempted} — the rest failed mid-call and will retry next run (see server log)."
     else:
         message = f"Enriched {total_processed} item(s)."
@@ -1449,12 +1707,22 @@ def enrich_items_detailed(
         "backend": backend,
         "elapsed_seconds": work_seconds,
         "stats": stats,
+        "cancelled": cancelled,
     }
 
 
-def enrich_items(config: Config, db: DB) -> int:
+def enrich_items(config: Config, db: DB, cancel_event=None) -> int:
     """Same as enrich_items_detailed(background=True), returning just the
     count — kept for existing callers (the post-fetch pipeline step, run
     unattended after every fetch, so stays capped rather than picking up
-    the interactive default's uncapped day window)."""
-    return enrich_items_detailed(config, db, background=True)["processed"]
+    the interactive default's uncapped day window).
+
+    enrich_items_detailed() catches its own FetchCancelled internally (so
+    the standalone /api/enrich route gets a clean dict back, not an
+    exception) — re-raised here so fetch_all's caller still sees it and
+    stops the rest of the pipeline (jobs sync, etc.) too, same as a
+    cancel during any other phase of a fetch."""
+    result = enrich_items_detailed(config, db, background=True, cancel_event=cancel_event)
+    if result.get("cancelled"):
+        raise FetchCancelled()
+    return result["processed"]

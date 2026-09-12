@@ -100,7 +100,7 @@
 <body>
 <aside id="sidebar">
   <button class="collapseBtn" id="collapseSidebarBtn" title="Hide sidebar">&laquo;</button>
-  <h1>{{ industry }}</h1>
+  <h1 id="industryHeading">{{ industry }}</h1>
   <p class="hint">Reports</p>
   <nav id="reportNav">
     {% for rid in report_ids %}
@@ -122,6 +122,7 @@
     <input type="date" id="backfillDate">
     <button class="btn" id="backfillBtn">Backfill</button>
     <button class="btn" id="runNowBtn">Run now</button>
+    <button class="btn" id="cancelRunBtn" style="display:none; border-color:#c0392b; color:#c0392b;" title="Cancels whatever's running — fetch, backfill, enrich, or report generation — at its next checkpoint, not instantly">Cancel</button>
   </div>
   <div id="progressBar" style="display:none; align-items:center; gap:.6rem; padding:.4rem 1rem; margin:-0.6rem 0 1rem;">
     <progress id="progressBarEl" style="flex:1 1 auto; height:.6rem;"></progress>
@@ -131,13 +132,14 @@
   <div class="tabs">
     <button id="tabReport" class="active">Report</button>
     <button id="tabPapers">Sources</button>
-    <button id="tabEnrichLog">Enrich log</button>
+    <button id="tabEnrichLog">Log</button>
     <button id="tabOrgs">Orgs</button>
     <button id="tabJobs">Jobs</button>
     <button id="tabMap">Map</button>
     <button id="tabTrends">Trends</button>
     <button id="tabPaste">Paste</button>
     <button id="tabContacts">Contacts</button>
+    <button id="tabSettings">Settings</button>
   </div>
 
   <div id="reportPane"><p class="hint">Pick a report from the sidebar.</p></div>
@@ -154,14 +156,24 @@
     </p>
     <p class="hint" id="enrichResult"></p>
     <p class="hint" id="enrichStats"></p>
+    <div class="controls" style="align-items:center;">
+      <label for="paperUploadInput" class="btn" style="cursor:pointer;">Upload a paper (PDF)…</label>
+      <input type="file" id="paperUploadInput" accept="application/pdf" style="display:none">
+      <span class="hint" id="paperUploadStatus"></span>
+    </div>
+    <div id="paperUploadResult" style="display:none; margin:.6rem 0; padding:.7rem; border:1px solid #3a3a3a; border-radius:6px;">
+      <p><strong id="paperUploadTitle"></strong></p>
+      <p id="paperUploadNote" style="white-space:pre-wrap;"></p>
+      <p class="hint" id="paperUploadRelated"></p>
+    </div>
     <div class="controls filterbar">
       <div><label for="pfFrom">From</label><input type="date" id="pfFrom"></div>
       <div><label for="pfTo">To</label><input type="date" id="pfTo"></div>
       <div><label for="pfSource">Source</label><select id="pfSource"><option value="">All</option></select></div>
       <div><label for="pfOrgType">Org type</label><select id="pfOrgType"><option value="">All</option></select></div>
-      <div><label for="pfOrg">Org</label><select id="pfOrg"><option value="">All</option></select></div>
+      <div><label for="pfOrg">Org</label><input id="pfOrg" list="pfOrgList" placeholder="All" autocomplete="off"><datalist id="pfOrgList"></datalist></div>
       <div><label for="pfModality" title="Multi-select — matches any of your item's tags, ctrl/cmd-click for more than one">Modality</label><select id="pfModality" multiple size="4"></select></div>
-      <div><label for="pfAuthor" title="Most prolific first — exact-string match, so &quot;J. Smith&quot; and &quot;John Smith&quot; count separately">Author</label><select id="pfAuthor"><option value="">All</option></select></div>
+      <div><label for="pfAuthor" title="Type to search — most prolific first; exact-string match, so &quot;J. Smith&quot; and &quot;John Smith&quot; count separately">Author</label><input id="pfAuthor" list="pfAuthorList" placeholder="All" autocomplete="off"><datalist id="pfAuthorList"></datalist></div>
       <div><label for="pfTarget">Therapeutic target</label><select id="pfTarget"><option value="">All</option></select></div>
       <div><label for="pfNovelty">Min novelty</label><select id="pfNovelty">
         <option value="0">Any</option><option value="1">1+</option><option value="2">2+</option>
@@ -169,7 +181,7 @@
       </select></div>
       <div><label for="pfSort">Sort by</label><select id="pfSort">
         <option value="date">Date (newest)</option><option value="date_oldest">Date (oldest)</option>
-        <option value="novelty">Novelty (highest)</option><option value="citations">Citations (highest)</option>
+        <option value="novelty">Novelty (highest)</option>
       </select></div>
       <div><label>&nbsp;</label><button class="btn" id="clearSourceBtn" title="Delete EVERY item currently stored for the selected source (e.g. after a stale keyword polluted it) — irreversible; a re-fetch only brings back what's still inside the normal fetch window">Clear source…</button></div>
     </div>
@@ -180,11 +192,9 @@
   </div>
 
   <div id="enrichLogPane" style="display:none">
-    <p class="hint">
-      Troubleshooting view: your live summarizer config, whether Ollama is actually reachable
-      right now, and exactly what the most recent enrichment runs extracted per item — no run
-      triggered by opening this tab.
-    </p>
+    <h3 style="margin-top:0; font-size:1rem;">Recent activity</h3>
+    <div id="recentActivityStatus"></div>
+    <h3 style="margin-top:2rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Enrichment</h3>
     <div id="enrichLogStatus"></div>
     <p class="hint" id="enrichLogCount"></p>
     <table class="datatable" id="enrichLogTable"></table>
@@ -195,13 +205,18 @@
       <div><label for="ofOrgType">Org type</label><select id="ofOrgType"><option value="">All</option></select></div>
       <div><label for="ofSource">Source</label><select id="ofSource"><option value="">All</option></select></div>
     </div>
+    <div id="possibleDupeOrgsBox" style="display:none; margin-bottom:1rem; padding:.75rem 1rem; border:1px solid #e0763666; border-radius:8px; background:#e0763611;">
+      <strong style="font-size:.9rem;">Possible duplicate orgs</strong>
+      <p class="hint" style="margin:.3rem 0 .6rem;">Flagged by name similarity (a likely typo) or a shared name with/without a corporate suffix ("Valve" vs "Valve Corporation") — not merged automatically, since a similar name is just as often two real, different orgs. Check both before merging; merging repoints every item/device/job posting/event/stock history/location for the dropped name onto the kept one.</p>
+      <div id="possibleDupeOrgsList"></div>
+    </div>
     <p class="hint" id="orgsCount"></p>
     <table class="datatable" id="orgsTable"></table>
   </div>
 
   <div id="jobsPane" style="display:none">
     <div class="controls filterbar">
-      <div><label for="jfOrg">Org</label><select id="jfOrg"><option value="">All</option></select></div>
+      <div><label for="jfOrg">Org</label><input id="jfOrg" list="jfOrgList" placeholder="All" autocomplete="off"><datalist id="jfOrgList"></datalist></div>
       <div><label for="jfStatus">Status</label><select id="jfStatus">
         <option value="active">Active only</option><option value="">All (incl. removed)</option>
       </select></div>
@@ -211,9 +226,20 @@
   </div>
 
   <div id="mapPane" style="display:none">
-    <label style="display:flex; align-items:center; gap:.4rem; font-size:.9rem; margin-bottom:.5rem;">
-      <input type="checkbox" id="mapShowFriends"> Show friends (from Contacts, at their current employer)
-    </label>
+    <div class="controls" style="align-items:center; margin-bottom:.5rem;">
+      <label style="display:flex; align-items:center; gap:.4rem; font-size:.9rem;">
+        <input type="checkbox" id="mapShowCompanies" checked> Companies
+      </label>
+      <label style="display:flex; align-items:center; gap:.4rem; font-size:.9rem;">
+        <input type="checkbox" id="mapShowLabs" checked> Labs (academic)
+      </label>
+      <label style="display:flex; align-items:center; gap:.4rem; font-size:.9rem;">
+        <input type="checkbox" id="mapShowOtherOrgs" checked> Other (gov/nonprofit/unknown)
+      </label>
+      <label style="display:flex; align-items:center; gap:.4rem; font-size:.9rem;">
+        <input type="checkbox" id="mapShowFriends"> Friends (from Contacts, at their current employer)
+      </label>
+    </div>
     <div id="mapChart"></div>
     <p class="hint" id="mapCount"></p>
     <table class="datatable" id="mapTable"></table>
@@ -222,7 +248,7 @@
   <div id="trendsPane" style="display:none">
     <div class="controls">
       <div class="dataset-toggle">
-        <button id="dsDevices" class="active">Devices</button><button id="dsCompanies">Companies</button><button id="dsFdaTimeline">FDA timeline</button><button id="dsIpoTimeline">IPO timeline</button>
+        <button id="dsDevices" class="active">Devices</button><button id="dsCompanies">Companies</button><button id="dsFdaTimeline">FDA timeline</button><button id="dsEventsTimeline">Events timeline</button><button id="dsStockChart">Stock chart</button><button id="dsMetricsTable">Metrics table</button>
       </div>
       <div id="axisControls">
         <div>
@@ -243,9 +269,13 @@
           </select>
         </div>
       </div>
+      <div id="stockPickerWrap" style="display:none;">
+        <label for="stockPicker" title="ctrl/cmd-click for more than one">Companies (with a stock_ticker set)</label>
+        <select id="stockPicker" multiple size="4"></select>
+      </div>
     </div>
     <div id="chart"></div>
-    <p class="hint" id="trendsHint">Hover a point for its details and source; click it to open the source link. This accumulates over time — every device/company you or device-suggest add stays here across every future report.</p>
+    <p class="hint" id="trendsHint"></p>
     <div id="possibleDupesBox" style="display:none; margin-bottom:1rem; padding:.75rem 1rem; border:1px solid #e0763666; border-radius:8px; background:#e0763611;">
       <strong style="font-size:.9rem;">Possible duplicate companies</strong>
       <p class="hint" style="margin:.3rem 0 .6rem;">Flagged by name similarity only — not merged automatically, since a similar name is just as often two real, different companies. Check both before merging.</p>
@@ -271,14 +301,11 @@
     <div id="pasteResult"></div>
 
     <h3 style="margin-top:2rem; font-size:1rem;">Recently pasted</h3>
-    <p class="hint">Deleting here removes it outright — unlike scraped items, a paste can't be re-fetched, so this
-      is the way to take one back (wrong link, changed your mind, duplicate).</p>
     <table class="datatable" id="pastedTable"></table>
 
     <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Add a feed</h3>
     <p class="hint">Add an RSS/Atom feed URL for besseleth to check on every fetch, alongside the ones already in
-      config.yaml — for a news/trade-press site or a blog it's missing. No code editing required; takes effect on
-      the next fetch, no restart needed.</p>
+      config.yaml.</p>
     <div class="controls" style="align-items:stretch">
       <div><label for="feedCategory">Type</label><select id="feedCategory">
         <option value="news">News</option><option value="blog">Blog</option>
@@ -303,9 +330,7 @@
 
   <div id="contactsPane" style="display:none">
     <h3 style="margin-top:0; font-size:1rem;">Your interests</h3>
-    <p class="hint">Topics you personally care about, independent of any contact — an item mentioning one of these
-      shows up in "For you" the same way a mention of a contact's employer does (matched as a whole phrase,
-      case-insensitive). One per line.</p>
+    <p class="hint">An item mentioning one of these shows up in "For you" the same way a mention of a contact's employer does.</p>
     <div class="controls" style="align-items:stretch">
       <div style="flex:1; min-width:300px">
         <textarea id="interestsText" style="width:100%; box-sizing:border-box; min-height:80px" placeholder="speech decoding&#10;wireless power transfer"></textarea>
@@ -355,6 +380,69 @@
     </div>
     <div id="linkedinImportResult"></div>
   </div>
+
+  <div id="settingsPane" style="display:none">
+    <h3 style="margin-top:0; font-size:1rem;">Industry</h3>
+    <p class="hint">Keywords drive every paper/news/event search. Be specific; broad single words flood the report with noise.</p>
+    <div class="controls" style="align-items:stretch; flex-wrap:wrap">
+      <div><label for="settingsIndustryName">Industry name</label><input type="text" id="settingsIndustryName" style="width:220px;"></div>
+      <div style="flex:1; min-width:300px">
+        <label for="settingsKeywords">Keywords (one per line)</label>
+        <textarea id="settingsKeywords" style="width:100%; box-sizing:border-box; min-height:100px"></textarea>
+      </div>
+      <div><button class="btn" id="saveSettingsIndustryBtn">Save</button></div>
+    </div>
+    <p class="hint" id="settingsIndustryResult"></p>
+
+    <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Schedule</h3>
+    <p class="hint">How often besseleth fetches fresh items, and when it renders the weekly report — only matters if
+      the schedule is enabled (see <code>schedule.enabled</code> in config.yaml; there's no toggle for that here
+      since disabling it mid-run doesn't stop a fetch/report already in flight). Changes re-arm the running
+      schedule immediately.</p>
+    <div class="controls" style="align-items:flex-end; flex-wrap:wrap">
+      <div><label for="settingsFetchHours">Fetch every (hours)</label><input type="number" id="settingsFetchHours" min="0.5" step="0.5" style="width:100px;"></div>
+      <div><label for="settingsReportCron">Report cron</label><input type="text" id="settingsReportCron" placeholder="0 4 * * MON" style="width:160px;"></div>
+      <div><label for="settingsTimezone">Timezone (IANA, optional)</label><input type="text" id="settingsTimezone" placeholder="America/Los_Angeles" style="width:200px;"></div>
+      <div><button class="btn" id="saveSettingsScheduleBtn">Save</button></div>
+    </div>
+    <p class="hint" id="settingsScheduleResult">Report cron is a standard 5-field cron expression (minute hour day-of-month month day-of-week), e.g. "0 4 * * MON" = 4am every Monday. Leave timezone blank to use this host's local time.</p>
+
+    <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Data maintenance</h3>
+    <div class="controls" style="align-items:center; flex-wrap:wrap">
+      <div><button class="btn" id="standardizeLocationsBtn">Standardize location names</button></div>
+    </div>
+    <p class="hint" id="dataMaintenanceResult"></p>
+
+    <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Tabs</h3>
+    <p class="hint">Hide the tabs you don't use. "Report" and "Settings" itself always stay visible.</p>
+    <div id="tabVisibilityList" class="controls" style="flex-wrap:wrap"></div>
+
+    <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">LLM backend</h3>
+    <p class="hint">Which LLM does enrichment/summarization. This is a server-wide setting (saved to config.yaml).</p>
+    <div class="controls" style="align-items:flex-end; flex-wrap:wrap">
+      <div>
+        <label for="settingsBackend">Backend</label>
+        <select id="settingsBackend">
+          <option value="groq">Groq (free, hosted — default)</option>
+          <option value="ollama">Ollama (local/offline)</option>
+          <option value="none">None (plain extractive fallback, no LLM)</option>
+        </select>
+      </div>
+      <div>
+        <label for="settingsGroqKey" id="settingsGroqKeyLabel">Groq API key</label>
+        <input type="password" id="settingsGroqKey" placeholder="leave blank to keep current" style="width:260px;">
+      </div>
+      <div>
+        <label for="settingsOllamaUrl">Ollama URL</label>
+        <input type="text" id="settingsOllamaUrl" placeholder="http://localhost:11434" style="width:200px;">
+      </div>
+      <div><button class="btn" id="saveSettingsBackendBtn">Save</button></div>
+    </div>
+    <p class="hint" id="settingsBackendResult"></p>
+    <p class="hint">Get a free Groq API key at <a href="https://console.groq.com" target="_blank" rel="noopener">console.groq.com</a>,
+      or set it via the <code>GROQ_API_KEY</code> environment variable instead of storing it here. Ollama needs
+      <a href="https://ollama.ai" target="_blank" rel="noopener">Ollama</a> installed and running on this machine.</p>
+  </div>
 </main>
 
 <script>
@@ -393,6 +481,7 @@ const tabMap = document.getElementById('tabMap');
 const tabTrends = document.getElementById('tabTrends');
 const tabPaste = document.getElementById('tabPaste');
 const tabContacts = document.getElementById('tabContacts');
+const tabSettings = document.getElementById('tabSettings');
 
 function showTab(which) {
   reportPane.style.display = which === 'report' ? 'block' : 'none';
@@ -404,6 +493,7 @@ function showTab(which) {
   trendsPane.style.display = which === 'trends' ? 'block' : 'none';
   pastePane.style.display = which === 'paste' ? 'block' : 'none';
   contactsPane.style.display = which === 'contacts' ? 'block' : 'none';
+  document.getElementById('settingsPane').style.display = which === 'settings' ? 'block' : 'none';
   tabReport.classList.toggle('active', which === 'report');
   tabPapers.classList.toggle('active', which === 'papers');
   tabEnrichLog.classList.toggle('active', which === 'enrichlog');
@@ -413,6 +503,7 @@ function showTab(which) {
   tabTrends.classList.toggle('active', which === 'trends');
   tabPaste.classList.toggle('active', which === 'paste');
   tabContacts.classList.toggle('active', which === 'contacts');
+  tabSettings.classList.toggle('active', which === 'settings');
   if (which === 'papers' && !papersLoaded) loadPapers();
   if (which === 'enrichlog') loadEnrichLog();
   if (which === 'orgs' && !orgsLoaded) loadOrgs();
@@ -420,6 +511,8 @@ function showTab(which) {
   if (which === 'map' && !mapLoaded) loadMap();
   if (which === 'paste') { loadPasted(); loadFeeds(); }
   if (which === 'contacts') { loadContacts(); loadInterests(); }
+  if (which === 'settings') loadSettings();
+  try { localStorage.setItem('besseleth:lastTab', which); } catch (e) {}
 }
 tabReport.onclick = () => showTab('report');
 tabPapers.onclick = () => showTab('papers');
@@ -429,6 +522,7 @@ tabJobs.onclick = () => showTab('jobs');
 tabMap.onclick = () => showTab('map');
 tabTrends.onclick = () => showTab('trends');
 tabPaste.onclick = () => showTab('paste');
+tabSettings.onclick = () => showTab('settings');
 tabContacts.onclick = () => showTab('contacts');
 
 function wireReportNav() {
@@ -481,6 +575,7 @@ const backfillDate = document.getElementById('backfillDate');
 const progressBar = document.getElementById('progressBar');
 const progressBarEl = document.getElementById('progressBarEl');
 const progressBarLabel = document.getElementById('progressBarLabel');
+const cancelRunBtn = document.getElementById('cancelRunBtn');
 let fastPoll = false; // true while something's running, so the bar tracks it closely
 
 function fmtAgo(iso) {
@@ -506,7 +601,16 @@ function fmtUntil(iso) {
 }
 
 function updateProgressBar(s) {
-  // A very basic bar: shown whenever something's running and the backend
+  // Cancel button: next to Run now in the main status bar, visible any
+  // time something's running (fetch/backfill/enrich/report) — NOT tied
+  // to the progress bar's own visibility below, so it's in the same
+  // place every time rather than only showing up once a progress label
+  // happens to be set.
+  cancelRunBtn.style.display = s.running_now ? '' : 'none';
+  cancelRunBtn.disabled = !!s.cancel_requested;
+  cancelRunBtn.textContent = s.cancel_requested ? 'Cancelling…' : 'Cancel';
+
+  // The bar itself: shown whenever something's running and the backend
   // has a label for it. current/total may be null (a step that doesn't
   // have a real fraction, e.g. a single fetch source) — an indeterminate
   // <progress> (no `value`) covers that case.
@@ -524,6 +628,17 @@ function updateProgressBar(s) {
     progressBarLabel.textContent = s.progress_label;
   }
 }
+
+cancelRunBtn.onclick = async () => {
+  cancelRunBtn.disabled = true;
+  cancelRunBtn.textContent = 'Cancelling…';
+  try {
+    await fetch('/api/cancel-run', { method: 'POST' });
+  } catch (e) {
+    cancelRunBtn.disabled = false;
+    cancelRunBtn.textContent = 'Cancel';
+  }
+};
 
 async function pollStatus() {
   try {
@@ -868,6 +983,164 @@ function renderContacts() {
   });
 }
 
+// --- Settings (tab visibility + LLM backend) ----------------------------
+// Every top-level tab except Report/Settings themselves can be hidden —
+// per-browser (localStorage), so it never affects anyone else viewing
+// this same dashboard from another machine.
+const HIDEABLE_TABS = [
+  { id: 'tabPapers', label: 'Sources' },
+  { id: 'tabEnrichLog', label: 'Log' },
+  { id: 'tabOrgs', label: 'Orgs' },
+  { id: 'tabJobs', label: 'Jobs' },
+  { id: 'tabMap', label: 'Map' },
+  { id: 'tabTrends', label: 'Trends' },
+  { id: 'tabPaste', label: 'Paste' },
+  { id: 'tabContacts', label: 'Contacts' },
+];
+
+function getHiddenTabs() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem('besseleth:hiddenTabs') || '[]'));
+  } catch (e) {
+    return new Set();
+  }
+}
+
+function applyHiddenTabs() {
+  const hidden = getHiddenTabs();
+  HIDEABLE_TABS.forEach(t => {
+    document.getElementById(t.id).style.display = hidden.has(t.id) ? 'none' : '';
+  });
+  // If the tab we'd otherwise land on just got hidden (or was hidden on
+  // a previous visit), fall back to Report rather than showing a blank
+  // pane with no matching visible nav button.
+  const active = document.querySelector('.tabs button.active');
+  if (active && active.style.display === 'none') showTab('report');
+}
+
+function renderTabVisibilityList() {
+  const hidden = getHiddenTabs();
+  const list = document.getElementById('tabVisibilityList');
+  list.innerHTML = HIDEABLE_TABS.map(t => `
+    <label style="display:flex; align-items:center; gap:.35rem; font-weight:normal; font-size:.9rem;">
+      <input type="checkbox" data-tab-id="${t.id}" ${hidden.has(t.id) ? '' : 'checked'}> ${t.label}
+    </label>`).join('');
+  list.querySelectorAll('input[type=checkbox]').forEach(cb => {
+    cb.onchange = () => {
+      const hidden = getHiddenTabs();
+      if (cb.checked) hidden.delete(cb.dataset.tabId); else hidden.add(cb.dataset.tabId);
+      try { localStorage.setItem('besseleth:hiddenTabs', JSON.stringify([...hidden])); } catch (e) {}
+      applyHiddenTabs();
+    };
+  });
+}
+
+async function loadSettings() {
+  renderTabVisibilityList();
+
+  const [summRes, schedRes, industryRes] = await Promise.all([
+    fetch('/api/settings/summarizer'), fetch('/api/settings/schedule'), fetch('/api/settings/industry'),
+  ]);
+  const summ = await summRes.json();
+  document.getElementById('settingsBackend').value = summ.backend;
+  document.getElementById('settingsOllamaUrl').value = summ.ollama_url;
+  document.getElementById('settingsGroqKey').placeholder = summ.groq_api_key_set
+    ? 'set — leave blank to keep it' : 'not set — paste your key here';
+
+  const sched = await schedRes.json();
+  document.getElementById('settingsFetchHours').value = sched.fetch_interval_hours;
+  document.getElementById('settingsReportCron').value = sched.report_cron;
+  document.getElementById('settingsTimezone').value = sched.timezone;
+
+  const industry = await industryRes.json();
+  document.getElementById('settingsIndustryName').value = industry.name;
+  document.getElementById('settingsKeywords').value = industry.keywords.join('\n');
+}
+
+document.getElementById('saveSettingsIndustryBtn').onclick = async () => {
+  const result = document.getElementById('settingsIndustryResult');
+  const name = document.getElementById('settingsIndustryName').value.trim();
+  const keywords = document.getElementById('settingsKeywords').value.split('\n').map(s => s.trim()).filter(Boolean);
+  result.textContent = 'Saving…';
+  try {
+    const res = await fetch('/api/settings/industry', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, keywords }),
+    });
+    const data = await res.json();
+    result.textContent = data.ok ? 'Saved — takes effect on the next fetch/enrich.' : `Failed: ${data.message}`;
+    if (data.ok && name) {
+      // Reflects immediately, not just on the next full page load — the
+      // tab title/sidebar heading are rendered server-side once at page
+      // load (Flask templates config.industry_name at request time), so
+      // without this a save "worked" per config.yaml but looked like
+      // nothing happened until you refreshed.
+      document.title = `Besseleth — ${name}`;
+      document.getElementById('industryHeading').textContent = name;
+    }
+  } catch (e) {
+    result.textContent = 'Failed — see server log.';
+  }
+};
+
+document.getElementById('standardizeLocationsBtn').onclick = async () => {
+  const result = document.getElementById('dataMaintenanceResult');
+  const btn = document.getElementById('standardizeLocationsBtn');
+  btn.disabled = true;
+  result.textContent = 'Reformatting every stored location to "City[, State], Country"… one request per distinct location (~1/sec), can take a while for a large map.';
+  try {
+    const res = await fetch('/api/locations/standardize', { method: 'POST' });
+    const data = await res.json();
+    result.textContent = data.ok
+      ? `Checked ${data.checked} distinct location(s): ${data.updated} item(s)/org(s) reformatted.`
+      : `Failed: ${data.message}`;
+  } catch (e) {
+    result.textContent = 'Failed — see server log.';
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+document.getElementById('saveSettingsScheduleBtn').onclick = async () => {
+  const result = document.getElementById('settingsScheduleResult');
+  const fetch_interval_hours = document.getElementById('settingsFetchHours').value;
+  const report_cron = document.getElementById('settingsReportCron').value.trim();
+  const timezone = document.getElementById('settingsTimezone').value.trim();
+  result.textContent = 'Saving…';
+  try {
+    const res = await fetch('/api/settings/schedule', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fetch_interval_hours, report_cron, timezone }),
+    });
+    const data = await res.json();
+    result.textContent = data.ok ? 'Saved and re-armed the running schedule.' : `Failed: ${data.message}`;
+  } catch (e) {
+    result.textContent = 'Failed — see server log.';
+  }
+};
+
+document.getElementById('saveSettingsBackendBtn').onclick = async () => {
+  const result = document.getElementById('settingsBackendResult');
+  const backend = document.getElementById('settingsBackend').value;
+  const groq_api_key = document.getElementById('settingsGroqKey').value.trim();
+  const ollama_url = document.getElementById('settingsOllamaUrl').value.trim();
+  result.textContent = 'Saving…';
+  try {
+    const res = await fetch('/api/settings/summarizer', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ backend, groq_api_key: groq_api_key || undefined, ollama_url: ollama_url || undefined }),
+    });
+    const data = await res.json();
+    result.textContent = data.ok ? 'Saved — takes effect on the next enrich/report run, no restart needed.' : `Failed: ${data.message}`;
+    document.getElementById('settingsGroqKey').value = '';
+    await loadSettings();
+  } catch (e) {
+    result.textContent = 'Failed — see server log.';
+  }
+};
+
+applyHiddenTabs();
+
 async function loadContacts() {
   const res = await fetch('/api/contacts');
   contacts = await res.json();
@@ -936,7 +1209,20 @@ async function loadMap() {
   friendLocations = await friendRes.json();
   renderMap();
 }
-document.getElementById('mapShowFriends').onchange = renderMap;
+['mapShowFriends', 'mapShowCompanies', 'mapShowLabs', 'mapShowOtherOrgs'].forEach(id =>
+  document.getElementById(id).onchange = renderMap
+);
+
+// Which org_type values each map layer checkbox covers — "Labs" means
+// academic (the Trends tab's own org_type vocabulary), "Companies" means
+// industry, and everything else (government/nonprofit/unknown — orgs
+// that are neither, or where org_type was never determined) is lumped
+// into "Other" rather than silently hidden by the first two checkboxes.
+const MAP_LAYER_TYPES = {
+  mapShowCompanies: ['industry'],
+  mapShowLabs: ['academic'],
+  mapShowOtherOrgs: ['government', 'nonprofit', 'unknown', null, undefined, ''],
+};
 
 function renderMap() {
   document.getElementById('mapCount').textContent = `${mapLocations.length} located org(s).`;
@@ -959,24 +1245,29 @@ function renderMap() {
       '<p class="hint">Chart library failed to load from the CDN (no internet access?). The table below still works.</p>';
     return;
   }
+  const activeOrgTypes = new Set(
+    Object.entries(MAP_LAYER_TYPES).flatMap(([id, types]) => document.getElementById(id).checked ? types : [])
+  );
+  const filteredLocations = mapLocations.filter(m => activeOrgTypes.has(m.org_type || null) || (!m.org_type && activeOrgTypes.has('')));
   const showFriends = document.getElementById('mapShowFriends').checked;
-  if (!mapLocations.length && !(showFriends && friendLocations.length)) {
-    document.getElementById('mapChart').innerHTML =
-      '<p class="hint">No located orgs yet — run <code>besseleth.cli enrich --all</code> (needs Ollama running) to backfill locations for existing items, or wait for the next fetch.</p>';
+  if (!filteredLocations.length && !(showFriends && friendLocations.length)) {
+    document.getElementById('mapChart').innerHTML = mapLocations.length
+      ? '<p class="hint">Nothing matches the checked layers above — check a box to show orgs again.</p>'
+      : '<p class="hint">No located orgs yet — run <code>besseleth.cli enrich --all</code> (needs Ollama running) to backfill locations for existing items, or wait for the next fetch.</p>';
     return;
   }
 
   const orgTrace = {
     type: 'scattergeo',
     name: 'Sources',
-    lat: mapLocations.map(m => m.lat),
-    lon: mapLocations.map(m => m.lon),
-    text: mapLocations.map(m => `${m.org}<br>${m.location_text || ''}<br>${m.total} item(s)`),
+    lat: filteredLocations.map(m => m.lat),
+    lon: filteredLocations.map(m => m.lon),
+    text: filteredLocations.map(m => `${m.org}<br>${m.location_text || ''}<br>${m.total} item(s)`),
     hoverinfo: 'text',
     mode: 'markers',
     marker: {
-      size: mapLocations.map(m => Math.min(10 + Math.sqrt(m.total) * 6, 40)),
-      color: mapLocations.map(m => ORG_TYPE_COLORS[m.org_type] || ORG_TYPE_COLORS.unknown),
+      size: filteredLocations.map(m => Math.min(10 + Math.sqrt(m.total) * 6, 40)),
+      color: filteredLocations.map(m => ORG_TYPE_COLORS[m.org_type] || ORG_TYPE_COLORS.unknown),
       line: { width: 1, color: '#ffffffaa' },
       opacity: 0.85,
     },
@@ -995,7 +1286,14 @@ function renderMap() {
     });
   }
   const layout = {
-    geo: { projection: { type: 'natural earth' }, showland: true, landcolor: '#8882', showcountries: true, countrycolor: '#8886' },
+    geo: {
+      projection: { type: 'natural earth' }, showland: true, landcolor: '#8882',
+      showcountries: true, countrycolor: '#8886',
+      // US state (and other countries' province/state, where Plotly's
+      // basemap has that data) borders — subtler than country borders
+      // since there are a lot more of them.
+      showsubunits: true, subunitcolor: '#8884',
+    },
     margin: { t: 10, b: 0, l: 0, r: 0 },
     showlegend: showFriends,
     legend: { x: 0, y: 1, bgcolor: 'rgba(0,0,0,0)' },
@@ -1006,7 +1304,7 @@ function renderMap() {
     gd.on('plotly_click', (ev) => {
       const point = ev.points[0];
       if (point.curveNumber === 0) {
-        const org = mapLocations[point.pointNumber].org;
+        const org = filteredLocations[point.pointNumber].org;
         showTab('papers');
         loadPapers().then(() => {
           document.getElementById('pfOrg').value = org;
@@ -1048,11 +1346,12 @@ function populateAuthorSelect(rows) {
   const counts = new Map();
   for (const p of rows) for (const a of authorList(p)) counts.set(a, (counts.get(a) || 0) + 1);
   const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-  const sel = document.getElementById('pfAuthor');
-  const current = sel.value;
-  sel.innerHTML = '<option value="">All</option>' +
-    sorted.map(([name, n]) => `<option value="${name}">${name} (${n})</option>`).join('');
-  if (counts.has(current)) sel.value = current;
+  // `label` (not visible text) carries the count — Chrome/Firefox both
+  // show it as secondary text next to the suggestion, but `value` (what
+  // actually lands in the input on pick) stays the plain name so the
+  // exact-string-match filter below still works unchanged.
+  document.getElementById('pfAuthorList').innerHTML =
+    sorted.map(([name, n]) => `<option value="${name}" label="(${n})">`).join('');
 }
 
 function populateSelect(id, values) {
@@ -1060,6 +1359,16 @@ function populateSelect(id, values) {
   const current = sel.value;
   sel.innerHTML = '<option value="">All</option>' + values.map(v => `<option value="${v}">${v}</option>`).join('');
   if (values.includes(current)) sel.value = current;
+}
+
+// For a text <input list="..."> paired with a <datalist> — same idea as
+// populateSelect but for a field with too many distinct values (orgs,
+// hundreds of them) for a plain <select> to stay usable: typing narrows
+// the native suggestion list instead of scrolling a giant dropdown, and
+// `.value` still ends up exactly one of `values` once picked (or
+// whatever was typed, for filter code below to compare against).
+function populateDatalist(inputId, values) {
+  document.getElementById(`${inputId}List`).innerHTML = values.map(v => `<option value="${v}">`).join('');
 }
 
 function populateMultiSelect(id, values) {
@@ -1075,12 +1384,16 @@ async function loadPapers() {
   papers = await res.json();
   populateSelect('pfSource', uniqueSorted(papers.map(p => p.source)));
   populateSelect('pfOrgType', uniqueSorted(papers.map(p => p.org_type)));
-  populateSelect('pfOrg', uniqueSorted(papers.map(p => p.org)));
+  populateDatalist('pfOrg', uniqueSorted(papers.map(p => p.org)));
   populateMultiSelect('pfModality', uniqueSorted(papers.flatMap(modalityTags)));
   populateAuthorSelect(papers);
   populateSelect('pfTarget', uniqueSorted(papers.map(p => p.therapeutic_target)));
-  ['pfFrom', 'pfTo', 'pfSource', 'pfOrgType', 'pfOrg', 'pfModality', 'pfAuthor', 'pfTarget', 'pfNovelty', 'pfSort']
+  ['pfFrom', 'pfTo', 'pfSource', 'pfOrgType', 'pfModality', 'pfTarget', 'pfNovelty', 'pfSort']
     .forEach(id => document.getElementById(id).onchange = renderPapers);
+  // 'input' (not 'change') for the datalist-backed text fields — fires as
+  // soon as a suggestion is picked (or typing clears/matches), not only
+  // on blur, so the table updates immediately the way the selects do.
+  ['pfOrg', 'pfAuthor'].forEach(id => document.getElementById(id).oninput = renderPapers);
   renderPapers();
 }
 
@@ -1096,14 +1409,50 @@ function fmtUsd(n) {
   return `$${n}`;
 }
 
+let possibleDupeOrgs = [];
+
 async function loadOrgs() {
   orgsLoaded = true;
-  const res = await fetch('/api/orgs');
-  orgs = await res.json();
+  const [orgsRes, dupesRes] = await Promise.all([fetch('/api/orgs'), fetch('/api/orgs/possible-duplicates')]);
+  orgs = await orgsRes.json();
+  possibleDupeOrgs = await dupesRes.json();
   populateSelect('ofOrgType', uniqueSorted(orgs.map(o => o.org_type)));
   populateSelect('ofSource', uniqueSorted(orgs.flatMap(o => o.sources)));
   ['ofOrgType', 'ofSource'].forEach(id => document.getElementById(id).onchange = renderOrgs);
+  renderPossibleDupeOrgs();
   renderOrgs();
+}
+
+const DUPE_ORG_REASON_LABELS = { typo: 'possible typo', suffix: 'shared name, corporate suffix' };
+
+function renderPossibleDupeOrgs() {
+  document.getElementById('possibleDupeOrgsBox').style.display = possibleDupeOrgs.length ? 'block' : 'none';
+  document.getElementById('possibleDupeOrgsList').innerHTML = possibleDupeOrgs.map((d, i) => `
+    <div style="display:flex; align-items:center; gap:.6rem; padding:.3rem 0; font-size:.9rem; flex-wrap:wrap;">
+      <span>${d.a}</span><span class="hint">vs</span><span>${d.b}</span>
+      <span class="hint">(${DUPE_ORG_REASON_LABELS[d.reason] || d.reason})</span>
+      <button class="btn" style="padding:.2rem .6rem; font-size:.8rem;" data-i="${i}" data-keep="a">Keep "${d.a}"</button>
+      <button class="btn" style="padding:.2rem .6rem; font-size:.8rem;" data-i="${i}" data-keep="b">Keep "${d.b}"</button>
+      <button class="btn" style="padding:.2rem .6rem; font-size:.8rem; opacity:.6;" data-i="${i}" data-keep="neither">Not duplicates</button>
+    </div>`).join('');
+  document.querySelectorAll('#possibleDupeOrgsList button').forEach(btn => {
+    btn.onclick = async () => {
+      const dupe = possibleDupeOrgs[Number(btn.dataset.i)];
+      if (btn.dataset.keep !== 'neither') {
+        const keep = btn.dataset.keep === 'a' ? dupe.a : dupe.b;
+        const drop = btn.dataset.keep === 'a' ? dupe.b : dupe.a;
+        await fetch('/api/orgs/merge', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ keep, drop }),
+        });
+        const orgsRes = await fetch('/api/orgs');
+        orgs = await orgsRes.json();
+      }
+      possibleDupeOrgs = possibleDupeOrgs.filter((_, i) => i !== Number(btn.dataset.i));
+      renderPossibleDupeOrgs();
+      renderOrgs();
+    };
+  });
 }
 
 function renderOrgs() {
@@ -1145,8 +1494,9 @@ async function loadJobs() {
   jobsLoaded = true;
   const res = await fetch('/api/jobs');
   jobs = await res.json();
-  populateSelect('jfOrg', uniqueSorted(jobs.map(j => j.org)));
-  ['jfOrg', 'jfStatus'].forEach(id => document.getElementById(id).onchange = renderJobs);
+  populateDatalist('jfOrg', uniqueSorted(jobs.map(j => j.org)));
+  document.getElementById('jfOrg').oninput = renderJobs;
+  document.getElementById('jfStatus').onchange = renderJobs;
   renderJobs();
 }
 
@@ -1348,7 +1698,6 @@ function renderPapers(resetPage = true) {
 
   rows = rows.slice().sort((a, b) => {
     if (sortBy === 'novelty') return (b.novelty_score || 0) - (a.novelty_score || 0);
-    if (sortBy === 'citations') return (b.citation_count || 0) - (a.citation_count || 0);
     if (sortBy === 'date_oldest') return (a.published_at || '').localeCompare(b.published_at || '');
     return (b.published_at || '').localeCompare(a.published_at || '');
   });
@@ -1378,29 +1727,10 @@ function renderPapers(resetPage = true) {
     return `<span class="author-cell" data-author="${names[0]}" title="${names.join(', ')}" style="cursor:pointer; text-decoration:underline dotted;">${shown}</span>`;
   }
 
-  // A blank citation count means two very different things depending on
-  // where the paper came from, and the Source column alone can't tell
-  // you which — both arxiv_scraper and openalex_scraper write source
-  // "papers" (they're merged into one section on purpose), but only
-  // OpenAlex ever reports a citation count at all. arXiv preprints
-  // genuinely have no citation data to give (that API doesn't track it)
-  // — expected, not a bug. A blank OpenAlex row, on the other hand,
-  // means something's actually wrong (OpenAlex reported no cited_by_count
-  // for a published paper, or the item was never re-fetched since the
-  // pagination fix). Distinguish by URL shape: an arxiv.org link is
-  // unambiguously an arXiv-sourced item regardless of when it was fetched.
-  function citationCell(p) {
-    if (p.citation_count !== null && p.citation_count !== undefined) return String(p.citation_count);
-    const isArxiv = /^https?:\/\/(www\.)?arxiv\.org\//i.test(p.url || '');
-    return isArxiv
-      ? '<span class="hint" title="arXiv preprints have no citation data — this is expected, not a gap">n/a (arXiv)</span>'
-      : '<span class="hint" title="No citation count from OpenAlex for this paper — could be a genuine 0, or worth a re-fetch">—</span>';
-  }
-
   const table = document.getElementById('papersTable');
   table.className = 'datatable resizable';
   table.innerHTML = `
-    <thead><tr><th>Date</th><th>Title</th><th>Source</th><th>Authors</th><th>Citations</th><th>Org</th>
+    <thead><tr><th>Date</th><th>Title</th><th>Source</th><th>Authors</th><th>Org</th>
       <th>Org type</th><th>Modality</th><th>Target</th><th>Novelty</th><th></th></tr></thead>
     <tbody>${visible.map(p => `
       <tr data-paper-row="${p.id}">
@@ -1408,7 +1738,6 @@ function renderPapers(resetPage = true) {
         <td>${p.title}</td>
         <td>${p.url ? `<a href="${p.url}" target="_blank" rel="noopener">${p.source}</a>` : p.source}</td>
         <td>${authorCell(p)}</td>
-        <td>${citationCell(p)}</td>
         <td>${p.org || (p.enriched ? '—' : '<span class="hint">pending</span>')}</td>
         <td>${p.org_type || ''}</td>
         <td>${p.modality || ''}</td>
@@ -1464,6 +1793,40 @@ document.getElementById('clearSourceBtn').onclick = async () => {
   }
 };
 
+document.getElementById('paperUploadInput').onchange = async (ev) => {
+  const file = ev.target.files[0];
+  if (!file) return;
+  const statusEl = document.getElementById('paperUploadStatus');
+  const resultBox = document.getElementById('paperUploadResult');
+  resultBox.style.display = 'none';
+  statusEl.textContent = `Reading and comparing "${file.name}"… this calls the local LLM, so it can take a minute.`;
+  const body = new FormData();
+  body.append('file', file);
+  try {
+    const res = await fetch('/api/papers/upload', { method: 'POST', body });
+    const data = await res.json();
+    if (!data.ok) {
+      statusEl.textContent = `Failed: ${data.message}`;
+      return;
+    }
+    statusEl.textContent = "Adds it to Sources like any other paper, and writes up how it fits in with what's already here.";
+    document.getElementById('paperUploadTitle').textContent = data.title;
+    document.getElementById('paperUploadNote').textContent = data.comparison_note;
+    document.getElementById('paperUploadRelated').innerHTML = data.related.length
+      ? 'Compared against: ' + data.related.map(r => r.url
+          ? `<a href="${r.url}" target="_blank" rel="noopener">${r.title}</a>` : r.title).join(', ')
+      : 'No related papers found on file yet.';
+    resultBox.style.display = 'block';
+    const papersRes = await fetch('/api/papers');
+    papers = await papersRes.json();
+    renderPapers();
+  } catch (e) {
+    statusEl.textContent = 'Failed — see server log.';
+  } finally {
+    ev.target.value = '';
+  }
+};
+
 document.getElementById('papersShowMoreBtn').onclick = () => {
   papersPageSize = Infinity; // show every remaining filtered row, not another capped batch
   renderPapers(false); // false: keep it expanded, don't reset back to 50
@@ -1471,7 +1834,7 @@ document.getElementById('papersShowMoreBtn').onclick = () => {
 
 document.getElementById('exportPapersBtn').onclick = () => {
   const columns = [
-    'published_at', 'title', 'source', 'url', 'authors', 'citation_count', 'org', 'org_type',
+    'published_at', 'title', 'source', 'url', 'authors', 'org', 'org_type',
     'modality', 'therapeutic_target', 'novelty_score',
   ];
   const csv = [columns.join(',')]
@@ -1485,18 +1848,48 @@ document.getElementById('exportPapersBtn').onclick = () => {
   URL.revokeObjectURL(link.href);
 };
 
-// --- Enrich log (troubleshooting) ---------------------------------------
+// --- Log (troubleshooting) ------------------------------------------------
+function renderRecentActivity(s) {
+  const el = document.getElementById('recentActivityStatus');
+  const rows = [
+    {
+      label: 'Fetch / backfill', at: s.last_fetch_at, next: s.next_fetch_at,
+      detail: s.last_fetch_counts
+        ? Object.entries(s.last_fetch_counts).filter(([, n]) => n > 0).map(([src, n]) => `${src}: ${n}`).join(', ') || 'nothing new'
+        : '',
+      cancelled: s.last_fetch_cancelled,
+    },
+    {
+      label: 'Report', at: s.last_report_at, next: s.next_report_at,
+      detail: s.last_report_path ? s.last_report_path.split('/').pop() : '',
+    },
+  ];
+  el.innerHTML = rows.map(r => `
+    <p>
+      <strong>${r.label}:</strong> ${fmtAgo(r.at)}${r.next ? ` &nbsp; <span class="hint">next ${fmtUntil(r.next)}</span>` : ''}
+      ${r.detail ? ` &nbsp; <span class="hint">${r.detail}</span>` : ''}
+      ${r.cancelled ? ' &nbsp; <span style="color:#c0392b">(cancelled)</span>' : ''}
+    </p>`).join('')
+    + (s.last_error ? `<p style="color:#c0392b">⚠ ${s.last_error}</p>` : '')
+    + (s.running_now
+        ? `<p class="hint">Running now: ${s.progress_label || '…'}`
+          + (s.progress_current != null && s.progress_total ? ` (${s.progress_current}/${s.progress_total})` : '')
+          + `</p>`
+        : '');
+}
+
 async function loadEnrichLog() {
-  const res = await fetch('/api/enrich/log');
+  const [statusRes, res] = await Promise.all([fetch('/api/status'), fetch('/api/enrich/log')]);
+  renderRecentActivity(await statusRes.json());
   const data = await res.json();
 
   const statusEl = document.getElementById('enrichLogStatus');
   let statusHtml = `<p><strong>backend:</strong> ${data.backend} &nbsp; <strong>model:</strong> ${data.model} `
-    + `&nbsp; <strong>ollama_url:</strong> ${data.ollama_url}</p>`;
-  if (data.backend !== 'ollama') {
-    statusHtml += `<p style="color:#c0392b">summarizer.backend is "${data.backend}", not "ollama" — every item `
-      + `gets marked "unknown" rather than actually extracted. Set <code>summarizer.backend: "ollama"</code> in `
-      + `config.yaml and restart besseleth.</p>`;
+    + (data.backend === 'ollama' ? `&nbsp; <strong>ollama_url:</strong> ${data.ollama_url}` : '') + `</p>`;
+  if (data.backend !== 'groq' && data.backend !== 'ollama') {
+    statusHtml += `<p style="color:#c0392b">summarizer.backend is "${data.backend}" — every item gets marked `
+      + `"unknown" rather than actually extracted. Set <code>summarizer.backend: "groq"</code> (default — free, `
+      + `hosted, no install) or <code>"ollama"</code> in config.yaml and restart besseleth.</p>`;
   } else if (data.ollama_ok) {
     statusHtml += `<p style="color:#2a7d2a">✓ ${data.ollama_message}</p>`;
   } else {
@@ -1539,30 +1932,38 @@ let fdaStages = [];
 let currentDataset = 'devices';
 
 let possibleDupes = [];
+let companyEvents = [];
+let metricsTable = [];
 
 async function loadTrends() {
-  const [metricsRes, devicesRes, companiesRes, stagesRes, dupesRes] = await Promise.all([
+  const [metricsRes, devicesRes, companiesRes, stagesRes, dupesRes, eventsRes, metricsTableRes] = await Promise.all([
     fetch('/api/metrics'), fetch('/api/devices'), fetch('/api/companies'), fetch('/api/trends/fda-stages'),
-    fetch('/api/companies/possible-duplicates'),
+    fetch('/api/companies/possible-duplicates'), fetch('/api/company-events'), fetch('/api/metrics-table'),
   ]);
   metricsData = await metricsRes.json();
   devices = await devicesRes.json();
   companies = await companiesRes.json();
   fdaStages = await stagesRes.json();
   possibleDupes = await dupesRes.json();
+  companyEvents = await eventsRes.json();
+  metricsTable = await metricsTableRes.json();
 
   document.getElementById('dsDevices').onclick = () => switchDataset('devices');
   document.getElementById('dsCompanies').onclick = () => switchDataset('companies');
   document.getElementById('dsFdaTimeline').onclick = () => switchDataset('fda_timeline');
-  document.getElementById('dsIpoTimeline').onclick = () => switchDataset('ipo_timeline');
+  document.getElementById('dsEventsTimeline').onclick = () => switchDataset('events_timeline');
+  document.getElementById('dsStockChart').onclick = () => switchDataset('stock_chart');
+  document.getElementById('dsMetricsTable').onclick = () => switchDataset('metrics_table');
   switchDataset('devices');
 }
 
 const TRENDS_HINTS = {
-  devices: 'Hover a point for its details and source; click it to open the source link. This accumulates over time — every device you or device-suggest add stays here across every future report.',
-  companies: 'Hover a point for its details and source; click it to open the source link. This accumulates over time.',
+  devices: '',
+  companies: '',
   fda_timeline: 'Each line is one org’s devices, ordered by report date, plotted against the FDA stage ladder (see trends/fda_stages.py for what each rung means) — a rising line is regulatory progress; a flat one means no new dated report yet. Hover a point for the device and its exact fda_status text; click to open the source.',
-  ipo_timeline: 'One point per company that has gone public, plotted at its IPO date. Hover for the exchange/ticker; click to open the source that reported it.',
+  events_timeline: 'Every org milestone besseleth has recorded — funding rounds, IPOs, regulatory approvals, mergers/acquisitions, leadership changes, and notably novel papers — one row per org, one marker per event, colored by type. Hover for the title/description; click to open the source.',
+  stock_chart: 'A live TradingView mini-chart for each company you pick below (only companies with a stock_ticker set are eligible) — always current, nothing to refresh. Set stock_exchange too for an exact match; without it the ticker alone is a best guess.',
+  metrics_table: 'Every numeric value besseleth has extracted, one row each, with its unit, its subject (which device or company it\'s actually ABOUT — a number is useless without this), and its source — a "3 year lifespan" is only trustworthy once you can see it\'s attributed to the right device and check the source it came from. This is the troubleshooting view for whether extraction is pulling out the right numbers, not a chart.',
 };
 
 function switchDataset(which) {
@@ -1570,12 +1971,25 @@ function switchDataset(which) {
   document.getElementById('dsDevices').classList.toggle('active', which === 'devices');
   document.getElementById('dsCompanies').classList.toggle('active', which === 'companies');
   document.getElementById('dsFdaTimeline').classList.toggle('active', which === 'fda_timeline');
-  document.getElementById('dsIpoTimeline').classList.toggle('active', which === 'ipo_timeline');
+  document.getElementById('dsEventsTimeline').classList.toggle('active', which === 'events_timeline');
+  document.getElementById('dsStockChart').classList.toggle('active', which === 'stock_chart');
+  document.getElementById('dsMetricsTable').classList.toggle('active', which === 'metrics_table');
   document.getElementById('trendsHint').textContent = TRENDS_HINTS[which];
 
-  const isTimeline = which === 'fda_timeline' || which === 'ipo_timeline';
+  const isTimeline = which === 'fda_timeline' || which === 'events_timeline' || which === 'stock_chart' || which === 'metrics_table';
   document.getElementById('axisControls').style.display = isTimeline ? 'none' : 'flex';
   document.getElementById('colorByWrap').style.display = which === 'devices' ? 'block' : 'none';
+  document.getElementById('stockPickerWrap').style.display = which === 'stock_chart' ? 'block' : 'none';
+  document.getElementById('chart').style.display = which === 'metrics_table' ? 'none' : '';
+
+  if (which === 'stock_chart') {
+    const picker = document.getElementById('stockPicker');
+    const tickered = companies.filter(c => c.stock_ticker);
+    picker.innerHTML = tickered.map(c => `<option value="${c.name}">${c.name} (${c.stock_ticker})</option>`).join('');
+    // Default to every ticker'd company selected — most useful first look, comparing whatever's tracked.
+    Array.from(picker.options).forEach(o => o.selected = true);
+    picker.onchange = renderChart;
+  }
 
   if (!isTimeline) {
     const xSel = document.getElementById('xAxis');
@@ -1654,7 +2068,9 @@ function renderChart() {
     return;
   }
   if (currentDataset === 'fda_timeline') return renderFdaTimeline();
-  if (currentDataset === 'ipo_timeline') return renderIpoTimeline();
+  if (currentDataset === 'events_timeline') return renderEventsTimeline();
+  if (currentDataset === 'stock_chart') return renderStockChart();
+  if (currentDataset === 'metrics_table') return; // table-only, no chart
 
   const xKey = document.getElementById('xAxis').value;
   const yKey = document.getElementById('yAxis').value;
@@ -1757,38 +2173,98 @@ function renderFdaTimeline() {
   });
 }
 
-function renderIpoTimeline() {
-  const ipoed = companies.filter(c => c.ipo_date).sort((a, b) => a.ipo_date.localeCompare(b.ipo_date));
-  if (!ipoed.length) {
+const EVENT_TYPE_COLORS = {
+  funding: '#4a90d9', ipo: '#2a9d8f', regulatory_approval: '#e9c46a',
+  merger_acquisition: '#f4a261', leadership_change: '#9d4edd', notable_paper: '#ef476f', other: '#adb5bd',
+};
+const EVENT_TYPE_LABELS = {
+  funding: 'Funding', ipo: 'IPO', regulatory_approval: 'Regulatory approval',
+  merger_acquisition: 'Merger/acquisition', leadership_change: 'Leadership change',
+  notable_paper: 'Notable paper', other: 'Other',
+};
+
+function renderEventsTimeline() {
+  if (!companyEvents.length) {
     Plotly.purge('chart');
     document.getElementById('chart').innerHTML =
-      '<p class="hint">No IPOs tracked yet — set ipo_date on a company (via enrichment picking one up from a scraped ' +
-      'item, or by hand) to see it here.</p>';
+      '<p class="hint">No org events recorded yet — these accumulate as enrichment picks up funding rounds, IPOs, ' +
+      'regulatory approvals, mergers, leadership changes, and unusually novel papers, or you add one by hand below.</p>';
     return;
   }
-  const trace = {
-    x: ipoed.map(c => c.ipo_date),
-    y: ipoed.map(c => c.name),
-    text: ipoed.map(c => `${c.name}${c.stock_exchange ? ' — ' + c.stock_exchange : ''}${c.stock_ticker ? ': ' + c.stock_ticker : ''}`),
-    customdata: ipoed.map(c => c.source_url || ''),
+  const dated = companyEvents.filter(e => e.event_date).slice().sort((a, b) => a.event_date.localeCompare(b.event_date));
+  const orgOrder = [...new Set(dated.map(e => e.org))];
+  const byType = {};
+  dated.forEach(e => (byType[e.event_type] ||= []).push(e));
+
+  const traces = Object.entries(byType).map(([type, evs]) => ({
+    x: evs.map(e => e.event_date),
+    y: evs.map(e => e.org),
+    text: evs.map(e => `${e.title}${e.description ? '<br>' + e.description : ''}`),
+    customdata: evs.map(e => e.source_url || ''),
     mode: 'markers',
     type: 'scatter',
-    marker: { size: 14, color: '#4a90d9' },
-    hovertemplate: '%{text}<br>%{x}<extra></extra>',
-  };
+    name: EVENT_TYPE_LABELS[type] || type,
+    marker: { size: 13, color: EVENT_TYPE_COLORS[type] || '#adb5bd' },
+    hovertemplate: '%{text}<br>%{x}<extra>' + (EVENT_TYPE_LABELS[type] || type) + '</extra>',
+  }));
+
   const layout = {
-    xaxis: { title: 'IPO date', type: 'date' },
-    yaxis: { title: '', automargin: true },
+    xaxis: { title: 'Date', type: 'date' },
+    yaxis: { title: '', automargin: true, categoryorder: 'array', categoryarray: orgOrder },
     margin: { t: 20, l: 160 },
+    legend: { orientation: 'h' },
     hovermode: 'closest',
     hoverlabel: { bgcolor: '#1e1e1eee', bordercolor: '#4a90d9', font: { color: '#f5f5f5', size: 12 } },
   };
-  Plotly.newPlot('chart', [trace], layout, { responsive: true }).then(gd => {
+  Plotly.newPlot('chart', traces, layout, { responsive: true }).then(gd => {
     gd.removeAllListeners && gd.removeAllListeners('plotly_click');
     gd.on('plotly_click', (ev) => {
       const url = ev.points[0].customdata;
       if (url) window.open(url, '_blank');
     });
+  });
+}
+
+// Live TradingView mini-chart embeds (free, keyless, no key/backend
+// storage needed) instead of besseleth's own scraped-and-refreshed
+// price history — a stock price is a live number that already has a
+// hundred good trackers; there's no reason to keep a second, staler
+// copy of it here and a manual "Refresh stock prices" button to
+// remember to click. Best-effort symbol resolution: with a
+// stock_exchange set (companies.yaml) it's an exact "EXCHANGE:TICKER"
+// TradingView symbol; without one, the bare ticker still usually
+// resolves, just with less certainty about which exchange/listing.
+function tradingViewSymbol(c) {
+  const exch = (c.stock_exchange || '').toUpperCase().replace(/[^A-Z]/g, '');
+  return exch ? `${exch}:${c.stock_ticker}` : c.stock_ticker;
+}
+
+function renderStockChart() {
+  const picker = document.getElementById('stockPicker');
+  const selected = new Set(Array.from(picker.selectedOptions).map(o => o.value));
+  const chartEl = document.getElementById('chart');
+  const picked = companies.filter(c => selected.has(c.name) && c.stock_ticker);
+  if (!picked.length) {
+    chartEl.innerHTML = '<p class="hint">Pick at least one company above.</p>';
+    return;
+  }
+  chartEl.innerHTML = picked.map(c => `
+    <div style="margin-bottom:1rem;">
+      <div class="hint" style="margin-bottom:.2rem;">${c.name}</div>
+      <div class="tradingview-widget-container" id="tv-widget-${c.name.replace(/[^a-zA-Z0-9]/g, '')}"></div>
+    </div>`).join('');
+  picked.forEach(c => {
+    const container = document.getElementById(`tv-widget-${c.name.replace(/[^a-zA-Z0-9]/g, '')}`);
+    const script = document.createElement('script');
+    script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-mini-symbol-overview.js';
+    script.async = true;
+    script.type = 'text/javascript';
+    script.text = JSON.stringify({
+      symbol: tradingViewSymbol(c), width: '100%', height: 200, locale: 'en',
+      dateRange: '12M', colorTheme: 'dark', trendLineColor: '#4a90d9',
+      underLineColor: 'rgba(74,144,217,0.15)', isTransparent: true, autosize: true,
+    });
+    container.appendChild(script);
   });
 }
 
@@ -1811,19 +2287,75 @@ function renderTable() {
     makeTableResizable(table, 'dataTable:fda_timeline');
     return;
   }
-  if (currentDataset === 'ipo_timeline') {
-    const ipoed = companies.filter(c => c.ipo_date).slice().sort((a, b) => b.ipo_date.localeCompare(a.ipo_date));
+  if (currentDataset === 'events_timeline') {
     table.innerHTML = `
-      <thead><tr><th>Company</th><th>IPO date</th><th>Exchange</th><th>Ticker</th><th>Source</th></tr></thead>
-      <tbody>${ipoed.map(c => `
+      <p style="margin:.4rem 0;"><button class="btn" id="addEventBtn" style="padding:.3rem .7rem; font-size:.85rem;">Add an event by hand…</button></p>
+      <thead><tr><th>Org</th><th>Type</th><th>Title</th><th>Description</th><th>Date</th><th>Source</th><th></th></tr></thead>
+      <tbody>${companyEvents.map(e => `
         <tr>
-          <td>${c.name}</td>
-          <td>${c.ipo_date}</td>
-          <td>${c.stock_exchange || ''}</td>
-          <td>${c.stock_ticker || ''}</td>
-          <td>${c.source_url ? `<a href="${c.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
+          <td>${e.org}</td>
+          <td>${EVENT_TYPE_LABELS[e.event_type] || e.event_type}</td>
+          <td>${e.title}</td>
+          <td>${e.description || ''}</td>
+          <td>${e.event_date || ''}</td>
+          <td>${e.source_url ? `<a href="${e.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
+          <td><button class="delBtn" data-event-id="${e.id}" title="Delete this event">🗑</button></td>
         </tr>`).join('')}</tbody>`;
-    makeTableResizable(table, 'dataTable:ipo_timeline');
+    makeTableResizable(table, 'dataTable:events_timeline');
+    document.getElementById('addEventBtn').onclick = async () => {
+      const org = prompt('Org name:'); if (!org) return;
+      const title = prompt('Short title (e.g. "Names new CEO"):'); if (!title) return;
+      const event_type = prompt('Type — one of: regulatory_approval, merger_acquisition, leadership_change, other', 'other');
+      const event_date = prompt('Date (YYYY-MM-DD), optional:') || null;
+      const source_url = prompt('Source URL, optional:') || '';
+      const res = await fetch('/api/company-events', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ org, title, event_type, event_date, source_url }),
+      });
+      if ((await res.json()).ok) {
+        const eventsRes = await fetch('/api/company-events');
+        companyEvents = await eventsRes.json();
+        renderTable(); renderChart();
+      }
+    };
+    table.querySelectorAll('[data-event-id]').forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm('Delete this event?')) return;
+        await fetch(`/api/company-events/${btn.dataset.eventId}`, { method: 'DELETE' });
+        companyEvents = companyEvents.filter(e => String(e.id) !== btn.dataset.eventId);
+        renderTable(); renderChart();
+      };
+    });
+    return;
+  }
+  if (currentDataset === 'stock_chart') {
+    table.innerHTML = '';  // the embeds above are the whole view — nothing besseleth-side left to tabulate
+    return;
+  }
+  if (currentDataset === 'metrics_table') {
+    const filter = (document.getElementById('metricsFilter') || {}).value || '';
+    const filtered = filter
+      ? metricsTable.filter(r => `${r.metric} ${r.subject} ${r.org}`.toLowerCase().includes(filter.toLowerCase()))
+      : metricsTable;
+    table.innerHTML = `
+      <p style="margin:.4rem 0;"><input type="text" id="metricsFilter" placeholder="Filter by metric/device/org…" value="${filter}" style="padding:.3rem .5rem; width:260px;"></p>
+      <thead><tr><th>Metric</th><th>Value</th><th>Unit</th><th>Subject (device/company)</th><th>Org</th><th>Date</th><th>Auto-extracted?</th><th>Source</th></tr></thead>
+      <tbody>${filtered.map(r => `
+        <tr>
+          <td>${r.metric}</td>
+          <td>${typeof r.value === 'number' ? r.value.toLocaleString() : r.value}</td>
+          <td>${r.unit || ''}</td>
+          <td>${r.subject}${r.subject_type === 'device' ? ' <span class="hint">(device)</span>' : ''}</td>
+          <td>${r.org}</td>
+          <td>${r.date || ''}</td>
+          <td>${r.auto_extracted ? 'yes — verify' : 'no (hand-entered)'}</td>
+          <td>${r.source_url ? `<a href="${r.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
+        </tr>`).join('')}</tbody>`;
+    makeTableResizable(table, 'dataTable:metrics_table');
+    const filterInput = document.getElementById('metricsFilter');
+    filterInput.focus();
+    filterInput.setSelectionRange(filter.length, filter.length);
+    filterInput.oninput = () => renderTable();
     return;
   }
   if (currentDataset === 'devices') {

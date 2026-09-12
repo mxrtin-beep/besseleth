@@ -12,9 +12,12 @@ A weekly industry-briefing bot. Point it at an industry (e.g.
 - Flags **LinkedIn** as a source with a compliant path (see below — no ToS-violating scraping)
 - **Personalizes**: if an item mentions a company one of your contacts works at (e.g. a job posting at your friend's company), it's pulled into its own "For you" section
 - **Tracks industry trends**: a self-populating (auto-extracted, human-editable) dataset of devices/systems and their metrics — for neurotech: information transfer rate, implant longevity, electrode count, device type, material, and FDA status — plus a separate **companies** dataset for business metrics (funding, stock price — auto-refreshable for free for public tickers). Both accumulate forever, across every report; auto-added entries are tagged so they're distinct from ones you've verified.
+- **Tracks an events timeline per org**: funding rounds, IPOs, regulatory approvals, mergers/acquisitions, leadership changes, and notably novel papers, auto-picked up during enrichment (or added by hand from the Trends tab) — one chart showing every org's milestones over time, not just funding/IPO.
+- **Charts stock price history**, not just a live quote — the first time a company's `stock_ticker` is set, its full free daily-close history is backfilled from Stooq, then appended to on every refresh, so the Trends tab can plot and compare several companies' stock price over time.
+- **Ingest an uploaded research PDF**: drop a paper in from the Papers tab and it's extracted, added to Sources like any other paper, and compared against the closest-matching papers already on file — a short LLM write-up of how it confirms, extends, or contradicts current research (falls back to a plain related-papers listing if no LLM backend is available).
 - **Maps** the companies/labs behind your papers by location — geocoded free via OpenStreetMap, extracted by the same enrichment pass, no separate step; an org whose location was never mentioned in any item's own text gets a web-lookup fallback instead of staying unlocated forever (Wikidata first, then a general web search read by the local LLM for orgs too small/new to be on Wikidata).
 - **Tracks job postings** at the companies/labs it's already found (from their Greenhouse/Lever/Ashby job-board API, not scraped HTML) — kept in sync so a closed posting is marked removed, not left stale; auto-detects each org's board with a manual override file (`job_boards.yaml`) for the ones it can't guess.
-- **Summarizes** each section with a free local LLM via [Ollama](https://ollama.ai) — falls back to a plain extractive summary if Ollama isn't running, so it never blocks
+- **Summarizes** each section with an LLM — by default the free, hosted [Groq](https://console.groq.com) API (fast, nothing to install, doesn't tie up your machine), falling back automatically to a local [Ollama](https://ollama.ai) if you have one running and Groq is rate-limited; falls back further to a plain extractive summary if neither is available, so it never blocks
 - Writes a Markdown report to `reports/` on a configurable cadence (daily/weekly/monthly/whatever), and can email it — old reports are deletable, individually, from the dashboard
 - Dedupes across runs in a local SQLite DB, so re-running never repeats old items; a **backfill** control lets you pull history further back than the usual lookback window
 - Ships a **browser dashboard** (`besseleth.web.app`) — the whole app, really: read reports, explore devices/companies as an interactive adjustable-axis chart with a cited source on every point, and paste anything (LinkedIn, Bluesky/X, events, whatever) into one box that figures out what it is
@@ -31,7 +34,11 @@ Devices and companies (the trends feature) live in the same sqlite db as
 everything else now — add entries via the dashboard's Trends tab, no
 file to copy.
 
-Optional — for local LLM summaries:
+LLM summaries/extraction use [Groq](https://console.groq.com) (free, hosted) by default — create an API key there and either
+put it in `config.yaml`'s `summarizer.groq_api_key` or set `GROQ_API_KEY` as an env var. No key set means everything gets
+marked "unknown" instead of extracted (see `summarizer.backend` in `config.example.yaml`).
+
+Prefer a fully local/offline LLM instead? Set `summarizer.backend: "ollama"`:
 
 ```bash
 # https://ollama.ai

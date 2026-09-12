@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from .cancel import check_cancelled
 from .config import Config
 from .db import DB, Item
 from .personalize import flag_interests, personalize_items
@@ -36,7 +37,9 @@ def _days_back(configured: int, since: date | None) -> int:
     return max(configured, (date.today() - since).days)
 
 
-def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=None) -> dict[str, list[Item]]:
+def fetch_all(
+    config: Config, db: DB, since: date | None = None, progress_cb=None, cancel_event=None
+) -> dict[str, list[Item]]:
     """Runs every enabled scraper, dedupes against the DB, and returns the
     newly-seen items grouped by source (existing items are not
     re-included). Pass `since` to backfill further back than each
@@ -47,7 +50,14 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
     fetch phase below (a fixed 9-step sequence — disabled sources still
     advance the counter, just near-instantly, since there's no fetch to
     wait on) — a very basic "step N of 9: <label>" indicator, not a
-    precise item-level progress bar."""
+    precise item-level progress bar.
+
+    cancel_event, if given, is checked (see cancel.py) before each
+    scraper below and threaded into arxiv/openalex's own pagination
+    loops (the two slow enough — deep backfill, rate-limit backoff — for
+    a mid-scraper checkpoint to actually matter, not just a between-
+    scrapers one). Raises FetchCancelled the moment it's set; whatever
+    scraper already finished and got stored before that stays stored."""
     results: dict[str, list[Item]] = {s: [] for s in SOURCES}
     _TOTAL_FETCH_STEPS = 9  # arXiv, Papers, News, Blogs, Conferences, Events, Social, LinkedIn, Enrichment+Jobs
     _step = [0]  # mutable cell, closed over below — a plain int can't be reassigned from the closure
@@ -63,6 +73,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
     # bucket: to you these are the same thing (research papers), just
     # from two complementary feeds with different tradeoffs, not two
     # separate report sections to compare.
+    check_cancelled(cancel_event)
     arxiv_cfg = config.source("arxiv")
     if arxiv_cfg.get("enabled"):
         print("[pipeline] Fetching arXiv...")
@@ -70,10 +81,12 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
             config,
             days_back=_days_back(arxiv_cfg.get("days_back", 8), since),
             max_results_per_keyword=arxiv_cfg.get("max_results_per_keyword", 15),
+            cancel_event=cancel_event,
         )
         results["papers"] += _dedupe_and_store(items, db)
     _tick("arXiv")
 
+    check_cancelled(cancel_event)
     papers_cfg = config.source("papers")
     if papers_cfg.get("enabled"):
         print("[pipeline] Fetching published papers (OpenAlex)...")
@@ -82,8 +95,24 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
             days_back=_days_back(papers_cfg.get("days_back", 8), since),
             max_results_per_keyword=papers_cfg.get("max_results_per_keyword", 15),
             mailto=papers_cfg.get("mailto"),
+            cancel_event=cancel_event,
         )
         results["papers"] += _dedupe_and_store(items, db)
+
+        # Labs.yaml-listed PIs' own papers, fetched by AUTHOR identity
+        # instead of your keyword list — catches genuinely on-topic work
+        # from a lab you already know about whose title/abstract just
+        # never happens to contain one of your exact keyword phrases
+        # (see fetch_known_lab_papers's docstring). Inert if labs.yaml
+        # is empty/missing, same as every other labs.yaml-driven feature.
+        if config.labs:
+            lab_items = openalex_scraper.fetch_known_lab_papers(
+                config, db,
+                days_back=_days_back(papers_cfg.get("days_back", 8), since),
+                mailto=papers_cfg.get("mailto"),
+                cancel_event=cancel_event,
+            )
+            results["papers"] += _dedupe_and_store(lab_items, db)
     _tick("Papers (OpenAlex)")
 
     # User-submitted feeds (the dashboard's Feeds tab) are additional
@@ -91,6 +120,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
     # into config.yaml itself — see feeds_store.py's docstring for why.
     submitted = load_feeds(config.feeds_path)
 
+    check_cancelled(cancel_event)
     news_cfg = config.source("news")
     if news_cfg.get("enabled"):
         print("[pipeline] Fetching news...")
@@ -99,6 +129,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
         results["news"] = _dedupe_and_store(items, db)
     _tick("News")
 
+    check_cancelled(cancel_event)
     blog_cfg = config.source("blogs")
     if blog_cfg.get("enabled"):
         print("[pipeline] Fetching blogs...")
@@ -107,6 +138,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
         results["blog"] = _dedupe_and_store(items, db)
     _tick("Blogs")
 
+    check_cancelled(cancel_event)
     conf_cfg = config.source("conferences")
     if conf_cfg.get("enabled"):
         print("[pipeline] Fetching conference watchlist...")
@@ -119,6 +151,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
         results["conference_news"] = _dedupe_and_store(news_items, db)
     _tick("Conferences")
 
+    check_cancelled(cancel_event)
     events_cfg = config.source("events")
     if events_cfg.get("enabled"):
         print("[pipeline] Fetching events...")
@@ -126,6 +159,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
         results["event"] = _dedupe_and_store(items, db)
     _tick("Events")
 
+    check_cancelled(cancel_event)
     social_cfg = config.source("social")
     if social_cfg.get("enabled"):
         print("[pipeline] Fetching social (Bluesky/X)...")
@@ -133,6 +167,7 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
         results["social"] = _dedupe_and_store(items, db)
     _tick("Social")
 
+    check_cancelled(cancel_event)
     linkedin_cfg = config.source("linkedin")
     if linkedin_cfg.get("enabled"):
         print("[pipeline] Fetching LinkedIn source...")
@@ -140,10 +175,11 @@ def fetch_all(config: Config, db: DB, since: date | None = None, progress_cb=Non
         results["linkedin"] = _dedupe_and_store(items, db)
     _tick("LinkedIn")
 
+    check_cancelled(cancel_event)
     print("[pipeline] Enriching papers/news/blog items (org, modality, therapeutic target, novelty)...")
     if progress_cb:
         progress_cb("Enriching newly-fetched items...", None, None)
-    enrich_items(config, db)
+    enrich_items(config, db, cancel_event=cancel_event)
 
     # Runs after enrichment, not before: it needs the orgs enrichment
     # just extracted (db.orgs()) to know who to look up job boards for.
@@ -190,7 +226,7 @@ def _dedupe_and_store(items: list[Item], db: DB) -> list[Item]:
     return new_items
 
 
-def generate_weekly_report(config: Config, db: DB, progress_cb=None) -> str:
+def generate_weekly_report(config: Config, db: DB, progress_cb=None, cancel_event=None) -> str:
     """Builds the report from every item in the last `days_back` days
     (config: `news.days_back`, default 8) — a fresh snapshot of "what's in
     this window right now," recomputed from scratch every time. It does
@@ -199,7 +235,15 @@ def generate_weekly_report(config: Config, db: DB, progress_cb=None) -> str:
     always looks exactly as if no report had ever run before, and never
     skips an item just because an earlier run already showed it. Each run
     still gets its own timestamped file, so re-running never overwrites an
-    earlier report. Returns the saved file path."""
+    earlier report. Returns the saved file path.
+
+    cancel_event, if given, is checked once before the (several) LLM
+    summarizer calls inside build_report start — report generation is
+    normally quick enough (a handful of section summaries, not a
+    paginated fetch) that one checkpoint here, rather than threading
+    cancellation through every summarizer call, covers the case that
+    actually matters: stopping before those calls begin at all."""
+    check_cancelled(cancel_event)
     if progress_cb:
         progress_cb("Building report...", None, None)
     days_back = config.source("news").get("days_back", 8)
@@ -262,18 +306,10 @@ def generate_weekly_report(config: Config, db: DB, progress_cb=None) -> str:
     report_cfg = config.report
     max_n = report_cfg.get("max_items_per_section", 12)
 
-    # Ranked by citation_count (highest first), not recency — a paper
-    # with real citations is more worth surfacing than an uncited one.
-    # Ties (including all-None, since an arXiv preprint never has a
-    # citation count — OpenAlex only indexes published papers) keep
-    # published_at order via the stable sort, so within "0/unknown
-    # citations" the newest still comes first. Caveat worth knowing: a
-    # brand-new arXiv preprint always starts at 0/unknown citations, so
-    # a week with lots of well-cited published papers can crowd fresh
-    # preprints out of the top max_n entirely — say if you want a
-    # blended ranking (guaranteed room for the newest few regardless of
-    # citations) instead of pure citation ranking.
-    papers_items = sorted(items_by_source["papers"], key=lambda i: i.citation_count or 0, reverse=True)[:max_n]
+    # Ranked by recency (newest first) — citation counts were dropped as
+    # a ranking signal (see report.py) since OpenAlex/arXiv coverage of
+    # them was unreliable enough to not be worth surfacing at all.
+    papers_items = sorted(items_by_source["papers"], key=lambda i: i.published_at or "", reverse=True)[:max_n]
 
     report_id, markdown = report_mod.build_report(
         industry_name=config.industry_name,

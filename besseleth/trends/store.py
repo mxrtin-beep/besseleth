@@ -84,7 +84,7 @@ def _migrate_legacy_yaml(db, legacy_yaml_path: str | Path | None) -> None:
         return
     import yaml
 
-    with open(p) as f:
+    with open(p, encoding="utf-8") as f:
         raw = yaml.safe_load(f) or []
     for d in raw:
         db.add_device(

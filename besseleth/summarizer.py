@@ -1,17 +1,30 @@
-"""Summarizes the week's items with a free local LLM via Ollama
-(https://ollama.ai — `ollama pull llama3.1 && ollama serve`).
+"""Summarizes the week's items with an LLM — by default the free, hosted
+Groq API (https://console.groq.com — fast, no install, doesn't tie up
+your own machine), falling back automatically to a local Ollama
+(https://ollama.ai — `ollama pull llama3.1 && ollama serve`) if one is
+configured and reachable, whenever Groq is rate-limited or unreachable.
+Set summarizer.backend: "ollama" to use Ollama only (no Groq calls at
+all — fully offline/local), or "none" for a plain extractive fallback.
 
-Falls back to a plain extractive summary (first sentences) if Ollama is
-unreachable or backend is set to "none", so the report always generates.
-"""
+Falls back to a plain extractive summary (first sentences) if no backend
+produced a result, so the report always generates."""
 from __future__ import annotations
 
 import json
+import os
 import re
 
 import requests
 
 from .db import Item
+
+# Any backend that actually calls an LLM — used everywhere a call site
+# used to check `backend != "ollama"` (or `== "ollama"`) as a stand-in
+# for "is a real LLM configured", back when Ollama was the only option.
+LLM_BACKENDS = ("groq", "ollama")
+
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
 
 
 def _extractive_fallback(items: list[Item], max_sentences: int = 3) -> str:
@@ -40,6 +53,68 @@ def _ollama_generate(prompt: str, ollama_url: str, model: str, timeout: int = 12
         return None
 
 
+def _groq_generate(prompt: str, api_key: str, model: str, timeout: int = 60) -> tuple[str | None, bool]:
+    """Returns (text, rate_limited). text is None on any failure — the
+    caller decides what to fall back to; rate_limited is True
+    specifically for a 429, so a caller with Ollama also configured can
+    fall back to it instead of just giving up (Groq's free tier is
+    plenty for normal use but a big backfill/re-enrich run can hit its
+    per-minute caps — see README)."""
+    if not api_key:
+        print("[summarizer] No Groq API key configured (summarizer.groq_api_key or GROQ_API_KEY env var); skipping Groq.")
+        return None, False
+    try:
+        resp = requests.post(
+            GROQ_API_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.2},
+            timeout=timeout,
+        )
+        if resp.status_code == 429:
+            print("[summarizer] Groq rate limit hit.")
+            return None, True
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip(), False
+    except requests.RequestException as e:
+        print(f"[summarizer] Groq unreachable/failed ({e}).")
+        return None, False
+
+
+def _llm_generate(prompt: str, cfg: dict, timeout: int = 120, num_thread: int | None = None) -> str | None:
+    """The one entry point every summarizer/enrich LLM call should go
+    through — dispatches on summarizer.backend and, for "groq" (the
+    default), falls back to Ollama automatically if one is configured
+    (summarizer.ollama_url/model set, or just left at their defaults —
+    Ollama has no separate "enabled" flag, if backend isn't "groq" alone
+    it's assumed reachable) and Groq was rate-limited or unreachable.
+    Returns None (never raises) if nothing worked, so every caller's
+    existing "result or fallback" pattern keeps working unchanged."""
+    backend = cfg.get("backend", "groq")
+    if backend == "groq":
+        api_key = cfg.get("groq_api_key") or os.environ.get("GROQ_API_KEY", "")
+        model = cfg.get("groq_model", DEFAULT_GROQ_MODEL)
+        result, rate_limited = _groq_generate(prompt, api_key, model, timeout=min(timeout, 60))
+        if result:
+            return result
+        if not cfg.get("groq_fallback_to_ollama", True):
+            return None
+        # Falls through here for any Groq failure — rate-limited, no key
+        # configured, or a plain network/5xx error — rather than trying
+        # to distinguish every failure mode; Ollama is either reachable
+        # (worth trying) or it isn't (fails fast, same as Groq did).
+        print("[summarizer] Falling back to Ollama for this call.")
+        return _ollama_generate(
+            prompt, cfg.get("ollama_url", "http://localhost:11434"), cfg.get("model", "llama3.1"),
+            timeout=timeout, num_thread=num_thread,
+        )
+    if backend == "ollama":
+        return _ollama_generate(
+            prompt, cfg.get("ollama_url", "http://localhost:11434"), cfg.get("model", "llama3.1"),
+            timeout=timeout, num_thread=num_thread,
+        )
+    return None
+
+
 def summarize_section(items: list[Item], section_name: str, industry_name: str, cfg: dict, cite_style: str = "narrative") -> str:
     """Returns a short prose summary of the given items, each specific
     mention cited as an inline markdown link to its source.
@@ -58,11 +133,8 @@ def summarize_section(items: list[Item], section_name: str, industry_name: str, 
 
     max_items = cfg.get("max_items_per_summary_call", 8)
     backend = cfg.get("backend", "none")
-    if backend != "ollama":
+    if backend not in LLM_BACKENDS:
         return _extractive_fallback(items, max_sentences=max_items if cite_style == "per_item" else 3)
-
-    model = cfg.get("model", "llama3.1")
-    ollama_url = cfg.get("ollama_url", "http://localhost:11434")
 
     bullet_list = "\n".join(
         f"- {i.title} ({i.url or 'no link'}): {i.summary[:400]}" for i in items[:max_items]
@@ -91,7 +163,7 @@ def summarize_section(items: list[Item], section_name: str, industry_name: str, 
         f"like 'Here is a summary'.\n\n"
         f"Items:\n{bullet_list}\n\nSummary:"
     )
-    result = _ollama_generate(prompt, ollama_url, model, num_thread=cfg.get("num_thread"))
+    result = _llm_generate(prompt, cfg, num_thread=cfg.get("num_thread"))
     if not result:
         return _extractive_fallback(items, max_sentences=max_items if cite_style == "per_item" else 3)
 
@@ -118,17 +190,15 @@ def _one_sentence(item: Item, industry_name: str, cfg: dict) -> str:
     the whole link) for some of them — asking per item, then attaching
     the number/link ourselves in code, can't drop one."""
     backend = cfg.get("backend", "none")
-    if backend != "ollama":
+    if backend not in LLM_BACKENDS:
         return (" ".join(item.summary.split())[:200] or item.title).rstrip(".")
 
-    model = cfg.get("model", "llama3.1")
-    ollama_url = cfg.get("ollama_url", "http://localhost:11434")
     prompt = (
         f"In one concise sentence, state the key point of this {industry_name} item — "
         f"don't repeat the title verbatim, no preamble like 'This article...':\n"
         f"Title: {item.title}\nText: {item.summary[:600]}\n\nSentence:"
     )
-    result = _ollama_generate(prompt, ollama_url, model, timeout=60, num_thread=cfg.get("num_thread"))
+    result = _llm_generate(prompt, cfg, timeout=60, num_thread=cfg.get("num_thread"))
     return (result or item.summary[:200] or item.title).strip().rstrip(".")
 
 
@@ -183,11 +253,9 @@ def summarize_context(new_items: list[Item], history: dict, industry_name: str, 
     )
 
     backend = cfg.get("backend", "none")
-    if backend != "ollama":
+    if backend not in LLM_BACKENDS:
         return fallback
 
-    model = cfg.get("model", "llama3.1")
-    ollama_url = cfg.get("ollama_url", "http://localhost:11434")
     max_items = cfg.get("max_items_per_summary_call", 8)
     new_titles = "\n".join(f"- {i.title}" for i in new_items[:max_items])
     returning_note = f" (here: {', '.join(returning_orgs)})" if returning_orgs else ""
@@ -213,7 +281,7 @@ def summarize_context(new_items: list[Item], history: dict, industry_name: str, 
         f"like 'Here is a summary', no fluff.\n\n"
         f"Today's new items:\n{new_titles}\n\nBig picture:"
     )
-    result = _ollama_generate(prompt, ollama_url, model, num_thread=cfg.get("num_thread"))
+    result = _llm_generate(prompt, cfg, num_thread=cfg.get("num_thread"))
     return result or fallback
 
 
@@ -233,18 +301,16 @@ def summarize_linkedin_item(item: Item, cfg: dict) -> str:
     fallback = fallback or item.title
 
     backend = cfg.get("backend", "none")
-    if backend != "ollama":
+    if backend not in LLM_BACKENDS:
         return fallback
 
-    model = cfg.get("model", "llama3.1")
-    ollama_url = cfg.get("ollama_url", "http://localhost:11434")
     prompt = (
         "The following is a pasted LinkedIn post, almost always a hiring announcement. "
         'Extract just the basics as JSON: {"role": "...", "company": "...", "location": "..."} '
         "— use null for any field not clearly stated, don't guess. Output ONLY the JSON, no "
         f"other text.\n\nPost:\n{item.summary[:800]}\n\nJSON:"
     )
-    result = _ollama_generate(prompt, ollama_url, model, timeout=60, num_thread=cfg.get("num_thread"))
+    result = _llm_generate(prompt, cfg, timeout=60, num_thread=cfg.get("num_thread"))
     match = _JSON_BLOCK_RE.search(result or "")
     try:
         data = json.loads(match.group(0)) if match else {}
@@ -269,14 +335,12 @@ def summarize_item(item: Item, cfg: dict) -> str:
     """One-line 'why it matters' for a single high-priority item (e.g. a
     personalized match). Falls back to the raw summary if unavailable."""
     backend = cfg.get("backend", "none")
-    if backend != "ollama":
+    if backend not in LLM_BACKENDS:
         return " ".join(item.summary.split())[:200]
 
-    model = cfg.get("model", "llama3.1")
-    ollama_url = cfg.get("ollama_url", "http://localhost:11434")
     prompt = (
         f"In one concise sentence, explain why this item might matter to someone "
         f"tracking their industry:\nTitle: {item.title}\nDetails: {item.summary[:500]}\n\nSentence:"
     )
-    result = _ollama_generate(prompt, ollama_url, model, timeout=60, num_thread=cfg.get("num_thread"))
+    result = _llm_generate(prompt, cfg, timeout=60, num_thread=cfg.get("num_thread"))
     return result or item.summary[:280]

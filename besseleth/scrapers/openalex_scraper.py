@@ -24,6 +24,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import requests
 
+from ..cancel import check_cancelled
 from ..db import Item
 from .util import stable_id, text_matches_keywords
 
@@ -45,7 +46,35 @@ def _reconstruct_abstract(inverted_index: dict | None) -> str:
     return " ".join(positions[i] for i in sorted(positions))
 
 
-def fetch(config, days_back: int, max_results_per_keyword: int, mailto: str | None = None) -> list[Item]:
+def _work_to_item(work: dict, openalex_id: str, title: str, abstract: str, pub_date_str: str, matched_keywords: list[str]) -> Item:
+    """Builds an Item from one OpenAlex work record — shared by fetch()
+    (keyword search) and fetch_known_lab_papers() (author search), which
+    differ only in HOW they decided this work is relevant, not in how to
+    turn the record itself into an Item."""
+    authors = ", ".join(
+        name for a in work.get("authorships", [])
+        if (name := (a.get("author") or {}).get("display_name"))
+    )
+    url = (
+        (work.get("primary_location") or {}).get("landing_page_url")
+        or work.get("doi")
+        or openalex_id
+    )
+    return Item(
+        id=stable_id("papers", openalex_id),
+        source="papers",
+        title=title,
+        url=url or "",
+        summary=abstract,
+        published_at=pub_date_str or datetime.now(timezone.utc).isoformat(),
+        matched_keywords=matched_keywords,
+        authors=authors or None,
+        citation_count=work.get("cited_by_count"),
+        openalex_id=openalex_id or None,
+    )
+
+
+def fetch(config, days_back: int, max_results_per_keyword: int, mailto: str | None = None, cancel_event=None) -> list[Item]:
     """Fetches papers matching each configured keyword, newest first,
     stopping once results fall outside the `days_back` window.
 
@@ -85,6 +114,7 @@ def fetch(config, days_back: int, max_results_per_keyword: int, mailto: str | No
     for keyword in config.keywords:
         page = 1
         while True:
+            check_cancelled(cancel_event)
             params = {
                 "search": keyword,
                 "filter": f"from_publication_date:{cutoff},type:article",
@@ -169,29 +199,7 @@ def fetch(config, days_back: int, max_results_per_keyword: int, mailto: str | No
                     continue
                 hits = hits or [keyword]
 
-                authors = ", ".join(
-                    name for a in work.get("authorships", [])
-                    if (name := (a.get("author") or {}).get("display_name"))
-                )
-                url = (
-                    (work.get("primary_location") or {}).get("landing_page_url")
-                    or work.get("doi")
-                    or openalex_id
-                )
-
-                items.append(
-                    Item(
-                        id=stable_id("papers", openalex_id),
-                        source="papers",
-                        title=title,
-                        url=url or "",
-                        summary=abstract,
-                        published_at=pub_date_str or datetime.now(timezone.utc).isoformat(),
-                        matched_keywords=hits,
-                        authors=authors or None,
-                        citation_count=work.get("cited_by_count"),
-                    )
-                )
+                items.append(_work_to_item(work, openalex_id, title, abstract, pub_date_str, hits))
                 seen_ids.add(openalex_id)
 
             page += 1
@@ -205,4 +213,149 @@ def fetch(config, days_back: int, max_results_per_keyword: int, mailto: str | No
         f"kept {len(items)}, rejected {skipped_had_abstract} by the keyword recheck (had an abstract that didn't "
         f"match — the rest of the gap between seen/kept is duplicates across keywords, not rejections)."
     )
+    return items
+
+
+OPENALEX_AUTHORS_API = "https://api.openalex.org/authors"
+MAX_RESULTS_PER_AUTHOR_HARD_CAP = 200  # a backfill safety valve, same idea as MAX_RESULTS_PER_KEYWORD_HARD_CAP
+
+
+def _resolve_author_id(db, pi: str, university: str, mailto: str | None, headers: dict) -> str | None:
+    """Finds the OpenAlex author id for a labs.yaml {pi, university}
+    entry — cached in lab_author_cache (see db.py) so this search only
+    ever runs once per lab, not on every fetch. OpenAlex's author search
+    is fuzzy/relevance-ranked, so the top hit for a common surname alone
+    could easily be the wrong person entirely; requiring `university` to
+    actually appear (case-insensitively) somewhere in that author's own
+    listed institution history is the same "don't guess when ambiguous"
+    standard the rest of labs.yaml matching uses (see _match_known_lab).
+    Returns None (and caches that) if nothing sufficiently confident was
+    found — a common/short surname with no matching institution, or an
+    author OpenAlex just doesn't have."""
+    cached = db.get_lab_author_cache(pi, university)
+    if cached:
+        return cached["author_id"]
+
+    try:
+        resp = requests.get(
+            OPENALEX_AUTHORS_API,
+            params={"search": f"{pi} {university}", "per_page": 5, **({"mailto": mailto} if mailto else {})},
+            headers=headers,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        candidates = resp.json().get("results", [])
+    except requests.RequestException as e:
+        print(f"[papers] OpenAlex author search failed for {pi!r} ({university}): {e}")
+        return None  # NOT cached — a transient network failure shouldn't lock this lab out permanently
+
+    university_lower = university.lower()
+    for candidate in candidates:
+        institutions = candidate.get("affiliations") or candidate.get("last_known_institutions") or []
+        names = [
+            (inst.get("institution") or inst).get("display_name", "")
+            if isinstance(inst.get("institution", inst), dict) else ""
+            for inst in institutions
+        ]
+        if any(university_lower in (n or "").lower() for n in names):
+            author_id = (candidate.get("id") or "").rsplit("/", 1)[-1]
+            db.set_lab_author_cache(pi, university, author_id)
+            return author_id
+
+    db.set_lab_author_cache(pi, university, None)
+    return None
+
+
+def fetch_known_lab_papers(
+    config, db, days_back: int, max_results_per_author: int = 25, mailto: str | None = None, cancel_event=None
+) -> list[Item]:
+    """Pulls a labs.yaml-listed PI's own papers directly from OpenAlex
+    by AUTHOR, not by your keyword list — the actual fix for "a lab I
+    know is active isn't showing up": fetch()'s keyword search only ever
+    finds a paper whose title/abstract happens to contain one of your
+    configured phrases verbatim, which plenty of genuinely on-topic work
+    from a real, named lab just doesn't (different terminology, a
+    methods-focused title, etc). Once a PI is on your own list, their
+    own papers are relevant by definition — no keyword recheck needed,
+    unlike fetch()'s noise-filtering pass (see its docstring for why
+    that exists there but shouldn't apply here).
+
+    Deliberately NOT a substitute for website scraping (which was the
+    original ask) — every lab's own site is differently formatted,
+    often JS-rendered, and scraping each one would be exactly the kind
+    of brittle, high-maintenance per-site scraper this codebase avoids
+    elsewhere (job postings use each ATS's real API, not scraped HTML,
+    for the same reason). An author-identity search against a real API
+    besseleth already integrates with is the reliable version of the
+    same idea.
+
+    Only labs with BOTH `pi` and `university` set are attempted — an
+    author search needs the institution to disambiguate a common
+    surname (see _resolve_author_id); a labs.yaml entry with no
+    university is used elsewhere (deterministic org-naming) but skipped
+    here."""
+    cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days_back)).date()
+    cutoff = cutoff_date.isoformat()
+    headers = {"User-Agent": f"besseleth/1.0 (industry-briefing tool{f'; mailto:{mailto}' if mailto else ''})"}
+
+    items: list[Item] = []
+    seen_ids: set[str] = set()
+    for lab in config.labs:
+        check_cancelled(cancel_event)  # between labs — could be a long list
+        pi, university = lab.get("pi"), lab.get("university")
+        if not pi or not university:
+            continue
+        author_id = _resolve_author_id(db, pi, university, mailto, headers)
+        if not author_id:
+            continue
+
+        page = 1
+        while True:
+            check_cancelled(cancel_event)
+            params = {
+                "filter": f"author.id:{author_id},from_publication_date:{cutoff},type:article",
+                "sort": "publication_date:desc",
+                "per-page": max_results_per_author,
+                "page": page,
+            }
+            if mailto:
+                params["mailto"] = mailto
+            try:
+                resp = requests.get(OPENALEX_WORKS_API, params=params, headers=headers, timeout=20)
+                resp.raise_for_status()
+                results = resp.json().get("results", [])
+            except requests.RequestException as e:
+                print(f"[papers] OpenAlex works lookup failed for {pi} (author {author_id}): {e}")
+                break
+            if not results:
+                break
+
+            reached_cutoff = False
+            for work in results:
+                openalex_id = work.get("id", "")
+                title = (work.get("title") or "").strip()
+                pub_date_str = work.get("publication_date") or ""
+                try:
+                    if pub_date_str and date.fromisoformat(pub_date_str) < cutoff_date:
+                        reached_cutoff = True
+                        break
+                except ValueError:
+                    pass
+                if not openalex_id or not title or openalex_id in seen_ids:
+                    continue
+                abstract = _reconstruct_abstract(work.get("abstract_inverted_index"))
+                # Tags the item as labs.yaml-sourced (not a real keyword
+                # hit) — still passes report.py/dedupe.py's ordinary
+                # "has at least one matched_keywords entry" checks, and
+                # is visible on the item if you ever want to filter by it.
+                items.append(_work_to_item(work, openalex_id, title, abstract, pub_date_str, [f"known_lab:{pi}"]))
+                seen_ids.add(openalex_id)
+
+            page += 1
+            time.sleep(1)  # be polite to OpenAlex's free API
+            if reached_cutoff or len(results) < max_results_per_author or page * max_results_per_author >= MAX_RESULTS_PER_AUTHOR_HARD_CAP:
+                break
+
+    if items:
+        print(f"[papers] OpenAlex (known labs): {len(items)} paper(s) from {len({i.matched_keywords[0] for i in items})} labs.yaml PI(s).")
     return items

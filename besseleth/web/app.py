@@ -30,14 +30,15 @@ from pathlib import Path
 import markdown as md
 from flask import Flask, Response, abort, jsonify, render_template, request, send_from_directory
 
-from ..config import Config, load_config
+from ..config import Config, load_config, update_industry_settings, update_schedule_settings, update_summarizer_settings
 from ..contacts_store import Contact, add_contact, import_linkedin_csv, load_contacts, remove_contact, update_contact
 from ..db import DB
 from ..feeds_store import add_feed, load_feeds, remove_feed
 from ..interests_store import load_interests, save_interests
+from ..cancel import FetchCancelled
 from ..pipeline import SOURCES as ALL_ITEM_SOURCES
 from ..pipeline import fetch_all
-from ..scheduler import SchedulerStatus, run_now, start_scheduler
+from ..scheduler import SchedulerStatus, reschedule, run_now, start_scheduler
 from ..scrapers.manual_drop import add_smart_item
 from ..trends.company_store import find_possible_duplicate_companies, load_companies, merge_company_pair
 from ..trends.fda_stages import FDA_STAGES, stage_for
@@ -75,10 +76,15 @@ def _require_auth() -> "Response | None":
     return Response("Authentication required.", 401, {"WWW-Authenticate": 'Basic realm="besseleth"'})
 
 
-def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
+def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=None) -> Flask:
     app = Flask(__name__)
     app.config["BESSELETH_CONFIG"] = config
     app.config["BESSELETH_STATUS"] = status or SchedulerStatus(enabled=False)
+    # The live APScheduler instance (None if schedule.enabled is false) —
+    # kept around so the Settings tab's schedule form can re-arm its jobs
+    # with a new interval/cron immediately (see reschedule() in
+    # scheduler.py) instead of only taking effect after a restart.
+    app.config["BESSELETH_SCHEDULER"] = scheduler
     app.before_request(_require_auth)
 
     reports_dir = Path(config.report.get("output_dir", "reports"))
@@ -107,7 +113,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         path = reports_dir / f"report-{report_id}.md"
         if not path.exists():
             abort(404)
-        html = md.markdown(path.read_text(), extensions=["tables"])
+        html = md.markdown(path.read_text(encoding="utf-8"), extensions=["tables"])
         return jsonify({"report_id": report_id, "html": html})
 
     @app.delete("/api/report/<report_id>")
@@ -219,6 +225,34 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             return jsonify({"ok": False, "message": "Both 'keep' and 'drop' are required."}), 400
         merge_company_pair(config.companies_path, keep_name=keep, drop_name=drop)
         return jsonify({"ok": True})
+
+    @app.get("/api/orgs/possible-duplicates")
+    def api_possible_duplicate_orgs():
+        # Flagged, never auto-merged — same reasoning as the companies-
+        # table version above, generalized to every org (labs/academic/
+        # gov orgs included, not just ones that made it into `companies`)
+        # and catching a second shape it can't (a corporate-suffix
+        # variant like "Valve" vs "Valve Corporation" — see
+        # db.find_possible_duplicate_orgs's docstring).
+        db = DB(config.db_path)
+        try:
+            pairs = db.find_possible_duplicate_orgs()
+        finally:
+            db.close()
+        return jsonify([{"a": a, "b": b, "reason": reason} for a, b, reason in pairs])
+
+    @app.post("/api/orgs/merge")
+    def api_merge_orgs():
+        payload = request.get_json(force=True) or {}
+        keep, drop = payload.get("keep"), payload.get("drop")
+        if not keep or not drop:
+            return jsonify({"ok": False, "message": "Both 'keep' and 'drop' are required."}), 400
+        db = DB(config.db_path)
+        try:
+            changed = db.merge_org(keep_org=keep, drop_org=drop)
+        finally:
+            db.close()
+        return jsonify({"ok": True, "changed": changed})
 
     @app.post("/api/jobs/reject-org")
     def api_jobs_reject_org():
@@ -428,6 +462,172 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             }
         )
 
+    @app.get("/api/settings/summarizer")
+    def api_get_summarizer_settings():
+        # Powers the Settings tab's backend picker — deliberately never
+        # returns groq_api_key's actual value (it's a secret; the field
+        # just shows "set"/"not set" and a save always overwrites rather
+        # than needing the old value round-tripped back to the browser).
+        cfg = config.summarizer
+        return jsonify({
+            "backend": cfg.get("backend", "groq"),
+            "groq_api_key_set": bool(cfg.get("groq_api_key") or os.environ.get("GROQ_API_KEY")),
+            "groq_model": cfg.get("groq_model", "llama-3.3-70b-versatile"),
+            "ollama_url": cfg.get("ollama_url", "http://localhost:11434"),
+            "model": cfg.get("model", "llama3.1"),
+        })
+
+    @app.post("/api/settings/summarizer")
+    def api_set_summarizer_settings():
+        # Writes straight into config.yaml (see update_summarizer_settings —
+        # a targeted text edit, not a full re-dump, so a hand-written
+        # config.yaml's comments survive) and takes effect immediately,
+        # no restart needed, since every LLM call reads config.summarizer
+        # fresh each time rather than caching it at startup.
+        payload = request.get_json(silent=True) or {}
+        backend = payload.get("backend")
+        if backend not in (None, "groq", "ollama", "none"):
+            return jsonify({"ok": False, "message": f"Unknown backend {backend!r}."}), 400
+        fields = {"backend": backend}
+        if payload.get("groq_api_key"):  # blank means "leave whatever's already set alone"
+            fields["groq_api_key"] = payload["groq_api_key"]
+        if payload.get("ollama_url"):
+            fields["ollama_url"] = payload["ollama_url"]
+        update_summarizer_settings(config, **fields)
+        return jsonify({"ok": True})
+
+    @app.post("/api/companies/refresh-stock")
+    def api_refresh_stock():
+        from ..trends.company_store import refresh_stock_prices
+
+        log = refresh_stock_prices(config.companies_path)
+        return jsonify({"ok": True, "log": log})
+
+    @app.post("/api/locations/standardize")
+    def api_standardize_locations():
+        # One-time-or-whenever bulk reformat of every stored location to
+        # "City[, State], Country" — see enrich.standardize_location_labels's
+        # docstring. Free (Nominatim), but one request per distinct
+        # location at ~1/sec, so this can take a while for a large map —
+        # safe to run synchronously since a Settings-tab click is
+        # inherently a "run this once and wait" action, not something
+        # racing a page load.
+        from ..enrich import standardize_location_labels
+
+        db = DB(config.db_path)
+        try:
+            result = standardize_location_labels(db)
+        finally:
+            db.close()
+        return jsonify({"ok": True, **result})
+
+    @app.get("/api/settings/schedule")
+    def api_get_schedule_settings():
+        sched = config.raw.get("schedule", {}) or {}
+        return jsonify({
+            "enabled": sched.get("enabled", True),
+            "fetch_interval_hours": sched.get("fetch_interval_hours", 6),
+            "report_cron": sched.get("report_cron", "0 4 * * MON"),
+            "timezone": sched.get("timezone") or "",
+        })
+
+    @app.post("/api/settings/schedule")
+    def api_set_schedule_settings():
+        payload = request.get_json(silent=True) or {}
+        try:
+            fetch_interval_hours = float(payload["fetch_interval_hours"]) if payload.get("fetch_interval_hours") else None
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "message": "fetch_interval_hours must be a number."}), 400
+        if fetch_interval_hours is not None and fetch_interval_hours <= 0:
+            return jsonify({"ok": False, "message": "fetch_interval_hours must be greater than 0."}), 400
+        report_cron = (payload.get("report_cron") or "").strip() or None
+        if report_cron:
+            try:
+                from apscheduler.triggers.cron import CronTrigger
+
+                CronTrigger.from_crontab(report_cron)  # raises on a malformed cron expression — validate before saving
+            except Exception as e:
+                return jsonify({"ok": False, "message": f"Invalid cron expression: {e}"}), 400
+        timezone_name = payload.get("timezone")
+        if timezone_name:
+            try:
+                from zoneinfo import ZoneInfo
+
+                ZoneInfo(timezone_name)
+            except Exception:
+                return jsonify({"ok": False, "message": f"Unknown timezone {timezone_name!r} (use an IANA name, e.g. America/Los_Angeles)."}), 400
+        update_schedule_settings(config, fetch_interval_hours=fetch_interval_hours, report_cron=report_cron, timezone=timezone_name)
+        reschedule(app.config.get("BESSELETH_SCHEDULER"), config)
+        return jsonify({"ok": True})
+
+    @app.get("/api/settings/industry")
+    def api_get_industry_settings():
+        return jsonify({"name": config.industry_name, "keywords": config.keywords})
+
+    @app.post("/api/settings/industry")
+    def api_set_industry_settings():
+        payload = request.get_json(silent=True) or {}
+        name = (payload.get("name") or "").strip() or None
+        keywords = payload.get("keywords")
+        if keywords is not None:
+            keywords = [k.strip() for k in keywords if isinstance(k, str) and k.strip()]
+            if not keywords:
+                return jsonify({"ok": False, "message": "At least one keyword is required."}), 400
+        update_industry_settings(config, name=name, keywords=keywords)
+        return jsonify({"ok": True})
+
+    @app.get("/api/metrics-table")
+    def api_metrics_table():
+        # Every numeric value besseleth has extracted, flattened to one
+        # row each — the point being ATTRIBUTION: a bare number like "3
+        # year lifespan" is useless without knowing which device/company
+        # it's about, so every row here always names its subject (device
+        # name + org, or just org for a company metric), not just the
+        # value. This is the troubleshooting view for "is extraction
+        # actually pulling out the right numbers" — cross-check a value
+        # here against its source_url rather than trusting the chart.
+        metric_units = {m["key"]: m.get("unit", "") for m in config.trend_metrics}
+        metric_units.update({m["key"]: m.get("unit", "") for m in config.company_metrics})
+
+        rows = []
+        for d in load_devices(config.devices_path, config.legacy_devices_yaml_path):
+            for key, value in d.metrics.items():
+                if not isinstance(value, (int, float)):
+                    continue  # categorical (e.g. fda_status/device_type) — not a number to audit here
+                rows.append({
+                    "subject_type": "device",
+                    "subject": d.name,
+                    "org": d.org,
+                    "metric": key,
+                    "value": value,
+                    "unit": metric_units.get(key, ""),
+                    "date": d.date_reported,
+                    "source_url": d.source_url,
+                    "auto_extracted": d.auto_extracted,
+                })
+        company_numeric_keys = {
+            "funding_total_usd": ("USD", "last_funding_date"),
+            "stock_price": ("", "stock_price_updated_at"),
+        }
+        for c in load_companies(config.companies_path, config.legacy_companies_yaml_path):
+            for key, (unit, date_field) in company_numeric_keys.items():
+                value = getattr(c, key)
+                if value is None:
+                    continue
+                rows.append({
+                    "subject_type": "company",
+                    "subject": c.name,
+                    "org": c.name,
+                    "metric": key,
+                    "value": value,
+                    "unit": unit,
+                    "date": getattr(c, date_field, "") or "",
+                    "source_url": c.source_url,
+                    "auto_extracted": c.auto_extracted,
+                })
+        rows.sort(key=lambda r: r["date"] or "", reverse=True)
+        return jsonify(rows)
+
     @app.get("/reports/<path:filename>")
     def report_assets(filename):
         # Serves matplotlib PNGs etc. referenced by older report renders,
@@ -467,8 +667,16 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         # while (LLM calls, network) — so this returns immediately and the
         # dashboard polls /api/status for progress_label/current/total and
         # running_now instead of blocking on the request.
+        #
+        # clear_cancel() happens HERE, atomically with running_now flipping
+        # to True — not just inside _run_fetch, which runs moments later on
+        # the background thread. Without this, a Cancel click landing in
+        # that gap (running_now already true and polled, _run_fetch hasn't
+        # reached its own clear_cancel() yet) would get silently wiped the
+        # instant the thread catches up, instead of actually cancelling.
         with status._lock:
             status.running_now = True
+        status.clear_cancel()
         status.set_progress("Starting run...")
 
         def _work():
@@ -481,6 +689,22 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
 
         threading.Thread(target=_work, daemon=True).start()
         return jsonify({"ok": True, "message": "Started."})
+
+    @app.post("/api/cancel-run")
+    def api_cancel_run():
+        # One cancel button for whatever's actually running — fetch,
+        # backfill, enrich, or report generation, since they all share
+        # this one SchedulerStatus (only one of them can be running_now
+        # at a time anyway) and each checks the same cancel_event at its
+        # own safe points (see cancel.py). Cooperative, not instant: the
+        # running operation stops at its next checkpoint (between
+        # scrapers/pages/items), not mid-request. A no-op (not an error)
+        # if nothing is running — the button just does nothing useful then.
+        status = app.config["BESSELETH_STATUS"]
+        if not status.running_now:
+            return jsonify({"ok": True, "message": "Nothing is running."})
+        status.request_cancel()
+        return jsonify({"ok": True, "message": "Cancelling — stops at the next checkpoint, may take a few seconds."})
 
     @app.post("/api/enrich")
     def api_enrich():
@@ -496,8 +720,14 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         # run_until_done this can take a long while (the whole backlog,
         # not one capped batch), so the dashboard polls /api/status rather
         # than the request blocking until it's actually done.
+        #
+        # clear_cancel() atomically with running_now, here in the route —
+        # not just inside enrich_items_detailed moments later on the
+        # background thread — closes the same race /api/run-now's fix
+        # closes (see its comment).
         with status._lock:
             status.running_now = True
+        status.clear_cancel()
         status.set_progress("Starting enrichment...")
 
         def _work():
@@ -506,12 +736,12 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
                 try:
                     result = enrich_items_detailed(
                         config, db, force=force, run_until_done=run_until_done,
-                        progress_cb=status.set_progress,
+                        progress_cb=status.set_progress, cancel_event=status.cancel_event,
                     )
                 finally:
                     db.close()
                 with status._lock:
-                    status.last_error = None
+                    status.last_error = "Enrichment cancelled." if result.get("cancelled") else None
                 status.last_enrich_result = {
                     "ok": True, "enriched": result["processed"], "message": result["message"],
                     "backend": result["backend"], "stats": result.get("stats"),
@@ -520,6 +750,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
                 with status._lock:
                     status.last_error = f"enrich: {e}"
             finally:
+                status.clear_cancel()
                 status.set_progress(None)
                 with status._lock:
                     status.running_now = False
@@ -556,14 +787,11 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
         # — so "why is everything null/unknown" is answerable by looking
         # at this tab instead of reading server logs or config.yaml by
         # hand. Read-only, no run triggered.
-        from ..enrich import ollama_status
+        from ..enrich import llm_status
 
         summarizer_cfg = config.summarizer
-        backend = summarizer_cfg.get("backend", "none")
-        if backend == "ollama":
-            ok, ollama_message = ollama_status(summarizer_cfg)
-        else:
-            ok, ollama_message = False, ""
+        backend = summarizer_cfg.get("backend", "groq")
+        ok, status_message = llm_status(summarizer_cfg)
 
         db = DB(config.db_path)
         try:
@@ -574,10 +802,10 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
 
         return jsonify({
             "backend": backend,
-            "model": summarizer_cfg.get("model", "llama3.1"),
+            "model": summarizer_cfg.get("groq_model", "llama-3.3-70b-versatile") if backend == "groq" else summarizer_cfg.get("model", "llama3.1"),
             "ollama_url": summarizer_cfg.get("ollama_url", "http://localhost:11434"),
             "ollama_ok": ok,
-            "ollama_message": ollama_message,
+            "ollama_message": status_message,
             "stats": stats,
             "items": [
                 {
@@ -612,22 +840,27 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
 
         with status._lock:
             status.running_now = True
+        status.clear_cancel()  # atomic with running_now — see /api/run-now's comment on this
         status.set_progress("Starting backfill...")
 
         def _work():
             try:
                 db = DB(config.db_path)
                 try:
-                    results = fetch_all(config, db, since=since, progress_cb=status.set_progress)
+                    results = fetch_all(config, db, since=since, progress_cb=status.set_progress, cancel_event=status.cancel_event)
                 finally:
                     db.close()
                 with status._lock:
                     status.last_error = None
                 status.last_fetch_counts = {k: len(v) for k, v in results.items()}
+            except FetchCancelled:
+                with status._lock:
+                    status.last_error = "Backfill cancelled."
             except Exception as e:
                 with status._lock:
                     status.last_error = f"backfill: {e}"
             finally:
+                status.clear_cancel()
                 status.set_progress(None)
                 with status._lock:
                     status.running_now = False
@@ -860,6 +1093,85 @@ def create_app(config: Config, status: SchedulerStatus | None = None) -> Flask:
             abort(404)
         return jsonify({"ok": True, "deleted": item_id})
 
+    @app.post("/api/papers/upload")
+    def api_upload_paper():
+        # Upload-a-research-PDF: extracted and stored as a normal papers
+        # item (see paper_upload.py) plus an immediate "how this fits in
+        # with current research" write-up — not worth waiting on the next
+        # scheduled enrich pass for.
+        uploaded = request.files.get("file")
+        if not uploaded or not uploaded.filename:
+            return jsonify({"ok": False, "message": "No file uploaded."}), 400
+        if not uploaded.filename.lower().endswith(".pdf"):
+            return jsonify({"ok": False, "message": "Only PDF files are supported."}), 400
+        import tempfile
+
+        from ..paper_upload import ingest_pdf_upload
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as tmp:
+            uploaded.save(tmp.name)
+            try:
+                result = ingest_pdf_upload(config, tmp.name, uploaded.filename)
+            except Exception as e:
+                return jsonify({"ok": False, "message": str(e)}), 400
+        return jsonify({"ok": True, **result})
+
+    @app.get("/api/company-events")
+    def api_company_events():
+        db = DB(config.db_path)
+        try:
+            rows = db.company_events(request.args.get("org") or None)
+        finally:
+            db.close()
+        return jsonify(
+            [
+                {
+                    "id": r["id"],
+                    "org": r["org"],
+                    "event_type": r["event_type"],
+                    "event_date": r["event_date"],
+                    "title": r["title"],
+                    "description": r["description"],
+                    "source_url": r["source_url"],
+                    "auto_extracted": bool(r["auto_extracted"]),
+                }
+                for r in rows
+            ]
+        )
+
+    @app.delete("/api/company-events/<int:event_id>")
+    def api_delete_company_event(event_id):
+        db = DB(config.db_path)
+        try:
+            deleted = db.delete_company_event(event_id)
+        finally:
+            db.close()
+        if not deleted:
+            abort(404)
+        return jsonify({"ok": True, "deleted": event_id})
+
+    @app.post("/api/company-events")
+    def api_add_company_event():
+        # Manual add — for an event you know about but nothing scraped
+        # ever reported in a way enrich.py could pick up (a CEO change
+        # announced only on LinkedIn, a merger you read about elsewhere).
+        payload = request.get_json(silent=True) or {}
+        org = (payload.get("org") or "").strip()
+        title = (payload.get("title") or "").strip()
+        event_type = (payload.get("event_type") or "other").strip()
+        if not org or not title:
+            return jsonify({"ok": False, "message": "'org' and 'title' are required."}), 400
+        db = DB(config.db_path)
+        try:
+            event_id = db.add_company_event(
+                org, event_type, payload.get("event_date") or None, title,
+                description=payload.get("description") or "", source_url=payload.get("source_url") or "",
+                auto_extracted=False,
+            )
+        finally:
+            db.close()
+        return jsonify({"ok": True, "id": event_id})
+
     @app.delete("/api/source/<source>")
     def api_clear_source(source):
         # Bulk "delete everything from this source, I'll re-pull what's
@@ -894,7 +1206,7 @@ def main(argv=None):
         config.raw.setdefault("schedule", {})["enabled"] = False
     _scheduler, status = start_scheduler(config)
 
-    app = create_app(config, status)
+    app = create_app(config, status, _scheduler)
     print(f"[web] Serving {config.industry_name} dashboard at http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)
 

@@ -157,16 +157,35 @@ def duckduckgo_search(query: str, max_results: int = 4) -> list[str]:
     return snippets
 
 
+def _squash(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
 def _wikidata_location(org_name: str) -> tuple[str, float, float] | None:
     """Finds `org_name`'s Wikidata entity, then tries — in order — its
     headquarters location (P159), a plain location claim (P276), and
     finally coordinates on the entity itself (P625, for an org that IS
     a place, e.g. many universities). Returns (label, lat, lon), or None
-    if nothing resolved — a clean miss, not an error."""
-    search = _wikidata_get({"action": "wbsearchentities", "search": org_name, "language": "en", "type": "item", "limit": 1})
-    try:
-        qid = search["search"][0]["id"]
-    except (TypeError, KeyError, IndexError):
+    if nothing resolved — a clean miss, not an error.
+
+    wbsearchentities is a fuzzy text search, not an exact lookup — for an
+    org it doesn't actually know, the top "hit" can be some unrelated
+    entity that just shares a token or sounds similar (this is how
+    "Neuralink" once resolved to a French Polynesian atoll: the fuzzy
+    match landed on the wrong entity, and its P276 was blindly trusted).
+    So the candidate's own label/aliases must actually match org_name
+    (ignoring case/punctuation) before any of its location claims are
+    trusted — a clean miss here just falls through to the next tier
+    instead of confidently reporting a wrong location."""
+    search = _wikidata_get({"action": "wbsearchentities", "search": org_name, "language": "en", "type": "item", "limit": 5})
+    qid = None
+    target = _squash(org_name)
+    for candidate in (search or {}).get("search", []):
+        names = [candidate.get("label", "")] + [a for a in candidate.get("aliases", []) or []]
+        if any(_squash(n) == target for n in names if n):
+            qid = candidate.get("id")
+            break
+    if not qid:
         return None
 
     for location_prop in ("P159", "P276"):

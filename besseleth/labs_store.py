@@ -29,7 +29,7 @@ def load_labs(path: str | Path = "labs.yaml") -> list[dict]:
     p = Path(path)
     if not p.exists():
         return []
-    with open(p) as f:
+    with open(p, encoding="utf-8") as f:
         raw = yaml.safe_load(f) or []
     labs = []
     for entry in raw:

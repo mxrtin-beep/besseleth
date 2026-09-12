@@ -145,7 +145,7 @@ def load_manual_boards(path) -> dict[str, dict]:
     p = Path(path)
     if not p.exists():
         return {}
-    with open(p) as f:
+    with open(p, encoding="utf-8") as f:
         raw = yaml.safe_load(f) or []
     return {entry["org"]: {"platform": entry["platform"], "slug": entry["slug"]} for entry in raw if entry.get("org")}
 
