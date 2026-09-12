@@ -197,7 +197,7 @@
     <h3 style="margin-top:2rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Enrichment</h3>
     <div id="enrichLogStatus"></div>
     <p class="hint" id="enrichLogCount"></p>
-    <table class="datatable" id="enrichLogTable"></table>
+    <div id="enrichLogTable"></div>
   </div>
 
   <div id="orgsPane" style="display:none">
@@ -1975,24 +1975,30 @@ async function loadEnrichLog() {
   document.getElementById('enrichLogCount').textContent =
     `Last ${data.items.length} enriched item(s), newest first.`;
 
-  const table = document.getElementById('enrichLogTable');
-  table.className = 'datatable resizable';
-  table.innerHTML = `
-    <thead><tr><th>Enriched</th><th>Title</th><th>Source</th><th>Org</th><th>Org type</th>
-      <th>Modality</th><th>Target</th><th>Novelty</th><th>Location</th></tr></thead>
-    <tbody>${data.items.map(i => `
-      <tr>
-        <td>${fmtAgo(i.enriched_at)}</td>
-        <td>${i.url ? `<a href="${i.url}" target="_blank" rel="noopener">${i.title}</a>` : i.title}</td>
-        <td>${i.source}</td>
-        <td>${i.org || '<span class="hint">null</span>'}</td>
-        <td>${i.org_type || ''}</td>
-        <td>${i.modality || ''}</td>
-        <td>${i.therapeutic_target || ''}</td>
-        <td title="${i.novelty_rationale || ''}">${novelBadge(i.novelty_score)}</td>
-        <td>${i.location_text || ''}</td>
-      </tr>`).join('')}</tbody>`;
-  makeTableResizable(table, 'enrichLogTable', { 1: 300 });
+  document.getElementById('enrichLogTable').innerHTML = data.items.map(renderEnrichLogEntry).join('');
+}
+
+// A plain chronological log — one entry per enriched item, newest first
+// — instead of a wide table: what got extracted reads as a sentence you
+// can scan down the page, not a spreadsheet you have to scroll
+// sideways through. Not a true before/after diff (besseleth doesn't
+// keep prior values around to compare against), just "here's what this
+// item ended up tagged as, and when" — still the useful part for
+// spotting a bad extraction at a glance.
+function renderEnrichLogEntry(i) {
+  const titleHtml = i.url ? `<a href="${i.url}" target="_blank" rel="noopener">${i.title}</a>` : i.title;
+  const facts = [];
+  facts.push(i.org ? `org: <strong>${i.org}</strong>${i.org_type ? ` (${i.org_type})` : ''}` : `org: <span class="hint">none</span>`);
+  if (i.modality) facts.push(`modality: ${i.modality}`);
+  if (i.therapeutic_target) facts.push(`target: ${i.therapeutic_target}`);
+  if (i.novelty_score != null) facts.push(`novelty: ${i.novelty_score}/5${i.novelty_rationale ? ` — ${i.novelty_rationale}` : ''}`);
+  if (i.location_text) facts.push(`location: ${i.location_text}`);
+  return `
+    <div style="padding:.6rem 0; border-bottom:1px solid #8883;">
+      <div class="hint" style="font-size:.8rem;">${fmtAgo(i.enriched_at)} &nbsp;·&nbsp; ${i.source}</div>
+      <div style="margin:.15rem 0;">${titleHtml}</div>
+      <div style="font-size:.9rem;">${facts.join(' &nbsp;·&nbsp; ')}</div>
+    </div>`;
 }
 
 // --- Trends explorer (devices + companies + FDA/IPO timelines) -----------
