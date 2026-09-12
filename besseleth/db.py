@@ -650,6 +650,23 @@ class DB:
         rows = self.conn.execute("SELECT DISTINCT org FROM items WHERE org IS NOT NULL AND org != ''").fetchall()
         return [r[0] for r in rows]
 
+    def enriched_items_for_org_recheck(self) -> list[sqlite3.Row]:
+        """(id, title, summary, org, org_type, org_description, url,
+        matched_keywords) for every already-enriched item — the input to
+        enrich.py's org-only re-extraction pass (both its free labs.yaml
+        tier and its LLM tier), which re-derives just `org`/`org_type`/
+        `org_description` for an item, leaving everything else already
+        stored (modality, target, novelty, location) untouched. Includes
+        items with no org too, not just ones that have one — a plain
+        "Poon Lab" mention with no institution in that item's own text
+        can currently be sitting at org=NULL just as easily as at a wrong
+        value, and a labs.yaml improvement should catch both."""
+        self.conn.row_factory = sqlite3.Row
+        return list(self.conn.execute(
+            "SELECT id, title, summary, org, org_type, org_description, url, matched_keywords FROM items "
+            "WHERE enriched_at IS NOT NULL"
+        ).fetchall())
+
     def accumulated_knowledge_stats(self, window_days_back: int | None = None) -> dict:
         """A snapshot of everything besseleth has accumulated across all
         runs, ever — not just this week's items. Used to give the report's

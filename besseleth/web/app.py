@@ -893,6 +893,55 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         threading.Thread(target=_work, daemon=True).start()
         return jsonify({"ok": True, "since": since_str, "message": "Started."})
 
+    @app.post("/api/enrich/reextract-orgs")
+    def api_reextract_orgs():
+        # Re-derives just the `org` field for every already-enriched item
+        # (see enrich.reextract_org_names's docstring) — for a widespread
+        # bad org extraction across the backlog, without the cost/risk of
+        # a full force=True re-enrich redoing modality/target/novelty too.
+        # Same async/cancel/progress shape as /api/backfill, since a big
+        # backlog's LLM tier can take a while.
+        status = app.config["BESSELETH_STATUS"]
+        if status.running_now:
+            return jsonify({"ok": False, "message": "Already running."}), 409
+        payload = request.get_json(silent=True) or {}
+        uncapped = bool(payload.get("all"))
+
+        with status._lock:
+            status.running_now = True
+        status.clear_cancel()
+        status.set_progress("Starting org re-check...")
+
+        def _work():
+            try:
+                from ..enrich import reextract_org_names
+
+                db = DB(config.db_path)
+                try:
+                    result = reextract_org_names(
+                        config, db, cancel_event=status.cancel_event, progress_cb=status.set_progress,
+                        max_llm_calls=10**9 if uncapped else None,
+                    )
+                finally:
+                    db.close()
+                with status._lock:
+                    status.last_error = None
+                    status.last_enrich_result = result
+            except FetchCancelled:
+                with status._lock:
+                    status.last_error = "Org re-check cancelled."
+            except Exception as e:
+                with status._lock:
+                    status.last_error = f"reextract-orgs: {e}"
+            finally:
+                status.clear_cancel()
+                status.set_progress(None)
+                with status._lock:
+                    status.running_now = False
+
+        threading.Thread(target=_work, daemon=True).start()
+        return jsonify({"ok": True, "message": "Started."})
+
     @app.post("/api/paste")
     def api_paste():
         payload = request.get_json(silent=True) or {}

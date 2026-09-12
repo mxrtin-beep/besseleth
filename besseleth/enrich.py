@@ -785,6 +785,117 @@ def _canonicalize_existing_orgs(db: DB) -> int:
     return renamed
 
 
+def _reapply_known_lab_matches(config: Config, db: DB) -> int:
+    """Free, no-LLM retroactive sweep: re-runs _match_known_lab() against
+    every already-enriched item's own stored title/summary, and re-points
+    org to whatever it resolves to now if that's different from what's
+    currently stored. Exists because _match_known_lab is deterministic
+    ground truth (labs.yaml), not a guess — so whenever it gets more
+    capable of resolving a lab (a looser matching rule, a labs.yaml entry
+    added/edited after the item was first enriched) every past item that
+    mentioned that lab should benefit immediately, not just future ones.
+    This is also the free first tier of reextract_org_names() below;
+    called on every enrich_items_detailed() run since it's just a regex
+    scan, cheap even over a large backlog. Returns how many items changed."""
+    if not config.labs:
+        return 0
+    changed = 0
+    for row in db.enriched_items_for_org_recheck():
+        known_lab = _match_known_lab(f"{row['title']} {row['summary'] or ''}", config)
+        if known_lab and known_lab != row["org"]:
+            known_lab = _canonicalize_new_org(known_lab, db)
+            if known_lab != row["org"]:
+                db.sync_org(row["id"], known_lab, row["org_type"], row["org_description"])
+                changed += 1
+    return changed
+
+
+def reextract_org_names(
+    config: Config, db: DB, cancel_event=None, progress_cb=None, max_llm_calls: int | None = None
+) -> dict:
+    """Re-derives just the `org` field (org_type/org_description carried
+    over unchanged) for every already-enriched item, leaving modality,
+    therapeutic_target, novelty_score/rationale, and location completely
+    untouched — for fixing a widespread bad org extraction (e.g. a small
+    local model getting a well-known org's identity wrong, or a labs.yaml
+    rule that's since improved) across the whole backlog WITHOUT paying
+    for or risking a drift in every other enriched field the way a full
+    force=True enrich_items_detailed() re-check would.
+
+    Two tiers, cheapest first:
+      1. _reapply_known_lab_matches() — free, deterministic, no LLM call,
+         run first over every item.
+      2. for items that tier didn't touch, a short LLM prompt asking
+         ONLY for the organization name (much cheaper per call than the
+         full multi-field enrichment prompt) — bounded by
+         `max_llm_calls` (defaults to enrichment.max_items_per_run, same
+         cap normal enrichment uses) so a huge backlog doesn't have to
+         go through in one run; call again to keep working through it.
+
+    Returns {"checked": int, "changed": int, "llm_checked": int}."""
+    free_changed = _reapply_known_lab_matches(config, db)
+
+    rows = db.enriched_items_for_org_recheck()
+    cfg = config.raw.get("enrichment", {}) or {}
+    llm_budget = max_llm_calls if max_llm_calls is not None else cfg.get("max_items_per_run", 50)
+    backend_available = config.summarizer.get("backend", "groq") in summarizer_mod.LLM_BACKENDS
+
+    llm_checked = 0
+    llm_changed = 0
+    for i, row in enumerate(rows):
+        if llm_budget <= 0 or not backend_available:
+            break
+        check_cancelled(cancel_event)
+        if progress_cb and i % 10 == 0:
+            progress_cb(f"Re-checking org for item {i + 1}/{len(rows)}...", i, len(rows))
+        # Already fixed for free above, or would be re-derived to the
+        # exact same known_lab again — skip straight to the ones only an
+        # LLM call could possibly change.
+        if _match_known_lab(f"{row['title']} {row['summary'] or ''}", config):
+            continue
+        llm_budget -= 1
+        llm_checked += 1
+        new_org = _reextract_org_via_llm(row, config, db)
+        if new_org and new_org != row["org"]:
+            new_org = _canonicalize_new_org(new_org, db)
+            if new_org != row["org"]:
+                db.sync_org(row["id"], new_org, row["org_type"], row["org_description"])
+                llm_changed += 1
+
+    return {"checked": len(rows), "changed": free_changed + llm_changed, "llm_checked": llm_checked}
+
+
+def _reextract_org_via_llm(row, config: Config, db: DB) -> str | None:
+    """The LLM tier of reextract_org_names() — a short, org-only prompt
+    (title/summary/real author-affiliation data, same validity checks as
+    the full enrichment prompt's org field) instead of the full multi-
+    field enrichment prompt, since re-deriving org is all this is for.
+    None on any failure (no backend, empty/invalid answer) — the
+    caller's existing stored org is left alone, same as a retry-later in
+    normal enrichment."""
+    author_affiliations = _author_affiliations_block(row)
+    prompt = (
+        f"Item title: {row['title']}\n"
+        f"Item summary: {row['summary'] or '(none)'}\n"
+        + (f"\nReal author affiliation data (from OpenAlex — factual, not a guess):\n{author_affiliations}\n" if author_affiliations else "")
+        + '\nWhat SPECIFIC organization, company, lab, or institution is this item actually ABOUT (never who '
+        'merely reported/published it)? Prefer the most specific named entity — a PI-named lab or a specific '
+        'company/institute, never a bare university/generic group description ("Chinese scientists", "the '
+        'researchers"). Respond with ONLY the name, or exactly "unknown" if none is clearly named — never guess.'
+    )
+    result = summarizer_mod._llm_generate(
+        prompt, config.summarizer, timeout=30, num_thread=config.summarizer.get("num_thread")
+    )
+    if not result:
+        return None
+    org = _clean_org_value(result.strip().strip('"'))
+    if not org or not _looks_like_a_named_org(org, config):
+        return None
+    if _squash(org) == _squash(_hostname(row["url"] or "").split(".")[0]):
+        return None
+    return org
+
+
 _ARXIV_ID_RE = re.compile(r"arxiv\.org/abs/([\w.\-/]+?)(?:v\d+)?/?$", re.IGNORECASE)
 
 
@@ -1482,6 +1593,10 @@ def enrich_items_detailed(
     renamed = _canonicalize_existing_orgs(db)
     if renamed:
         print(f"[enrich] Merged {renamed} item(s) into an existing org's canonical spelling (casing/spacing variants).")
+
+    relabbed = _reapply_known_lab_matches(config, db)
+    if relabbed:
+        print(f"[enrich] Re-matched {relabbed} item(s) to a labs.yaml lab (an improved rule, or labs.yaml since edited).")
 
     # A device row that's just the org's own name (an older bug — see
     # _enrich_one's device_name gate) never belonged on the FDA timeline.
