@@ -496,34 +496,6 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         update_summarizer_settings(config, **fields)
         return jsonify({"ok": True})
 
-    @app.post("/api/papers/refresh-citations")
-    def api_refresh_citations():
-        # One-time-or-whenever action (Settings tab) — citation_count is
-        # only ever set once at scrape time (see
-        # db.papers_refreshable_for_citations's docstring), so this is
-        # the only way an already-stored paper's count ever gets updated.
-        # Batched (50 identifiers/request), so this is fast even for a
-        # large backlog — safe to run synchronously.
-        from ..scrapers.openalex_scraper import refresh_citation_counts
-
-        db = DB(config.db_path)
-        try:
-            result = refresh_citation_counts(db, mailto=config.source("papers").get("mailto"))
-            # "checked" only ever covers rows besseleth can actually
-            # match back to OpenAlex (a stored openalex_id, or — for
-            # older rows — a DOI-shaped url); this surfaces how much of
-            # the total papers table that is, so "checked: 12" against
-            # "312 total" reads as "most of your backlog predates the
-            # openalex_id column and can't be refreshed this way — only
-            # re-fetching gets those a real count" instead of looking
-            # like the action barely did anything for no clear reason.
-            total_papers = db.count_items(["papers"])
-        finally:
-            db.close()
-        result["total_papers"] = total_papers
-        result["not_refreshable"] = total_papers - result["checked"]
-        return jsonify({"ok": True, **result})
-
     @app.post("/api/companies/refresh-stock")
     def api_refresh_stock():
         from ..trends.company_store import refresh_stock_prices
@@ -1199,18 +1171,6 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         finally:
             db.close()
         return jsonify({"ok": True, "id": event_id})
-
-    @app.get("/api/stock-history")
-    def api_stock_history():
-        orgs = [o for o in (request.args.get("orgs") or "").split(",") if o.strip()]
-        db = DB(config.db_path)
-        try:
-            if not orgs:
-                orgs = [c["name"] for c in db.companies() if c["stock_ticker"]]
-            history = db.stock_history_for_orgs(orgs)
-        finally:
-            db.close()
-        return jsonify(history)
 
     @app.delete("/api/source/<source>")
     def api_clear_source(source):

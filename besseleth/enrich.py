@@ -515,9 +515,17 @@ def _match_known_lab(text: str, config: Config) -> str | None:
     never subject to however the LLM's phrasing or normalization happens
     to shake out. Requiring the university too (when given) is what
     keeps a common surname from matching every item that happens to
-    share it — "Chen" alone proves nothing, "Chen" + "USC" is specific.
-    None if nothing in labs.yaml matches (falls through to the LLM's own
+    share it — "Chen" alone proves nothing, "Chen" + "USC" is specific —
+    but only when labs.yaml itself has more than one PI with that
+    surname: a surname that's unique across labs.yaml is already
+    unambiguous ground truth on its own (e.g. a plain "Poon Lab" mention
+    with no "Stanford" anywhere in that item's own text otherwise fell
+    through to the LLM, which has no way to know which of the many real-
+    world Poon labs is meant, and correctly gave up with "Undetermined"
+    instead of guessing — this is what actually resolves it). None if
+    nothing in labs.yaml matches (falls through to the LLM's own
     extraction, exactly as before labs.yaml existed)."""
+    surnames = [lab["pi"].split()[-1] for lab in config.labs if lab.get("pi")]
     for lab in config.labs:
         pi = lab["pi"]
         if not pi:
@@ -526,7 +534,8 @@ def _match_known_lab(text: str, config: Config) -> str | None:
         if not re.search(rf"\b{re.escape(surname)}\b", text, re.IGNORECASE):
             continue
         university = lab["university"]
-        if university and not re.search(rf"\b{re.escape(university)}\b", text, re.IGNORECASE):
+        ambiguous_surname = surnames.count(surname) > 1
+        if university and ambiguous_surname and not re.search(rf"\b{re.escape(university)}\b", text, re.IGNORECASE):
             continue
         return _normalize_lab_name(f"{pi} Lab at {university}" if university else f"{pi} Lab")
     return None

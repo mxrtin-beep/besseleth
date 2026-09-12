@@ -10,7 +10,6 @@ Usage:
     python -m besseleth.cli social-add     [--url URL] [--text "..."]  # force-tag as social
     python -m besseleth.cli device-suggest --item-id <id>  # draft a devices.yaml entry from a scraped item
     python -m besseleth.cli company-refresh-stock          # update stock_price for companies.yaml's tickers (free)
-    python -m besseleth.cli refresh-citations               # re-fetch citation_count for every stored paper with a DOI (free)
     python -m besseleth.cli standardize-locations            # reformat every stored location to "City[, State], Country" (free)
     python -m besseleth.cli report-delete <report-id>       # e.g. report-delete 2026-09-01
     python -m besseleth.cli item-delete --item-id <id>       # remove a pasted (or any) item outright
@@ -70,7 +69,6 @@ COMMANDS = [
     "social-add",
     "device-suggest",
     "company-refresh-stock",
-    "refresh-citations",
     "standardize-locations",
     "report-delete",
     "item-delete",
@@ -140,29 +138,6 @@ def main(argv=None):
             print("[cli] No companies with a stock_ticker set — add one via the dashboard's Trends tab.")
         for line in log:
             print(f"[cli] {line}")
-        return
-
-    if args.command == "refresh-citations":
-        from .scrapers.openalex_scraper import refresh_citation_counts
-
-        db = DB(config.db_path)
-        try:
-            result = refresh_citation_counts(db, mailto=config.source("papers").get("mailto"))
-            total_papers = db.count_items(["papers"])
-        finally:
-            db.close()
-        not_refreshable = total_papers - result["checked"]
-        print(
-            f"[cli] Checked {result['checked']}/{total_papers} paper(s): {result['updated']} updated, "
-            f"{result['unchanged']} unchanged, {result['not_found']} not found on OpenAlex."
-        )
-        if not_refreshable:
-            print(
-                f"[cli] {not_refreshable} paper(s) have no stored OpenAlex id or DOI (scraped before this feature "
-                f"existed, or not from OpenAlex/arXiv at all) — those can only get a real count from a re-fetch."
-            )
-        for err in result["errors"]:
-            print(f"[cli]   error: {err}")
         return
 
     if args.command == "standardize-locations":

@@ -24,7 +24,7 @@ _{{ date_range }}_
 {{ personalized_lines }}
 
 {% endif %}
-## 📚 Papers (arXiv + published, ranked by citations)
+## 📚 Papers (arXiv + published, newest first)
 {{ paper_lines }}
 
 ## 📰 News
@@ -77,22 +77,15 @@ def _paper_lines(items: list[Item]) -> str:
     published papers alike (see pipeline.py: both scrapers feed the same
     "papers" source now, since to a reader they're the same thing:
     research papers, just via two complementary feeds with different
-    tradeoffs — arXiv is same-day fresh but never has a citation count;
-    OpenAlex has real citation counts but indexes with a lag). Already
-    sorted by citation_count (highest first) by the caller. Shows the
-    count and authors directly rather than running these through an LLM
-    summary: a citation count and author list are already-final facts,
-    not something to paraphrase, and an abstract is the paper's own text
-    (nothing left to extract beyond what the link+citation count already
-    convey at a glance). An arXiv item's citation_count/authors are
-    usually None/empty — shown as "citations unknown" rather than 0, so
-    it doesn't read as "confirmed no citations" for a paper OpenAlex just
-    doesn't index."""
+    tradeoffs). Already sorted newest-first by the caller. Shows the
+    author list directly rather than running it through an LLM summary:
+    an author list is an already-final fact, not something to
+    paraphrase, and an abstract is the paper's own text (nothing left to
+    extract beyond what the link already conveys at a glance)."""
     lines = []
     for i in items:
-        cite = f"{i.citation_count} citation{'s' if i.citation_count != 1 else ''}" if i.citation_count is not None else "citations unknown"
         authors = f" — {i.authors}" if i.authors else ""
-        lines.append(f"- **{i.title}** ({cite}){authors}" + (f" ([link]({i.url}))" if i.url else ""))
+        lines.append(f"- **{i.title}**{authors}" + (f" ([link]({i.url}))" if i.url else ""))
     return "\n".join(lines) or "_None this week._"
 
 
@@ -113,15 +106,14 @@ def _top_findings_lines(all_items: list[Item], min_score: int, max_count: int) -
     stood out, and forcing a middling item into a "most important"
     section just because it's the least-unremarkable thing available
     would be worse than admitting a quiet week. Ties broken by
-    citation_count then published_at so a stronger paper/more recent item
-    wins among equally-scored ones."""
+    published_at so the more recent item wins among equally-scored ones."""
     candidates = [i for i in all_items if (i.novelty_score or 0) >= min_score]
     if not candidates:
         return (
             f"_Nothing this week scored {min_score}+ on novelty (out of 5) — a quiet week for genuinely surprising "
             "findings, not a gap in coverage. See the full sections below for everything that came in._"
         )
-    candidates.sort(key=lambda i: (i.novelty_score or 0, i.citation_count or 0, i.published_at or ""), reverse=True)
+    candidates.sort(key=lambda i: (i.novelty_score or 0, i.published_at or ""), reverse=True)
     lines = []
     for i in candidates[:max_count]:
         label = _SOURCE_LABELS.get(i.source, i.source)

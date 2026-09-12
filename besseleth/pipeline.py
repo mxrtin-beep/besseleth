@@ -306,18 +306,10 @@ def generate_weekly_report(config: Config, db: DB, progress_cb=None, cancel_even
     report_cfg = config.report
     max_n = report_cfg.get("max_items_per_section", 12)
 
-    # Ranked by citation_count (highest first), not recency — a paper
-    # with real citations is more worth surfacing than an uncited one.
-    # Ties (including all-None, since an arXiv preprint never has a
-    # citation count — OpenAlex only indexes published papers) keep
-    # published_at order via the stable sort, so within "0/unknown
-    # citations" the newest still comes first. Caveat worth knowing: a
-    # brand-new arXiv preprint always starts at 0/unknown citations, so
-    # a week with lots of well-cited published papers can crowd fresh
-    # preprints out of the top max_n entirely — say if you want a
-    # blended ranking (guaranteed room for the newest few regardless of
-    # citations) instead of pure citation ranking.
-    papers_items = sorted(items_by_source["papers"], key=lambda i: i.citation_count or 0, reverse=True)[:max_n]
+    # Ranked by recency (newest first) — citation counts were dropped as
+    # a ranking signal (see report.py) since OpenAlex/arXiv coverage of
+    # them was unreliable enough to not be worth surfacing at all.
+    papers_items = sorted(items_by_source["papers"], key=lambda i: i.published_at or "", reverse=True)[:max_n]
 
     report_id, markdown = report_mod.build_report(
         industry_name=config.industry_name,
