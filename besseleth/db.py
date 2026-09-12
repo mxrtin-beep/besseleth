@@ -209,6 +209,27 @@ CREATE TABLE IF NOT EXISTS stock_price_history (
     close REAL NOT NULL,
     PRIMARY KEY (org, date)
 );
+
+-- A real change log, not a snapshot: one row per actual field mutation
+-- (a value going from nothing/old to something new), across whatever
+-- wrote it — a plain fetch's own enrichment, "Re-check org names", "Re-
+-- resolve paper orgs", a duplicate-org sync, location standardization.
+-- This is what the Log tab's "what changed and when" view reads —
+-- unlike db.recently_enriched() (a snapshot of each item's CURRENT
+-- values), this only ever grows by an actual mutation, so it reads as a
+-- log of events, not a re-rendering of present state.
+CREATE TABLE IF NOT EXISTS change_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    item_id TEXT,
+    item_title TEXT,
+    source TEXT,
+    field TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT,
+    reason TEXT NOT NULL          -- e.g. "enrichment", "paper org resolution", "org re-check", "location standardize"
+);
+CREATE INDEX IF NOT EXISTS idx_change_log_at ON change_log(at DESC);
 """
 
 # Columns added after the initial release to `devices`/`companies` —
@@ -586,6 +607,31 @@ class DB:
         )
         self.conn.commit()
 
+    def log_change(
+        self, item_id: Optional[str], item_title: Optional[str], source: Optional[str],
+        field: str, old_value, new_value, reason: str,
+    ) -> None:
+        """Appends one row to change_log — see its schema comment. Call
+        sites decide FOR THEMSELVES whether old_value != new_value is
+        worth logging (this never compares or dedupes); a plain string
+        conversion is applied to both so a caller can pass a raw int/
+        None straight through."""
+        self.conn.execute(
+            "INSERT INTO change_log (at, item_id, item_title, source, field, old_value, new_value, reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                datetime.now(timezone.utc).isoformat(), item_id, item_title, source, field,
+                None if old_value is None else str(old_value),
+                None if new_value is None else str(new_value),
+                reason,
+            ),
+        )
+        self.conn.commit()
+
+    def recent_changes(self, limit: int = 100) -> list[sqlite3.Row]:
+        self.conn.row_factory = sqlite3.Row
+        return list(self.conn.execute("SELECT * FROM change_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall())
+
     def sync_org(self, item_id: str, org: Optional[str], org_type: Optional[str], org_description: Optional[str]) -> None:
         self.conn.execute(
             "UPDATE items SET org = ?, org_type = ?, org_description = ? WHERE id = ?",
@@ -694,7 +740,7 @@ class DB:
         # would be a step backward for them, not a fix.
         self.conn.row_factory = sqlite3.Row
         return list(self.conn.execute(
-            "SELECT id, title, summary, org, org_type, org_description, url, matched_keywords FROM items "
+            "SELECT id, title, summary, source, org, org_type, org_description, url, matched_keywords FROM items "
             "WHERE enriched_at IS NOT NULL AND source != 'papers' "
             "ORDER BY org_rechecked_at IS NOT NULL, org_rechecked_at ASC"
         ).fetchall())

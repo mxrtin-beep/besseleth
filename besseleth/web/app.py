@@ -820,7 +820,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
         db = DB(config.db_path)
         try:
-            rows = db.recently_enriched(limit=50)
+            changes = db.recent_changes(limit=100)
             stats = db.get_enrich_stats()
         finally:
             db.close()
@@ -832,22 +832,17 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
             "ollama_ok": ok,
             "ollama_message": status_message,
             "stats": stats,
-            "items": [
+            "changes": [
                 {
-                    "id": r["id"],
-                    "title": r["title"],
-                    "source": r["source"],
-                    "url": r["url"],
-                    "enriched_at": r["enriched_at"],
-                    "org": r["org"],
-                    "org_type": r["org_type"],
-                    "modality": r["modality"],
-                    "therapeutic_target": r["therapeutic_target"],
-                    "novelty_score": r["novelty_score"],
-                    "novelty_rationale": r["novelty_rationale"],
-                    "location_text": r["location_text"],
+                    "at": c["at"],
+                    "item_title": c["item_title"],
+                    "source": c["source"],
+                    "field": c["field"],
+                    "old_value": c["old_value"],
+                    "new_value": c["new_value"],
+                    "reason": c["reason"],
                 }
-                for r in rows
+                for c in changes
             ],
         })
 

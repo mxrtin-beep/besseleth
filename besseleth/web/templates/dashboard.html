@@ -1973,31 +1973,29 @@ async function loadEnrichLog() {
   statusEl.innerHTML = statusHtml;
 
   document.getElementById('enrichLogCount').textContent =
-    `Last ${data.items.length} enriched item(s), newest first.`;
+    `Last ${data.changes.length} change(s), newest first.`;
 
-  document.getElementById('enrichLogTable').innerHTML = data.items.map(renderEnrichLogEntry).join('');
+  document.getElementById('enrichLogTable').innerHTML = data.changes.map(renderChangeLogLine).join('')
+    || '<p class="hint">No changes recorded yet — this fills in as fetches/enrichment/re-checks actually change something.</p>';
 }
 
-// A plain chronological log — one entry per enriched item, newest first
-// — instead of a wide table: what got extracted reads as a sentence you
-// can scan down the page, not a spreadsheet you have to scroll
-// sideways through. Not a true before/after diff (besseleth doesn't
-// keep prior values around to compare against), just "here's what this
-// item ended up tagged as, and when" — still the useful part for
-// spotting a bad extraction at a glance.
-function renderEnrichLogEntry(i) {
-  const titleHtml = i.url ? `<a href="${i.url}" target="_blank" rel="noopener">${i.title}</a>` : i.title;
-  const facts = [];
-  facts.push(i.org ? `org: <strong>${i.org}</strong>${i.org_type ? ` (${i.org_type})` : ''}` : `org: <span class="hint">none</span>`);
-  if (i.modality) facts.push(`modality: ${i.modality}`);
-  if (i.therapeutic_target) facts.push(`target: ${i.therapeutic_target}`);
-  if (i.novelty_score != null) facts.push(`novelty: ${i.novelty_score}/5${i.novelty_rationale ? ` — ${i.novelty_rationale}` : ''}`);
-  if (i.location_text) facts.push(`location: ${i.location_text}`);
+// A real change log — one short line per actual mutation (see
+// db.log_change/change_log), not a snapshot of current state: "changed
+// org on this paper from X to Y (paper org resolution)", "set modality
+// to EEG on this news item (enrichment)". Every write site that changes
+// org/modality/target/novelty/location logs here, so this reads as a
+// timeline of what the program actually did, in order.
+function renderChangeLogLine(c) {
+  const verb = c.old_value == null ? 'Set' : 'Changed';
+  const valueText = c.old_value == null
+    ? `<strong>${c.new_value}</strong>`
+    : `from <s class="hint">${c.old_value}</s> to <strong>${c.new_value}</strong>`;
+  const title = c.item_title ? ` on "${c.item_title}"` : '';
   return `
-    <div style="padding:.6rem 0; border-bottom:1px solid #8883;">
-      <div class="hint" style="font-size:.8rem;">${fmtAgo(i.enriched_at)} &nbsp;·&nbsp; ${i.source}</div>
-      <div style="margin:.15rem 0;">${titleHtml}</div>
-      <div style="font-size:.9rem;">${facts.join(' &nbsp;·&nbsp; ')}</div>
+    <div style="padding:.3rem 0; border-bottom:1px solid #8883; font-size:.9rem;">
+      <span class="hint">${fmtAgo(c.at)}</span> &nbsp;
+      ${verb} <strong>${c.field}</strong>${title} ${valueText}
+      <span class="hint">(${c.source || '?'} · ${c.reason})</span>
     </div>`;
 }
 

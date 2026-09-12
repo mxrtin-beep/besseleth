@@ -805,6 +805,7 @@ def _reapply_known_lab_matches(config: Config, db: DB) -> int:
         if known_lab and known_lab != row["org"]:
             known_lab = _canonicalize_new_org(known_lab, db)
             if known_lab != row["org"]:
+                db.log_change(row["id"], row["title"], row["source"], "org", row["org"], known_lab, "labs.yaml re-match")
                 db.sync_org(row["id"], known_lab, row["org_type"], row["org_description"])
                 changed += 1
     return changed
@@ -865,6 +866,7 @@ def reextract_org_names(
         if new_org and new_org != row["org"]:
             new_org = _canonicalize_new_org(new_org, db)
             if new_org != row["org"]:
+                db.log_change(row["id"], row["title"], row["source"], "org", row["org"], new_org, "org re-check (news/blog)")
                 db.sync_org(row["id"], new_org, row["org_type"], row["org_description"])
                 llm_changed += 1
         db.mark_org_rechecked(row["id"])  # spent a call either way — never re-picked ahead of an unchecked item again
@@ -964,6 +966,7 @@ def reextract_paper_orgs(
 
         new_org, new_org_type = paper_org.resolve_paper_org_with_fallback(row["title"], authors_institutions, config)
         if new_org and (new_org, new_org_type) != (row["org"], row["org_type"]):
+            db.log_change(row["id"], row["title"], "papers", "org", row["org"], new_org, "paper org resolution (re-check)")
             db.sync_org(row["id"], new_org, new_org_type, row["org_description"])
             changed += 1
         db.mark_org_rechecked(row["id"])
@@ -1105,14 +1108,35 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
             # formatting nicety.
             location_text = reverse_geocode(lat, lon) or location_text
 
+    therapeutic_target = data.get("therapeutic_target") or "unknown"
+    novelty_rationale = data.get("novelty_rationale") or None
+    # Log each field that actually changed — never for papers' org/
+    # org_type (resolved at fetch time, already logged there; see
+    # pipeline._dedupe_and_store) since those are just being carried
+    # over unchanged here, not a real mutation.
+    reason = "enrichment"
+    if row["source"] != "papers":
+        if org != row["org"]:
+            db.log_change(row["id"], row["title"], row["source"], "org", row["org"], org, reason)
+        if org_type != (row["org_type"] or "unknown"):
+            db.log_change(row["id"], row["title"], row["source"], "org_type", row["org_type"], org_type, reason)
+    if modality != (row["modality"] or None):
+        db.log_change(row["id"], row["title"], row["source"], "modality", row["modality"], modality, reason)
+    if therapeutic_target != (row["therapeutic_target"] or None):
+        db.log_change(row["id"], row["title"], row["source"], "therapeutic_target", row["therapeutic_target"], therapeutic_target, reason)
+    if novelty != row["novelty_score"]:
+        db.log_change(row["id"], row["title"], row["source"], "novelty_score", row["novelty_score"], novelty, reason)
+    if location_text != (row["location_text"] or None):
+        db.log_change(row["id"], row["title"], row["source"], "location", row["location_text"], location_text, reason)
+
     db.save_enrichment(
         row["id"],
         org=org,
         org_type=org_type,
         modality=modality,
-        therapeutic_target=data.get("therapeutic_target") or "unknown",
+        therapeutic_target=therapeutic_target,
         novelty_score=novelty,
-        novelty_rationale=data.get("novelty_rationale") or None,
+        novelty_rationale=novelty_rationale,
         location_text=location_text,
         lat=lat,
         lon=lon,
