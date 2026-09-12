@@ -248,6 +248,16 @@ ENRICHMENT_COLUMNS = {
                                         # coverage of it was unreliable enough that it isn't used for ranking or display
     "openalex_id": "TEXT",             # OpenAlex's own work id (e.g. "https://openalex.org/W123...") — NULL for
                                         # arXiv items and for anything scraped before this column existed
+    # Set on every item enrich.reextract_org_names()'s LLM tier actually
+    # spends a call on (whether or not it changed anything) — without
+    # this there's no way to tell "already tried, genuinely fine" from
+    # "never got to it yet", so a capped run (enrichment.max_items_per_run)
+    # kept re-picking the same handful of items (SQLite's default row
+    # order) every time it was clicked, forever reporting "0 changed" for
+    # items that already happened to be correct while the real backlog
+    # past them was never reached. NULL sorts first, so ordering by this
+    # ascending always sends never-yet-checked items to the front.
+    "org_rechecked_at": "TEXT",
 }
 
 
@@ -664,8 +674,17 @@ class DB:
         self.conn.row_factory = sqlite3.Row
         return list(self.conn.execute(
             "SELECT id, title, summary, org, org_type, org_description, url, matched_keywords FROM items "
-            "WHERE enriched_at IS NOT NULL"
+            "WHERE enriched_at IS NOT NULL ORDER BY org_rechecked_at IS NOT NULL, org_rechecked_at ASC"
         ).fetchall())
+
+    def mark_org_rechecked(self, item_id: str) -> None:
+        """Records that reextract_org_names()'s LLM tier spent a call on
+        this item (see org_rechecked_at's schema comment) — called
+        whether or not the call actually changed anything, so a bounded
+        run keeps advancing through the backlog instead of re-picking
+        the same not-yet-marked items every time."""
+        self.conn.execute("UPDATE items SET org_rechecked_at = ? WHERE id = ?", (datetime.now(timezone.utc).isoformat(), item_id))
+        self.conn.commit()
 
     def accumulated_knowledge_stats(self, window_days_back: int | None = None) -> dict:
         """A snapshot of everything besseleth has accumulated across all

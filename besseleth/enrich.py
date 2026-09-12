@@ -830,7 +830,13 @@ def reextract_org_names(
          full multi-field enrichment prompt) — bounded by
          `max_llm_calls` (defaults to enrichment.max_items_per_run, same
          cap normal enrichment uses) so a huge backlog doesn't have to
-         go through in one run; call again to keep working through it.
+         go through in one run — items are ordered never-LLM-checked
+         first (db.enriched_items_for_org_recheck's ORDER BY, tracked via
+         org_rechecked_at), so calling this again always advances into
+         fresh items instead of re-picking the same capped-off handful
+         forever (which, before org_rechecked_at existed, could report
+         "0 changed" indefinitely if those happened to already be
+         correct while the real problem items were never reached).
 
     Returns {"checked": int, "changed": int, "llm_checked": int}."""
     free_changed = _reapply_known_lab_matches(config, db)
@@ -861,6 +867,7 @@ def reextract_org_names(
             if new_org != row["org"]:
                 db.sync_org(row["id"], new_org, row["org_type"], row["org_description"])
                 llm_changed += 1
+        db.mark_org_rechecked(row["id"])  # spent a call either way — never re-picked ahead of an unchecked item again
 
     return {"checked": len(rows), "changed": free_changed + llm_changed, "llm_checked": llm_checked}
 
