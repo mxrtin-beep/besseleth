@@ -159,7 +159,7 @@
     <div class="controls" style="align-items:center;">
       <label for="paperUploadInput" class="btn" style="cursor:pointer;">Upload a paper (PDF)…</label>
       <input type="file" id="paperUploadInput" accept="application/pdf" style="display:none">
-      <span class="hint" id="paperUploadStatus">Adds it to Sources like any other paper, and writes up how it fits in with what's already here.</span>
+      <span class="hint" id="paperUploadStatus"></span>
     </div>
     <div id="paperUploadResult" style="display:none; margin:.6rem 0; padding:.7rem; border:1px solid #3a3a3a; border-radius:6px;">
       <p><strong id="paperUploadTitle"></strong></p>
@@ -275,7 +275,7 @@
       </div>
     </div>
     <div id="chart"></div>
-    <p class="hint" id="trendsHint">Hover a point for its details and source; click it to open the source link. This accumulates over time — every device/company you or device-suggest add stays here across every future report.</p>
+    <p class="hint" id="trendsHint"></p>
     <div id="possibleDupesBox" style="display:none; margin-bottom:1rem; padding:.75rem 1rem; border:1px solid #e0763666; border-radius:8px; background:#e0763611;">
       <strong style="font-size:.9rem;">Possible duplicate companies</strong>
       <p class="hint" style="margin:.3rem 0 .6rem;">Flagged by name similarity only — not merged automatically, since a similar name is just as often two real, different companies. Check both before merging.</p>
@@ -301,14 +301,11 @@
     <div id="pasteResult"></div>
 
     <h3 style="margin-top:2rem; font-size:1rem;">Recently pasted</h3>
-    <p class="hint">Deleting here removes it outright — unlike scraped items, a paste can't be re-fetched, so this
-      is the way to take one back (wrong link, changed your mind, duplicate).</p>
     <table class="datatable" id="pastedTable"></table>
 
     <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Add a feed</h3>
     <p class="hint">Add an RSS/Atom feed URL for besseleth to check on every fetch, alongside the ones already in
-      config.yaml — for a news/trade-press site or a blog it's missing. No code editing required; takes effect on
-      the next fetch, no restart needed.</p>
+      config.yaml.</p>
     <div class="controls" style="align-items:stretch">
       <div><label for="feedCategory">Type</label><select id="feedCategory">
         <option value="news">News</option><option value="blog">Blog</option>
@@ -333,9 +330,7 @@
 
   <div id="contactsPane" style="display:none">
     <h3 style="margin-top:0; font-size:1rem;">Your interests</h3>
-    <p class="hint">Topics you personally care about, independent of any contact — an item mentioning one of these
-      shows up in "For you" the same way a mention of a contact's employer does (matched as a whole phrase,
-      case-insensitive). One per line.</p>
+    <p class="hint">An item mentioning one of these shows up in "For you" the same way a mention of a contact's employer does.</p>
     <div class="controls" style="align-items:stretch">
       <div style="flex:1; min-width:300px">
         <textarea id="interestsText" style="width:100%; box-sizing:border-box; min-height:80px" placeholder="speech decoding&#10;wireless power transfer"></textarea>
@@ -388,8 +383,7 @@
 
   <div id="settingsPane" style="display:none">
     <h3 style="margin-top:0; font-size:1rem;">Industry</h3>
-    <p class="hint">The single most load-bearing setting in besseleth — keywords drive every paper/news/event search.
-      Be specific; broad single words flood the report with noise. Takes effect on the next fetch/enrich, no restart.</p>
+    <p class="hint">Keywords drive every paper/news/event search. Be specific; broad single words flood the report with noise.</p>
     <div class="controls" style="align-items:stretch; flex-wrap:wrap">
       <div><label for="settingsIndustryName">Industry name</label><input type="text" id="settingsIndustryName" style="width:220px;"></div>
       <div style="flex:1; min-width:300px">
@@ -414,9 +408,7 @@
     <p class="hint" id="settingsScheduleResult">Report cron is a standard 5-field cron expression (minute hour day-of-month month day-of-week), e.g. "0 4 * * MON" = 4am every Monday. Leave timezone blank to use this host's local time.</p>
 
     <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Data maintenance</h3>
-    <p class="hint">Citation counts and stock prices are only ever fetched once, when the item/company is first
-      seen — nothing re-checks them automatically after that, so a paper's real citation count (which only ever
-      grows) or a company's stock price can go stale. Free, safe to re-run any time.</p>
+    <p class="hint">Citation counts and stock prices are only ever fetched once, when the item/company is first seen — refresh them here to catch up.</p>
     <div class="controls" style="align-items:center; flex-wrap:wrap">
       <div><button class="btn" id="refreshCitationsBtn">Refresh citation counts</button></div>
       <div><button class="btn" id="refreshStockBtn">Refresh stock prices</button></div>
@@ -425,14 +417,11 @@
     <p class="hint" id="dataMaintenanceResult"></p>
 
     <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Tabs</h3>
-    <p class="hint">Hide the tabs you don't use — this is per-browser (saved locally), so it doesn't affect anyone
-      else viewing this dashboard. "Report" and "Settings" itself always stay visible.</p>
+    <p class="hint">Hide the tabs you don't use. "Report" and "Settings" itself always stay visible.</p>
     <div id="tabVisibilityList" class="controls" style="flex-wrap:wrap"></div>
 
     <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">LLM backend</h3>
-    <p class="hint">Which LLM does enrichment/summarization — extracting orgs, metrics, novelty, writing report
-      sections, comparing an uploaded paper against existing research. This is a server-wide setting (saved to
-      config.yaml), not per-browser.</p>
+    <p class="hint">Which LLM does enrichment/summarization. This is a server-wide setting (saved to config.yaml).</p>
     <div class="controls" style="align-items:flex-end; flex-wrap:wrap">
       <div>
         <label for="settingsBackend">Backend</label>
@@ -2015,8 +2004,8 @@ async function loadTrends() {
 }
 
 const TRENDS_HINTS = {
-  devices: 'Hover a point for its details and source; click it to open the source link. This accumulates over time — every device you or device-suggest add stays here across every future report.',
-  companies: 'Hover a point for its details and source; click it to open the source link. This accumulates over time.',
+  devices: '',
+  companies: '',
   fda_timeline: 'Each line is one org’s devices, ordered by report date, plotted against the FDA stage ladder (see trends/fda_stages.py for what each rung means) — a rising line is regulatory progress; a flat one means no new dated report yet. Hover a point for the device and its exact fda_status text; click to open the source.',
   ipo_timeline: 'One point per company that has gone public, plotted at its IPO date. Hover for the exchange/ticker; click to open the source that reported it.',
   events_timeline: 'Every org milestone besseleth has recorded — funding rounds, IPOs, regulatory approvals, mergers/acquisitions, leadership changes, and notably novel papers — one row per org, one marker per event, colored by type. Hover for the title/description; click to open the source.',
