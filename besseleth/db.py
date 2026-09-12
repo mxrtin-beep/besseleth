@@ -358,6 +358,14 @@ class DB:
         for col, sqltype in COMPANY_COLUMNS.items():
             if col not in existing:
                 self.conn.execute(f"ALTER TABLE companies ADD COLUMN {col} {sqltype}")
+        # change_log itself is new (this session), but so is item_url on
+        # it — added after change_log had already gone out once, so an
+        # existing DB can have the table without that column. CREATE
+        # TABLE IF NOT EXISTS is a no-op on an existing table, hence this
+        # explicit ALTER (same idiom as the three column dicts above).
+        existing = {row[1] for row in self.conn.execute("PRAGMA table_info(change_log)")}
+        if "item_url" not in existing:
+            self.conn.execute("ALTER TABLE change_log ADD COLUMN item_url TEXT")
 
         # arXiv preprints and OpenAlex-indexed published papers used to be
         # two separate sources ("arxiv" vs "papers") — now one, since to a
