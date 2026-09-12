@@ -162,6 +162,10 @@ def authorships_from_work(work: dict) -> list[tuple[str, list[str]]]:
     return out
 
 
+_DDG_COOLDOWN_SECONDS = 300  # 5 min
+_ddg_unreachable_until = 0.0  # monotonic() timestamp; 0 = not currently tripped
+
+
 def duckduckgo_search(query: str, max_results: int = 4) -> list[str]:
     """Free, keyless general web search via DuckDuckGo's no-JS HTML
     results page (meant for browsers without JavaScript, not an
@@ -169,13 +173,33 @@ def duckduckgo_search(query: str, max_results: int = 4) -> list[str]:
     snippets pulled from the result blurbs, or [] on any failure
     (network error, or DuckDuckGo's markup no longer matching what this
     parses — it's a regex over their result__snippet links, not a real
-    HTML parser, to avoid pulling in a new dependency for one scraper)."""
-    global _last_request_at
+    HTML parser, to avoid pulling in a new dependency for one scraper).
+
+    Circuit breaker: a connect/timeout failure (DuckDuckGo genuinely
+    unreachable — a firewall, a blocked network, an outage) means every
+    call for the next _DDG_COOLDOWN_SECONDS returns [] immediately
+    instead of eating another full `timeout` — without this, a large
+    backlog (e.g. "Re-resolve paper orgs" over thousands of papers) on a
+    network that can't reach DuckDuckGo at all would burn its connect
+    timeout on every single item that reaches this fallback tier, which
+    adds up to hours of dead time for a lookup that was never going to
+    succeed. A real HTTP error (4xx/5xx — DuckDuckGo IS reachable, just
+    unhappy with this particular request) does NOT trip the breaker,
+    since that's not evidence the network itself is the problem."""
+    global _last_request_at, _ddg_unreachable_until
+    now = time.monotonic()
+    if _ddg_unreachable_until and now < _ddg_unreachable_until:
+        return []
     _throttle()
     try:
         resp = requests.post(DUCKDUCKGO_HTML_URL, data={"q": query}, headers={"User-Agent": USER_AGENT}, timeout=10)
         _last_request_at = time.monotonic()
         resp.raise_for_status()
+        _ddg_unreachable_until = 0.0  # a success clears any earlier trip
+    except (requests.ConnectionError, requests.Timeout) as e:
+        _ddg_unreachable_until = time.monotonic() + _DDG_COOLDOWN_SECONDS
+        print(f"[web_lookup] DuckDuckGo unreachable ({e}) — skipping it for the next {_DDG_COOLDOWN_SECONDS}s.")
+        return []
     except requests.RequestException as e:
         print(f"[web_lookup] DuckDuckGo search failed: {e}")
         return []
