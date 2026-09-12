@@ -424,8 +424,8 @@ class DB:
             """INSERT INTO items
                (id, source, title, url, summary, published_at, fetched_at,
                 matched_keywords, matched_contact, matched_company, included_in_report,
-                authors, citation_count, openalex_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)""",
+                authors, citation_count, openalex_id, org, org_type)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)""",
             (
                 item.id,
                 item.source,
@@ -440,6 +440,8 @@ class DB:
                 item.authors,
                 item.citation_count,
                 item.openalex_id,
+                item.org,
+                item.org_type,
             ),
         )
         self.conn.commit()
@@ -660,6 +662,21 @@ class DB:
         rows = self.conn.execute("SELECT DISTINCT org FROM items WHERE org IS NOT NULL AND org != ''").fetchall()
         return [r[0] for r in rows]
 
+    def papers_for_org_recheck(self) -> list[sqlite3.Row]:
+        """(id, title, url, authors, openalex_id, org, org_type,
+        org_description) for every papers-source item, regardless of
+        enrichment status — the input to enrich.reextract_paper_orgs(),
+        which re-resolves org via paper_org.py's institution-grounded
+        method for the existing backlog (fetch-time resolution — see
+        paper_org.py — only ever helps items fetched from here on).
+        Ordered never-rechecked-first, same idea and same column
+        (org_rechecked_at) as enriched_items_for_org_recheck()."""
+        self.conn.row_factory = sqlite3.Row
+        return list(self.conn.execute(
+            "SELECT id, title, url, authors, openalex_id, org, org_type, org_description FROM items "
+            "WHERE source = 'papers' ORDER BY org_rechecked_at IS NOT NULL, org_rechecked_at ASC"
+        ).fetchall())
+
     def enriched_items_for_org_recheck(self) -> list[sqlite3.Row]:
         """(id, title, summary, org, org_type, org_description, url,
         matched_keywords) for every already-enriched item — the input to
@@ -671,10 +688,15 @@ class DB:
         "Poon Lab" mention with no institution in that item's own text
         can currently be sitting at org=NULL just as easily as at a wrong
         value, and a labs.yaml improvement should catch both."""
+        # papers excluded: their org is resolved at FETCH time now (see
+        # paper_org.py), grounded in real OpenAlex author-institution
+        # data — this news/blog-oriented LLM-guess-from-summary path
+        # would be a step backward for them, not a fix.
         self.conn.row_factory = sqlite3.Row
         return list(self.conn.execute(
             "SELECT id, title, summary, org, org_type, org_description, url, matched_keywords FROM items "
-            "WHERE enriched_at IS NOT NULL ORDER BY org_rechecked_at IS NOT NULL, org_rechecked_at ASC"
+            "WHERE enriched_at IS NOT NULL AND source != 'papers' "
+            "ORDER BY org_rechecked_at IS NOT NULL, org_rechecked_at ASC"
         ).fetchall())
 
     def mark_org_rechecked(self, item_id: str) -> None:

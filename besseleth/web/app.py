@@ -942,6 +942,55 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         threading.Thread(target=_work, daemon=True).start()
         return jsonify({"ok": True, "message": "Started."})
 
+    @app.post("/api/enrich/reextract-paper-orgs")
+    def api_reextract_paper_orgs():
+        # Papers-only counterpart to /api/enrich/reextract-orgs — re-
+        # resolves org for already-stored papers via real OpenAlex
+        # author-institution data (see enrich.reextract_paper_orgs's
+        # docstring). Fresh fetches resolve this automatically already
+        # (scrapers/openalex_scraper.py, scrapers/arxiv_scraper.py); this
+        # is what fixes the EXISTING backlog. Same async shape as above.
+        status = app.config["BESSELETH_STATUS"]
+        if status.running_now:
+            return jsonify({"ok": False, "message": "Already running."}), 409
+        payload = request.get_json(silent=True) or {}
+        uncapped = bool(payload.get("all"))
+
+        with status._lock:
+            status.running_now = True
+        status.clear_cancel()
+        status.set_progress("Starting paper org re-resolution...")
+
+        def _work():
+            try:
+                from ..enrich import reextract_paper_orgs
+
+                db = DB(config.db_path)
+                try:
+                    result = reextract_paper_orgs(
+                        config, db, cancel_event=status.cancel_event, progress_cb=status.set_progress,
+                        max_llm_calls=10**9 if uncapped else None,
+                    )
+                finally:
+                    db.close()
+                with status._lock:
+                    status.last_error = None
+                    status.last_enrich_result = result
+            except FetchCancelled:
+                with status._lock:
+                    status.last_error = "Paper org re-resolution cancelled."
+            except Exception as e:
+                with status._lock:
+                    status.last_error = f"reextract-paper-orgs: {e}"
+            finally:
+                status.clear_cancel()
+                status.set_progress(None)
+                with status._lock:
+                    status.running_now = False
+
+        threading.Thread(target=_work, daemon=True).start()
+        return jsonify({"ok": True, "message": "Started."})
+
     @app.post("/api/paste")
     def api_paste():
         payload = request.get_json(silent=True) or {}

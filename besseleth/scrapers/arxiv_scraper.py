@@ -5,6 +5,7 @@ https://arxiv.org/help/api
 """
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
@@ -12,11 +13,20 @@ from typing import Iterable
 import feedparser
 import requests
 
+from .. import paper_org, web_lookup
 from ..cancel import check_cancelled
 from ..db import Item
+from .openalex_scraper import _reconstruct_abstract, _work_to_item
 from .util import stable_id, strip_html, text_matches_keywords
 
 ARXIV_API = "http://export.arxiv.org/api/query"
+
+_ARXIV_ID_RE = re.compile(r"arxiv\.org/abs/([\w.\-/]+?)(?:v\d+)?/?$", re.IGNORECASE)
+
+
+def _arxiv_id_from_url(url: str) -> str | None:
+    match = _ARXIV_ID_RE.search(url or "")
+    return match.group(1) if match else None
 
 
 def _search_query(keyword: str, categories: list[str]) -> str:
@@ -111,10 +121,31 @@ def fetch(config, days_back: int, max_results_per_keyword: int, cancel_event=Non
                 title = entry.get("title", "").strip()
                 summary = strip_html(entry.get("summary", ""))
                 hits = text_matches_keywords(f"{title} {summary}", config.keywords)
-                authors = ", ".join(a.get("name", "") for a in entry.get("authors", []) if a.get("name"))
+                author_names = [a.get("name", "") for a in entry.get("authors", []) if a.get("name")]
+                authors = ", ".join(author_names)
 
-                items.append(
-                    Item(
+                # arXiv itself never has author-institution data — check
+                # whether OpenAlex already has this exact preprint indexed
+                # (by its own DOI scheme, "10.48550/arxiv.<id>") before
+                # falling back to a thinner, ungrounded item. When found,
+                # OpenAlex's version is used instead — real affiliations,
+                # often richer metadata — rather than storing a second,
+                # weaker row for the same paper (see this module's and
+                # openalex_scraper.py's docstrings for why).
+                arxiv_id = _arxiv_id_from_url(url)
+                work = web_lookup.lookup_openalex_work_by_doi(f"10.48550/arxiv.{arxiv_id.lower()}") if arxiv_id else None
+                if work:
+                    openalex_id = work.get("id", "")
+                    item = _work_to_item(
+                        work, openalex_id, (work.get("title") or title).strip(),
+                        _reconstruct_abstract(work.get("abstract_inverted_index")) or summary,
+                        work.get("publication_date") or "", hits or [keyword], config=config,
+                    )
+                else:
+                    org, org_type = paper_org.resolve_paper_org_with_fallback(
+                        title, [(name, []) for name in author_names], config
+                    )
+                    item = Item(
                         # Deliberately still "arxiv" here, not "papers" —
                         # this is the dedup key (stable_id), and changing
                         # it would make every already-stored arXiv item
@@ -128,8 +159,10 @@ def fetch(config, days_back: int, max_results_per_keyword: int, cancel_event=Non
                         published_at=(published or datetime.now(timezone.utc)).isoformat(),
                         matched_keywords=hits or [keyword],
                         authors=authors or None,
+                        org=org,
+                        org_type=org_type,
                     )
-                )
+                items.append(item)
                 seen_urls.add(url)
 
             start += len(feed.entries)

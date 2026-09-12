@@ -1,0 +1,150 @@
+"""Resolves the specific lab/company behind a papers-source item — a
+total replacement, for papers only, of the old org-extraction path
+(_match_known_lab/_clean_org_value/_looks_like_a_named_org/
+_canonicalize_new_org in enrich.py), which was producing confidently
+wrong answers (a London sleep-disorder paper labeled "Stanford, Shenoy
+Lab" is what prompted this rewrite) — that path asked the LLM to guess
+org from a short summary alone, with no real grounding. News/blog items
+are UNCHANGED — they still go through enrich.py's own org path.
+
+Runs at FETCH time (see scrapers/openalex_scraper.py and
+scrapers/arxiv_scraper.py), not in the later general enrichment pass —
+because the one thing that actually grounds this reliably (each
+author's real institution, from OpenAlex) only exists in the API
+response at the moment a paper is fetched; by general-enrichment time
+it would already be gone.
+
+Two tiers, in order:
+  1. resolve_paper_org() — an LLM call grounded in real author-
+     institution data (OpenAlex's own affiliation records) when there
+     is any. This is NOT "ask the LLM to recall who wrote this" — the
+     institutions are handed to it as fact; it's only being asked to
+     format/summarize what's already given, occasionally reconciling
+     multiple authors at different institutions into one likely lead
+     lab. Still asked (institution-less) for an arXiv item with no
+     OpenAlex match at all — arXiv itself never has affiliation data,
+     so there's nothing to ground it with in that case.
+  2. resolve_paper_org_via_search() — for a paper where NO author has
+     an institution on record (a fraction of OpenAlex works, and any
+     arXiv-only paper), a real DuckDuckGo web search read by the LLM,
+     same trust model as web_lookup.py's location tier 3: the search
+     SNIPPETS are the grounding, never the model's own memory. Neither
+     tier ever asks the LLM to just recall a fact with nothing to back
+     it — that bare-guess shape is exactly what this module exists to
+     replace.
+
+Either tier returns None, None on any failure or genuine uncertainty —
+an unresolved org is left for a later run to retry, never a guess.
+"""
+from __future__ import annotations
+
+import re
+
+from . import summarizer as summarizer_mod
+from . import web_lookup
+from .config import Config
+
+# Same shape the LLM is asked to answer in: "<University>, <PI/Lab name> Lab".
+# A bare company name (no ", ... Lab" suffix) is the other valid shape —
+# see _parse_response.
+_LAB_SHAPE_RE = re.compile(r"^(?P<university>.+?),\s*(?P<lab>.+?\bLab)\.?$", re.IGNORECASE)
+
+_NON_ANSWERS = {"unknown", "n/a", "none", "null", "unclear", "not specified"}
+
+
+def _format_authors_with_institutions(authors_institutions: list[tuple[str, list[str]]]) -> str:
+    parts = []
+    for name, institutions in authors_institutions:
+        parts.append(f"{name} ({', '.join(institutions)})" if institutions else f"{name} (institution unknown)")
+    return "; ".join(parts) or "(no author information)"
+
+
+def _build_prompt(title: str, context_block: str, config: Config) -> str:
+    return (
+        f'Paper title: "{title}"\n'
+        f"{context_block}\n\n"
+        f"Which specific {config.industry_name} lab or company produced this paper? Answer with ONLY one of "
+        f"these exact shapes, nothing else — no explanation, no extra words:\n"
+        f'- "<University>, <Principal Investigator Last Name> Lab" if a specific PI-led academic lab is clear\n'
+        f'- "<University>, <Lab Name> Lab" if the lab has its own name not tied to one PI\n'
+        f'- "<University>, Undetermined Lab" if it is clearly academic work but no specific lab/PI is clear\n'
+        f'- "<Company Name>" ALONE (no "Lab" suffix, no university) if this is company/industry research\n'
+        f'Never invent a name you are not reasonably confident in from what is actually given above — if you '
+        f'genuinely cannot tell whether this is even academic or industry work, answer exactly "unknown".'
+    )
+
+
+def _parse_response(raw: str) -> tuple[str | None, str | None]:
+    """Returns (org, org_type). org_type is "academic" for the
+    "<University>, ... Lab" shape, "industry" for a bare name — never
+    guessed beyond what the shape itself already tells us."""
+    text = raw.strip().strip('"').strip().rstrip(".")
+    if not text or text.lower() in _NON_ANSWERS:
+        return None, None
+    match = _LAB_SHAPE_RE.match(text)
+    if match:
+        university = match.group("university").strip()
+        lab = match.group("lab").strip()
+        if not university or not lab:
+            return None, None
+        return f"{university}, {lab}", "academic"
+    # No ", ... Lab" shape — only valid as a bare company/org name, and
+    # only if it actually reads like one (short, not a sentence the model
+    # wrote instead of following the format).
+    if 0 < len(text.split()) <= 6 and "\n" not in text:
+        return text, "industry"
+    return None, None
+
+
+def resolve_paper_org(
+    title: str, authors_institutions: list[tuple[str, list[str]]], config: Config
+) -> tuple[str | None, str | None]:
+    """Tier 1 — see module docstring. `authors_institutions` is
+    [(author_name, [institution_name, ...]), ...]; an empty inner list
+    per author (or the whole thing empty) is fine — it's what an arXiv
+    item with no OpenAlex match has to offer, and the prompt still asks,
+    just with nothing to ground the answer beyond author names."""
+    if config.summarizer.get("backend", "groq") not in summarizer_mod.LLM_BACKENDS:
+        return None, None
+    context_block = (
+        f"Authors and their institutions (from OpenAlex — factual, not a guess):\n"
+        f"{_format_authors_with_institutions(authors_institutions)}"
+        if authors_institutions
+        else "(no author or institution information available)"
+    )
+    prompt = _build_prompt(title, context_block, config)
+    result = summarizer_mod._llm_generate(prompt, config.summarizer, timeout=60, num_thread=config.summarizer.get("num_thread"))
+    if not result:
+        return None, None
+    return _parse_response(result)
+
+
+def resolve_paper_org_via_search(title: str, config: Config) -> tuple[str | None, str | None]:
+    """Tier 2 (fallback) — see module docstring. Only reached when tier 1
+    had literally no institution data to work with."""
+    if config.summarizer.get("backend", "groq") not in summarizer_mod.LLM_BACKENDS:
+        return None, None
+    snippets = web_lookup.duckduckgo_search(f'"{title}" lab university')
+    if not snippets:
+        return None, None
+    context_block = "Web search snippets about this paper:\n" + "\n".join(f"- {s}" for s in snippets)
+    prompt = _build_prompt(title, context_block, config)
+    result = summarizer_mod._llm_generate(prompt, config.summarizer, timeout=60, num_thread=config.summarizer.get("num_thread"))
+    if not result:
+        return None, None
+    return _parse_response(result)
+
+
+def resolve_paper_org_with_fallback(
+    title: str, authors_institutions: list[tuple[str, list[str]]], config: Config
+) -> tuple[str | None, str | None]:
+    """Both tiers, in order — the one entry point scrapers should call.
+    Skips straight to tier 2 when there's no institution data at all to
+    ground tier 1 with (asking the LLM the same question twice with the
+    same nothing-to-go-on isn't worth a second call)."""
+    has_institutions = any(institutions for _, institutions in authors_institutions)
+    if has_institutions:
+        org, org_type = resolve_paper_org(title, authors_institutions, config)
+        if org:
+            return org, org_type
+    return resolve_paper_org_via_search(title, config)

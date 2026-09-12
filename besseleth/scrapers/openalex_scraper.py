@@ -11,11 +11,19 @@ and clinical work, for instance, publishes in a journal and never
 touches arXiv at all — and comes with a `cited_by_count` arXiv preprints
 don't have, letting you rank by actual impact rather than just recency.
 
-Deliberate overlap with arXiv is possible and fine: a paper that started
-as an arXiv preprint and later got published shows up as two items (one
-per source, different ids), same as a LinkedIn post and a news article
-about the same story do — dedupe.py's near-duplicate merge at report
-time (title/text similarity) collapses these the same way.
+Overlap with arXiv is handled at fetch time, not left for report-time
+dedup: arxiv_scraper checks each preprint against OpenAlex by DOI first
+and, when found here, uses THIS module's (richer, real-affiliation)
+version instead of storing a second, thinner arXiv-sourced row for the
+same paper — see arxiv_scraper.fetch()'s docstring.
+
+Org identity (which specific lab/company produced a paper) is resolved
+HERE, at fetch time, not in the later general enrichment pass — see
+paper_org.py's module docstring for why (the real author-institution
+data this needs only exists in the API response right now, at fetch
+time; it's gone by the time general enrichment runs). This replaced an
+older approach (an LLM guessing org from a bare title+summary, with a
+labs.yaml-based override) that was producing confidently wrong answers.
 """
 from __future__ import annotations
 
@@ -24,7 +32,9 @@ from datetime import date, datetime, timedelta, timezone
 
 import requests
 
+from .. import paper_org, web_lookup
 from ..cancel import check_cancelled
+from ..config import Config
 from ..db import Item
 from .util import stable_id, text_matches_keywords
 
@@ -46,14 +56,25 @@ def _reconstruct_abstract(inverted_index: dict | None) -> str:
     return " ".join(positions[i] for i in sorted(positions))
 
 
-def _work_to_item(work: dict, openalex_id: str, title: str, abstract: str, pub_date_str: str, matched_keywords: list[str]) -> Item:
+def _work_to_item(
+    work: dict, openalex_id: str, title: str, abstract: str, pub_date_str: str, matched_keywords: list[str],
+    config: Config | None = None,
+) -> Item:
     """Builds an Item from one OpenAlex work record — shared by fetch()
-    (keyword search) and fetch_known_lab_papers() (author search), which
-    differ only in HOW they decided this work is relevant, not in how to
-    turn the record itself into an Item."""
-    authors = ", ".join(
-        name for a in work.get("authorships", [])
-        if (name := (a.get("author") or {}).get("display_name"))
+    (keyword search), fetch_known_lab_papers() (author search), and
+    arxiv_scraper.fetch() (when an arXiv preprint turns out to already be
+    indexed here), which differ only in HOW they decided this work is
+    relevant, not in how to turn the record itself into an Item.
+
+    Resolves org/org_type right here from the work's own authorship data
+    (see paper_org.py) when `config` is given — the one moment this real
+    affiliation data is available. `config=None` skips resolution
+    (leaves org/org_type unset) purely for tests/callers that don't need
+    it; every real caller in this codebase passes it."""
+    authors_institutions = web_lookup.authorships_from_work(work)
+    authors = ", ".join(name for name, _ in authors_institutions)
+    org, org_type = (
+        paper_org.resolve_paper_org_with_fallback(title, authors_institutions, config) if config else (None, None)
     )
     url = (
         (work.get("primary_location") or {}).get("landing_page_url")
@@ -71,6 +92,8 @@ def _work_to_item(work: dict, openalex_id: str, title: str, abstract: str, pub_d
         authors=authors or None,
         citation_count=work.get("cited_by_count"),
         openalex_id=openalex_id or None,
+        org=org,
+        org_type=org_type,
     )
 
 
@@ -199,7 +222,7 @@ def fetch(config, days_back: int, max_results_per_keyword: int, mailto: str | No
                     continue
                 hits = hits or [keyword]
 
-                items.append(_work_to_item(work, openalex_id, title, abstract, pub_date_str, hits))
+                items.append(_work_to_item(work, openalex_id, title, abstract, pub_date_str, hits, config=config))
                 seen_ids.add(openalex_id)
 
             page += 1
@@ -348,7 +371,7 @@ def fetch_known_lab_papers(
                 # hit) — still passes report.py/dedupe.py's ordinary
                 # "has at least one matched_keywords entry" checks, and
                 # is visible on the item if you ever want to filter by it.
-                items.append(_work_to_item(work, openalex_id, title, abstract, pub_date_str, [f"known_lab:{pi}"]))
+                items.append(_work_to_item(work, openalex_id, title, abstract, pub_date_str, [f"known_lab:{pi}"], config=config))
                 seen_ids.add(openalex_id)
 
             page += 1

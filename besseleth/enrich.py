@@ -43,7 +43,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from . import web_lookup
+from . import paper_org, web_lookup
 from .cancel import FetchCancelled, check_cancelled
 from .config import Config, env
 from .db import DB
@@ -911,6 +911,66 @@ def _arxiv_id_from_url(url: str) -> str | None:
     return match.group(1) if match else None
 
 
+def reextract_paper_orgs(
+    config: Config, db: DB, cancel_event=None, progress_cb=None, max_llm_calls: int | None = None
+) -> dict:
+    """Retroactively re-resolves org/org_type for already-stored papers
+    items via paper_org.py's institution-grounded method — the fetch-
+    time resolution in scrapers/openalex_scraper.py and
+    scrapers/arxiv_scraper.py only ever helps items fetched from here on;
+    this is what fixes the existing backlog (e.g. everything a prior,
+    LLM-guess-from-summary approach mislabeled) without re-fetching
+    anything.
+
+    Re-derives each item's real author-institution data the same way a
+    fresh fetch would: by openalex_id if stored (a direct OpenAlex
+    lookup), else by DOI if the item's own url is an arxiv.org link,
+    else with no institution data at all (falls straight to
+    paper_org's web-search fallback tier). Bounded by `max_llm_calls`
+    (defaults to enrichment.max_items_per_run); ordered never-checked-
+    first (org_rechecked_at, shared with reextract_org_names' news/blog
+    path) so repeated capped runs advance through the whole backlog
+    instead of re-picking the same handful.
+
+    Returns {"checked": int, "changed": int}."""
+    if config.summarizer.get("backend", "groq") not in summarizer_mod.LLM_BACKENDS:
+        return {"checked": 0, "changed": 0}
+
+    rows = db.papers_for_org_recheck()
+    cfg = config.raw.get("enrichment", {}) or {}
+    budget = max_llm_calls if max_llm_calls is not None else cfg.get("max_items_per_run", 50)
+
+    checked = 0
+    changed = 0
+    for i, row in enumerate(rows):
+        if budget <= 0:
+            break
+        check_cancelled(cancel_event)
+        if progress_cb and i % 5 == 0:
+            progress_cb(f"Re-resolving paper org {i + 1}/{len(rows)}...", i, len(rows))
+        budget -= 1
+        checked += 1
+
+        work = None
+        if row["openalex_id"]:
+            work = web_lookup.lookup_openalex_work_by_id(row["openalex_id"])
+        elif (arxiv_id := _arxiv_id_from_url(row["url"] or "")):
+            work = web_lookup.lookup_openalex_work_by_doi(f"10.48550/arxiv.{arxiv_id.lower()}")
+
+        if work:
+            authors_institutions = web_lookup.authorships_from_work(work)
+        else:
+            authors_institutions = [(name.strip(), []) for name in (row["authors"] or "").split(",") if name.strip()]
+
+        new_org, new_org_type = paper_org.resolve_paper_org_with_fallback(row["title"], authors_institutions, config)
+        if new_org and (new_org, new_org_type) != (row["org"], row["org_type"]):
+            db.sync_org(row["id"], new_org, new_org_type, row["org_description"])
+            changed += 1
+        db.mark_org_rechecked(row["id"])
+
+    return {"checked": checked, "changed": changed}
+
+
 def _known_benchmarks_block(config: Config, db: DB) -> str:
     """Formats db.best_known_metric_values() into prompt text — "" if
     besseleth has never recorded a single numeric metric yet (a fresh
@@ -1013,6 +1073,22 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
             org_description = " ".join(words[:5])
     elif not org:
         org_description = None
+    org_type = data.get("org_type") or "unknown"
+
+    if row["source"] == "papers":
+        # Papers/labs org identity is resolved at FETCH time now (see
+        # paper_org.py), grounded in real OpenAlex author-institution
+        # data — never overridden by this prompt's own guess. org/
+        # org_type/org_description are still asked for above only
+        # because they're a few fields among several in the same JSON
+        # call; for a papers item the answer is simply discarded in
+        # favor of what fetch time already resolved (possibly still
+        # None, if that resolution genuinely couldn't determine one —
+        # left as None here too, not force-guessed).
+        org = row["org"]
+        org_type = row["org_type"] or "unknown"
+        org_description = row["org_description"]
+
     location_text = data.get("location") or None
     if location_text and not _looks_like_a_real_location(location_text):
         location_text = None
@@ -1032,7 +1108,7 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
     db.save_enrichment(
         row["id"],
         org=org,
-        org_type=data.get("org_type") or "unknown",
+        org_type=org_type,
         modality=modality,
         therapeutic_target=data.get("therapeutic_target") or "unknown",
         novelty_score=novelty,
@@ -1057,7 +1133,7 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
             config.devices_path,
             name=device_name,
             org=org,
-            org_type=data.get("org_type") or "unknown",
+            org_type=org_type,
             fda_status=device_metrics.get("fda_status", "unknown"),
             metrics={k: v for k, v in device_metrics.items() if k not in ("fda_status",)},
             source_url=row["url"] or "",

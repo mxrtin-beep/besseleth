@@ -18,9 +18,12 @@ Usage:
     python -m besseleth.cli enrich [--all]                   # tag arXiv/news/blog items for the Papers table
                                                               # --all: work through the whole backlog, not just one
                                                               # max_items_per_run batch — leave it running
-    python -m besseleth.cli reextract-orgs [--all]           # re-derive JUST org names for already-enriched items
-                                                              # (fixes a bad org extraction without touching
-                                                              # modality/target/novelty/location) — --all: uncapped
+    python -m besseleth.cli reextract-orgs [--all]           # NEWS/BLOG ONLY — re-derive just their org names
+                                                              # (papers use reextract-paper-orgs below instead) — --all: uncapped
+    python -m besseleth.cli reextract-paper-orgs [--all]     # re-resolve org for already-stored PAPERS via real
+                                                              # OpenAlex author-institution data (paper_org.py) —
+                                                              # fixes an existing backlog; fresh fetches resolve
+                                                              # this automatically already — --all: uncapped
     python -m besseleth.cli serve          [--config config.yaml]   # run continuously per `schedule` in config.yaml
 
 `serve` is the "regularly updating" mode — start it once (e.g. as a
@@ -72,6 +75,7 @@ COMMANDS = [
     "social-add",
     "device-suggest",
     "company-refresh-stock",
+    "reextract-paper-orgs",
     "standardize-locations",
     "report-delete",
     "item-delete",
@@ -167,6 +171,9 @@ def main(argv=None):
         return
 
     if args.command == "reextract-orgs":
+        # News/blog only now — papers/labs org is resolved at fetch time
+        # (paper_org.py); use reextract-paper-orgs below to fix an
+        # already-stored papers backlog instead.
         from .enrich import reextract_org_names
 
         db = DB(config.db_path)
@@ -175,11 +182,24 @@ def main(argv=None):
         finally:
             db.close()
         print(
-            f"[cli] Re-checked {result['checked']} item(s): {result['changed']} org(s) changed "
+            f"[cli] Re-checked {result['checked']} news/blog item(s): {result['changed']} org(s) changed "
             f"({result['llm_checked']} needed an LLM call; the rest were free labs.yaml matches or already correct)."
         )
         if not args.all and result["llm_checked"] >= config.raw.get("enrichment", {}).get("max_items_per_run", 50):
             print("[cli]   Hit this run's cap — run again (or with --all, uncapped) to keep working through the backlog.")
+        return
+
+    if args.command == "reextract-paper-orgs":
+        from .enrich import reextract_paper_orgs
+
+        db = DB(config.db_path)
+        try:
+            result = reextract_paper_orgs(config, db, max_llm_calls=10**9 if args.all else None)
+        finally:
+            db.close()
+        print(f"[cli] Re-resolved {result['checked']} paper(s): {result['changed']} org(s) changed.")
+        if not args.all:
+            print("[cli]   Run again (or with --all, uncapped) to keep working through the backlog.")
         return
 
     if args.command == "item-delete":

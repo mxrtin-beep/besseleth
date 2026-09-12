@@ -102,6 +102,31 @@ def _claim_entity_id(qid: str, prop: str) -> str | None:
         return None
 
 
+def lookup_openalex_work_by_doi(doi: str) -> dict | None:
+    """The full OpenAlex "work" record for `doi`, or None if it isn't
+    indexed there (or on any request failure) — a clean miss, not an
+    error. Used to (a) pull real author-institution data for an arXiv
+    preprint (arXiv's own DOI scheme since Feb 2022 is
+    "10.48550/arxiv.<id>") and (b) at fetch time, to check whether an
+    arXiv preprint is ALSO already indexed by OpenAlex directly — when
+    it is, the OpenAlex record (richer: real affiliations, citation
+    count, often the published version's own metadata) is used instead
+    of storing a second, thinner arXiv-sourced row for the same paper."""
+    return _get(f"{OPENALEX_WORKS_API}/doi:{doi}", {})
+
+
+def lookup_openalex_work_by_id(openalex_id: str) -> dict | None:
+    """Same as lookup_openalex_work_by_doi, keyed by OpenAlex's own work
+    id instead — for re-resolving an already-stored papers item (its
+    openalex_id column, from when it was first fetched) without needing
+    its DOI. Accepts either the short form ("W123...") or the full URL
+    OpenAlex returns ("https://openalex.org/W123...")."""
+    short_id = (openalex_id or "").rsplit("/", 1)[-1]
+    if not short_id:
+        return None
+    return _get(f"{OPENALEX_WORKS_API}/{short_id}", {})
+
+
 def lookup_arxiv_authorships(arxiv_id: str) -> list[tuple[str, list[str]]]:
     """Real author-institution data for an arXiv paper, from OpenAlex
     (https://openalex.org — free, keyless, aggregates affiliations from
@@ -114,12 +139,20 @@ def lookup_arxiv_authorships(arxiv_id: str) -> list[tuple[str, list[str]]]:
     the paper isn't in OpenAlex (arXiv has only assigned every preprint
     its own DOI since Feb 2022, so older papers often aren't findable
     this way) or on any request failure."""
-    doi = f"10.48550/arxiv.{arxiv_id.lower()}"
-    data = _get(f"{OPENALEX_WORKS_API}/doi:{doi}", {})
+    data = lookup_openalex_work_by_doi(f"10.48550/arxiv.{arxiv_id.lower()}")
     if not data:
         return []
+    return authorships_from_work(data)
+
+
+def authorships_from_work(work: dict) -> list[tuple[str, list[str]]]:
+    """[(author_name, [institution_name, ...]), ...] out of a raw
+    OpenAlex "work" record's `authorships` list — shared by
+    lookup_arxiv_authorships above and openalex_scraper.py's own fetch
+    (which already has the work record in hand from its own search, no
+    second request needed)."""
     out = []
-    for authorship in data.get("authorships", []) or []:
+    for authorship in work.get("authorships", []) or []:
         name = (authorship.get("author") or {}).get("display_name")
         institutions = [
             inst.get("display_name") for inst in (authorship.get("institutions") or []) if inst.get("display_name")
