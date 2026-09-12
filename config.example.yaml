@@ -320,7 +320,13 @@ summarizer:
   groq_model: "llama-3.3-70b-versatile"
   groq_fallback_to_ollama: true  # if Groq is rate-limited/unreachable and Ollama below is running, use it for that call instead of giving up
   ollama_url: "http://localhost:11434"
-  model: "llama3.1"
+  # llama3.1 (8B) is heavy for a CPU-only/lower-RAM machine — a "hi" prompt
+  # taking ~a minute means every real enrichment call will time out (see
+  # summarizer.py's 60s timeout). llama3.2:1b is far lighter and still
+  # fine for this structured-extraction prompt; step up to llama3.2:3b if
+  # your machine handles 1b easily and you want better extraction quality.
+  # `ollama pull llama3.2:1b` first, then this just has to match.
+  model: "llama3.2:1b"
   max_items_per_summary_call: 8
   num_thread: 4              # cap CPU threads Ollama uses per call — unset means its default (usually ALL
                               # cores), which is the actual cause of "the whole computer slows to a crawl"
