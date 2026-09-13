@@ -409,11 +409,9 @@
 
     <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Data maintenance</h3>
     <div class="controls" style="align-items:center; flex-wrap:wrap">
-      <div><button class="btn" id="standardizeLocationsBtn">Standardize location names</button></div>
-      <div><button class="btn" id="reextractOrgsBtn" title="News/blog only — re-derives just the org name for already-enriched items; modality/target/novelty/location are left untouched">Re-check org names (news/blog)</button></div>
-      <div><button class="btn" id="reextractPaperOrgsBtn" title="Re-resolves org for already-stored papers using real OpenAlex author-institution data — fresh fetches already do this automatically">Re-resolve paper orgs</button></div>
-      <div><button class="btn" id="reextractOrgLocationsBtn" title="Force-rechecks EVERY org's location, not just ones missing one — fixes a location written wrong before a lookup fix, which the normal backfill never revisits on its own">Re-check org locations</button></div>
-      <div><label style="font-weight:normal;"><input type="checkbox" id="reextractOrgsAll"> whole backlog for any button above (uncapped)</label></div>
+      <div><button class="btn" id="reextractOrgNamesBtn" title="Re-checks org names for every source (papers and news/blog)">Re-check org names</button></div>
+      <div><button class="btn" id="refreshOrgLocationsBtn" title="Re-checks and standardizes every org's location">Re-check org locations</button></div>
+      <div><label style="font-weight:normal;"><input type="checkbox" id="reextractOrgsAll"> whole backlog (uncapped)</label></div>
     </div>
     <p class="hint" id="dataMaintenanceResult"></p>
 
@@ -1098,47 +1096,25 @@ document.getElementById('saveSettingsIndustryBtn').onclick = async () => {
   }
 };
 
-document.getElementById('standardizeLocationsBtn').onclick = async () => {
+// One button runs everything org-NAME related (papers, then news/blog)
+// in one click — used to be three separate buttons; nobody actually
+// wants to reason about which of "papers" vs "news/blog" vs "labs.yaml
+// re-match" applies right now, they just want stale org names fixed.
+document.getElementById('reextractOrgNamesBtn').onclick = async () => {
   const result = document.getElementById('dataMaintenanceResult');
-  const btn = document.getElementById('standardizeLocationsBtn');
-  btn.disabled = true;
-  result.textContent = 'Reformatting every stored location to "Country[, State], City"… one request per distinct location (~1/sec), can take a while for a large map.';
-  try {
-    const res = await fetch('/api/locations/standardize', { method: 'POST' });
-    const data = await res.json();
-    result.textContent = data.ok
-      ? `Checked ${data.checked} distinct location(s): ${data.updated} item(s)/org(s) reformatted.`
-      : `Failed: ${data.message}`;
-  } catch (e) {
-    result.textContent = 'Failed — see server log.';
-  } finally {
-    btn.disabled = false;
-  }
-};
-
-document.getElementById('reextractOrgsBtn').onclick = async () => {
-  const result = document.getElementById('dataMaintenanceResult');
-  const btn = document.getElementById('reextractOrgsBtn');
+  const btn = document.getElementById('reextractOrgNamesBtn');
   btn.disabled = true;
   const all = document.getElementById('reextractOrgsAll').checked;
-  result.textContent = all
-    ? 'Re-checking org names for the whole backlog… this can take a long time with a slow local model, leave this tab open.'
-    : 'Re-checking org names (free labs.yaml matches first, then a short LLM call for the rest, capped per run)…';
   try {
-    const started = await fetch('/api/enrich/reextract-orgs', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ all }),
-    });
-    const startedData = await started.json();
-    if (!startedData.ok) {
-      result.textContent = startedData.message || 'Already running.';
-      return;
-    }
-    const s = await waitUntilDone();
-    const data = s.last_enrich_result;
-    result.textContent = data
-      ? `Checked ${data.checked} item(s): ${data.changed} org(s) changed (${data.llm_checked} needed an LLM call). `
-        + `Run again to keep working through a larger backlog.`
-      : (s.last_error || 'Failed — see server log.');
+    result.textContent = 'Re-checking paper org names…';
+    const paperResult = await runMaintenancePass('/api/enrich/reextract-paper-orgs', all);
+    result.textContent = 'Re-checking news/blog org names…';
+    const newsResult = await runMaintenancePass('/api/enrich/reextract-orgs', all);
+    const changed = (paperResult?.changed || 0) + (newsResult?.changed || 0);
+    const checked = (paperResult?.checked || 0) + (newsResult?.checked || 0);
+    result.textContent = (paperResult || newsResult)
+      ? `Checked ${checked} item(s): ${changed} org(s) changed. Run again to keep working through a larger backlog.`
+      : 'Failed — see server log.';
     papersLoaded = false;
     if (orgsLoaded) { orgsLoaded = false; await loadOrgs(); }
   } catch (e) {
@@ -1148,59 +1124,21 @@ document.getElementById('reextractOrgsBtn').onclick = async () => {
   }
 };
 
-document.getElementById('reextractPaperOrgsBtn').onclick = async () => {
+// Same idea for locations: force-relookup every org's location AND
+// standardize any leftover item-level location text, in one click.
+document.getElementById('refreshOrgLocationsBtn').onclick = async () => {
   const result = document.getElementById('dataMaintenanceResult');
-  const btn = document.getElementById('reextractPaperOrgsBtn');
+  const btn = document.getElementById('refreshOrgLocationsBtn');
   btn.disabled = true;
   const all = document.getElementById('reextractOrgsAll').checked;
-  result.textContent = all
-    ? 'Re-resolving paper orgs for the whole backlog…'
-    : 'Re-resolving paper orgs (real OpenAlex author-institution data, capped per run)…';
   try {
-    const started = await fetch('/api/enrich/reextract-paper-orgs', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ all }),
-    });
-    const startedData = await started.json();
-    if (!startedData.ok) {
-      result.textContent = startedData.message || 'Already running.';
-      return;
-    }
-    const s = await waitUntilDone();
-    const data = s.last_enrich_result;
-    result.textContent = data
-      ? `Checked ${data.checked} paper(s): ${data.changed} org(s) changed. Run again to keep working through a larger backlog.`
-      : (s.last_error || 'Failed — see server log.');
-    papersLoaded = false;
-    if (orgsLoaded) { orgsLoaded = false; await loadOrgs(); }
-  } catch (e) {
-    result.textContent = 'Failed — see server log.';
-  } finally {
-    btn.disabled = false;
-  }
-};
-
-document.getElementById('reextractOrgLocationsBtn').onclick = async () => {
-  const result = document.getElementById('dataMaintenanceResult');
-  const btn = document.getElementById('reextractOrgLocationsBtn');
-  btn.disabled = true;
-  const all = document.getElementById('reextractOrgsAll').checked;
-  result.textContent = all
-    ? 'Re-checking org locations for the whole backlog…'
-    : 'Re-checking org locations (Wikidata/Wikipedia, then a web-search fallback, capped per run)…';
-  try {
-    const started = await fetch('/api/enrich/reextract-org-locations', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ all }),
-    });
-    const startedData = await started.json();
-    if (!startedData.ok) {
-      result.textContent = startedData.message || 'Already running.';
-      return;
-    }
-    const s = await waitUntilDone();
-    const data = s.last_enrich_result;
-    result.textContent = data
-      ? `Checked ${data.checked} org(s): ${data.changed} location(s) changed. Run again to keep working through a larger backlog.`
-      : (s.last_error || 'Failed — see server log.');
+    result.textContent = 'Re-checking org locations…';
+    const locResult = await runMaintenancePass('/api/enrich/reextract-org-locations', all);
+    result.textContent = 'Standardizing location formatting…';
+    const stdRes = await fetch('/api/locations/standardize', { method: 'POST' });
+    const stdData = await stdRes.json();
+    const changed = (locResult?.changed || 0) + (stdData.updated || 0);
+    result.textContent = `${locResult?.checked || 0} org(s) re-checked, ${stdData.checked || 0} location(s) reformatted: ${changed} total change(s). Run again to keep working through a larger backlog.`;
     if (orgsLoaded) { orgsLoaded = false; await loadOrgs(); }
     if (mapLoaded) { mapLoaded = false; await loadMap(); }
   } catch (e) {
@@ -1209,6 +1147,20 @@ document.getElementById('reextractOrgLocationsBtn').onclick = async () => {
     btn.disabled = false;
   }
 };
+
+// Shared by both buttons above: starts one of the async maintenance
+// endpoints (running_now/cancel/progress-cb shaped, same as fetch) and
+// waits for it to finish. Returns last_enrich_result, or null if it
+// failed to even start (e.g. something else was already running).
+async function runMaintenancePass(url, all) {
+  const started = await fetch(url, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ all }),
+  });
+  const startedData = await started.json();
+  if (!startedData.ok) return null;
+  const s = await waitUntilDone();
+  return s.last_enrich_result || null;
+}
 
 document.getElementById('saveSettingsScheduleBtn').onclick = async () => {
   const result = document.getElementById('settingsScheduleResult');
