@@ -412,7 +412,7 @@
       <div><button class="btn" id="standardizeLocationsBtn">Standardize location names</button></div>
       <div><button class="btn" id="reextractOrgsBtn" title="News/blog only — re-derives just the org name for already-enriched items; modality/target/novelty/location are left untouched">Re-check org names (news/blog)</button></div>
       <div><button class="btn" id="reextractPaperOrgsBtn" title="Re-resolves org for already-stored papers using real OpenAlex author-institution data — fresh fetches already do this automatically">Re-resolve paper orgs</button></div>
-      <div><label style="font-weight:normal;"><input type="checkbox" id="reextractOrgsAll"> whole backlog for either button above (uncapped — can take a long time with a slow local model)</label></div>
+      <div><label style="font-weight:normal;"><input type="checkbox" id="reextractOrgsAll"> whole backlog (uncapped)</label></div>
     </div>
     <p class="hint" id="dataMaintenanceResult"></p>
 
@@ -1153,7 +1153,7 @@ document.getElementById('reextractPaperOrgsBtn').onclick = async () => {
   btn.disabled = true;
   const all = document.getElementById('reextractOrgsAll').checked;
   result.textContent = all
-    ? 'Re-resolving paper orgs for the whole backlog… this can take a long time with a slow local model, leave this tab open.'
+    ? 'Re-resolving paper orgs for the whole backlog…'
     : 'Re-resolving paper orgs (real OpenAlex author-institution data, capped per run)…';
   try {
     const started = await fetch('/api/enrich/reextract-paper-orgs', {
