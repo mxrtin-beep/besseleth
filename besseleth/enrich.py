@@ -983,7 +983,20 @@ def reextract_paper_orgs(
             db.log_change(row["id"], row["title"], "papers", "org", row["org"], new_org, "paper org resolution (re-check)", item_url=row["url"])
             db.sync_org(row["id"], new_org, new_org_type, row["org_description"])
             changed += 1
-        db.mark_org_rechecked(row["id"])
+        # Only mark this row "checked" when resolution actually produced
+        # an answer (whether it matched what was already there or
+        # changed it) — a genuine miss (no institution data AND the
+        # DuckDuckGo fallback unreachable/empty, say) means we didn't
+        # actually learn anything, so it must NOT count as having been
+        # verified. Marking it anyway is what let a wrong org silently
+        # survive repeated re-check runs: the first visit that happened
+        # to fail to resolve would still push the row to the back of
+        # the never-checked-first queue, deprioritizing it for a long
+        # time under a false "recently checked" timestamp while it sat
+        # there still wrong. Leaving it unmarked keeps it at the front
+        # so the very next run retries it instead of skipping past it.
+        if new_org:
+            db.mark_org_rechecked(row["id"])
 
         # Every item, not every N — this is a cheap in-memory write (see
         # SchedulerStatus.set_progress), and the whole point is a live,

@@ -766,11 +766,17 @@ class DB:
         ).fetchall())
 
     def mark_org_rechecked(self, item_id: str) -> None:
-        """Records that reextract_org_names()'s LLM tier spent a call on
-        this item (see org_rechecked_at's schema comment) — called
-        whether or not the call actually changed anything, so a bounded
-        run keeps advancing through the backlog instead of re-picking
-        the same not-yet-marked items every time."""
+        """Records that a re-check pass actually resolved something for
+        this item (see org_rechecked_at's schema comment), so a bounded
+        run keeps advancing through the backlog instead of re-picking the
+        same not-yet-marked items every time. Callers should call this
+        only when resolution produced a real answer — reextract_org_names()
+        still calls it unconditionally (spending an LLM call either way),
+        but reextract_paper_orgs() only calls it when resolution actually
+        found an org, since a genuine miss (no data to resolve from) means
+        nothing was learned and the row must stay at the front of the
+        never-checked-first queue rather than being falsely marked as
+        verified."""
         self.conn.execute("UPDATE items SET org_rechecked_at = ? WHERE id = ?", (datetime.now(timezone.utc).isoformat(), item_id))
         self.conn.commit()
 
