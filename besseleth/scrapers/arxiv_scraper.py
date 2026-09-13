@@ -143,7 +143,7 @@ def fetch(config, days_back: int, max_results_per_keyword: int, cancel_event=Non
                     )
                 else:
                     org, org_type = paper_org.resolve_paper_org_with_fallback(
-                        title, [(name, []) for name in author_names], config
+                        title, [(name, [], False) for name in author_names], config
                     )
                     item = Item(
                         # Deliberately still "arxiv" here, not "papers" —

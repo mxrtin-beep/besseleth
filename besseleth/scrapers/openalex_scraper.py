@@ -72,7 +72,7 @@ def _work_to_item(
     (leaves org/org_type unset) purely for tests/callers that don't need
     it; every real caller in this codebase passes it."""
     authors_institutions = web_lookup.authorships_from_work(work)
-    authors = ", ".join(name for name, _ in authors_institutions)
+    authors = ", ".join(name for name, _, _ in authors_institutions)
     org, org_type = (
         paper_org.resolve_paper_org_with_fallback(title, authors_institutions, config) if config else (None, None)
     )

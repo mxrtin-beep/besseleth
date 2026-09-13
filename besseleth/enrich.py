@@ -960,7 +960,7 @@ def reextract_paper_orgs(
         if work:
             authors_institutions = web_lookup.authorships_from_work(work)
         else:
-            authors_institutions = [(name.strip(), []) for name in (row["authors"] or "").split(",") if name.strip()]
+            authors_institutions = [(name.strip(), [], False) for name in (row["authors"] or "").split(",") if name.strip()]
 
         new_org, new_org_type = paper_org.resolve_paper_org_with_fallback(row["title"], authors_institutions, config)
         if new_org and (new_org, new_org_type) != (row["org"], row["org_type"]):

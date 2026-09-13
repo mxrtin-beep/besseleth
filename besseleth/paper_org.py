@@ -52,19 +52,29 @@ _LAB_SHAPE_RE = re.compile(r"^(?P<university>.+?),\s*(?P<lab>.+?\bLab)\.?$", re.
 _NON_ANSWERS = {"unknown", "n/a", "none", "null", "unclear", "not specified"}
 
 
-def _format_authors_with_institutions(authors_institutions: list[tuple[str, list[str]]]) -> str:
+def _format_authors_with_institutions(authors_institutions: list[tuple[str, list[str], bool]]) -> str:
     parts = []
-    for name, institutions in authors_institutions:
-        parts.append(f"{name} ({', '.join(institutions)})" if institutions else f"{name} (institution unknown)")
+    for name, institutions, is_corresponding in authors_institutions:
+        inst_text = ", ".join(institutions) if institutions else "institution unknown"
+        marker = " [CORRESPONDING AUTHOR]" if is_corresponding else ""
+        parts.append(f"{name} ({inst_text}){marker}")
     return "; ".join(parts) or "(no author information)"
 
 
-def _build_prompt(title: str, context_block: str, config: Config) -> str:
+def _build_prompt(title: str, context_block: str, config: Config, has_corresponding: bool = False) -> str:
+    corresponding_note = (
+        " The author marked [CORRESPONDING AUTHOR] above is real metadata from the paper itself (who to "
+        "contact about it) and is usually the PI/lab head — weight them heavily for the PI/lab name, NOT "
+        "necessarily whichever author is listed first (a first-listed author is very often a student or "
+        "research assistant who did the hands-on work, not the lab's lead)."
+        if has_corresponding
+        else ""
+    )
     return (
         f'Paper title: "{title}"\n'
         f"{context_block}\n\n"
-        f"Which specific {config.industry_name} lab or company produced this paper? Answer with ONLY one of "
-        f"these exact shapes, nothing else — no explanation, no extra words:\n"
+        f"Which specific {config.industry_name} lab or company produced this paper?{corresponding_note} "
+        f"Answer with ONLY one of these exact shapes, nothing else — no explanation, no extra words:\n"
         f'- "<University>, <Principal Investigator Last Name> Lab" if a specific PI-led academic lab is clear\n'
         f'- "<University>, <Lab Name> Lab" if the lab has its own name not tied to one PI\n'
         f'- "<University>, Undetermined Lab" if it is clearly academic work but no specific lab/PI is clear\n'
@@ -97,22 +107,24 @@ def _parse_response(raw: str) -> tuple[str | None, str | None]:
 
 
 def resolve_paper_org(
-    title: str, authors_institutions: list[tuple[str, list[str]]], config: Config
+    title: str, authors_institutions: list[tuple[str, list[str], bool]], config: Config
 ) -> tuple[str | None, str | None]:
     """Tier 1 — see module docstring. `authors_institutions` is
-    [(author_name, [institution_name, ...]), ...]; an empty inner list
-    per author (or the whole thing empty) is fine — it's what an arXiv
-    item with no OpenAlex match has to offer, and the prompt still asks,
-    just with nothing to ground the answer beyond author names."""
+    [(author_name, [institution_name, ...], is_corresponding), ...]; an
+    empty inner institutions list per author (or the whole thing empty)
+    is fine — it's what an arXiv item with no OpenAlex match has to
+    offer, and the prompt still asks, just with nothing to ground the
+    answer beyond author names."""
     if config.summarizer.get("backend", "groq") not in summarizer_mod.LLM_BACKENDS:
         return None, None
+    has_corresponding = any(is_corresponding for _, _, is_corresponding in authors_institutions)
     context_block = (
         f"Authors and their institutions (from OpenAlex — factual, not a guess):\n"
         f"{_format_authors_with_institutions(authors_institutions)}"
         if authors_institutions
         else "(no author or institution information available)"
     )
-    prompt = _build_prompt(title, context_block, config)
+    prompt = _build_prompt(title, context_block, config, has_corresponding=has_corresponding)
     result = summarizer_mod._llm_generate(prompt, config.summarizer, timeout=60, num_thread=config.summarizer.get("num_thread"))
     if not result:
         return None, None
@@ -136,13 +148,13 @@ def resolve_paper_org_via_search(title: str, config: Config) -> tuple[str | None
 
 
 def resolve_paper_org_with_fallback(
-    title: str, authors_institutions: list[tuple[str, list[str]]], config: Config
+    title: str, authors_institutions: list[tuple[str, list[str], bool]], config: Config
 ) -> tuple[str | None, str | None]:
     """Both tiers, in order — the one entry point scrapers should call.
     Skips straight to tier 2 when there's no institution data at all to
     ground tier 1 with (asking the LLM the same question twice with the
     same nothing-to-go-on isn't worth a second call)."""
-    has_institutions = any(institutions for _, institutions in authors_institutions)
+    has_institutions = any(institutions for _, institutions, _ in authors_institutions)
     if has_institutions:
         org, org_type = resolve_paper_org(title, authors_institutions, config)
         if org:

@@ -145,12 +145,24 @@ def lookup_arxiv_authorships(arxiv_id: str) -> list[tuple[str, list[str]]]:
     return authorships_from_work(data)
 
 
-def authorships_from_work(work: dict) -> list[tuple[str, list[str]]]:
-    """[(author_name, [institution_name, ...]), ...] out of a raw
-    OpenAlex "work" record's `authorships` list — shared by
+def authorships_from_work(work: dict) -> list[tuple[str, list[str], bool]]:
+    """[(author_name, [institution_name, ...], is_corresponding), ...]
+    out of a raw OpenAlex "work" record's `authorships` list — shared by
     lookup_arxiv_authorships above and openalex_scraper.py's own fetch
     (which already has the work record in hand from its own search, no
-    second request needed)."""
+    second request needed).
+
+    is_corresponding comes straight from OpenAlex's own
+    `is_corresponding` flag per authorship — real metadata (from the
+    paper's own front matter, not a guess), and a much better signal for
+    "who actually leads this work" than author-list position alone: a
+    first-listed author is very often the student/RA who did the hands-
+    on work, not the PI, while the corresponding author is the
+    convention's actual answer to "who do you contact about this paper"
+    — normally the lab head. See paper_org.py's prompt for how this gets
+    used (a real case this fixed: a paper's first author being a
+    research assistant, not the PI, was resolving to "<RA's name> Lab"
+    until the corresponding-author signal was added)."""
     out = []
     for authorship in work.get("authorships", []) or []:
         name = (authorship.get("author") or {}).get("display_name")
@@ -158,7 +170,7 @@ def authorships_from_work(work: dict) -> list[tuple[str, list[str]]]:
             inst.get("display_name") for inst in (authorship.get("institutions") or []) if inst.get("display_name")
         ]
         if name:
-            out.append((name, institutions))
+            out.append((name, institutions, bool(authorship.get("is_corresponding"))))
     return out
 
 
