@@ -51,6 +51,32 @@ _LAB_SHAPE_RE = re.compile(r"^(?P<university>.+?),\s*(?P<lab>.+?\bLab)\.?$", re.
 
 _NON_ANSWERS = {"unknown", "n/a", "none", "null", "unclear", "not specified"}
 
+# The prompt's answer shapes use bracketed placeholder tokens
+# (<University>, <Principal Investigator Last Name>, <Lab Name>,
+# <PI/Lab Name>, <Company Name>) to show where a real value goes. A
+# weak/local model sometimes echoes one of these literally instead of
+# substituting - with or without the angle brackets, and with or
+# without a trailing " Lab" if it was the lab-name slot - producing a
+# stored org like "<University>, Deng Lab" or "Unknown Institution,
+# Principal Investigator Last Name Lab". Neither of those is malformed
+# by shape (they're made entirely of real letters, same as an actual
+# answer), so the "does this contain at least one real letter/digit"
+# check lets them straight through - this catches that specific
+# failure mode instead.
+_PLACEHOLDER_TOKENS = {
+    "university",
+    "principal investigator last name",
+    "lab name",
+    "pi/lab name",
+    "company name",
+}
+
+
+def _is_unsubstituted_placeholder(segment: str) -> bool:
+    text = (segment or "").strip().strip("<>").strip()
+    text = re.sub(r"\s+lab$", "", text, flags=re.IGNORECASE)
+    return text.lower() in _PLACEHOLDER_TOKENS
+
 
 def _format_authors_with_institutions(authors_institutions: list[tuple[str, list[str], bool]]) -> str:
     parts = []
@@ -116,11 +142,14 @@ def looks_like_malformed_paper_org(org: str | None) -> bool:
     """True for a stored org value that could only have come from a
     parsing/validation gap that has since been fixed (a leading "- \""
     markdown-bullet artifact, an empty/punctuation-only university
-    before the comma) — used by enrich.py's retroactive cleanup sweep to
-    clear out already-stored garbage from before these checks existed,
-    since a later re-resolution only overwrites a stored value when it
-    finds something NEW to replace it with, and silently leaves old
-    garbage in place forever otherwise."""
+    before the comma, a literal un-substituted prompt placeholder like
+    "<University>, Deng Lab" or "Unknown Institution, Principal
+    Investigator Last Name Lab" — see _is_unsubstituted_placeholder)
+    — used by enrich.py's retroactive cleanup sweep to clear out
+    already-stored garbage from before these checks existed, since a
+    later re-resolution only overwrites a stored value when it finds
+    something NEW to replace it with, and silently leaves old garbage
+    in place forever otherwise."""
     if not org:
         return False
     if not re.match(r"^[A-Za-z0-9]", org.strip()):
@@ -129,6 +158,10 @@ def looks_like_malformed_paper_org(org: str | None) -> bool:
         university, _, lab = org.partition(",")
         if not re.search(r"[A-Za-z0-9]", university) or not re.search(r"[A-Za-z0-9]", lab):
             return True
+        if _is_unsubstituted_placeholder(university) or _is_unsubstituted_placeholder(lab):
+            return True
+    elif _is_unsubstituted_placeholder(org):
+        return True
     return False
 
 
@@ -167,13 +200,20 @@ def _parse_response(raw: str) -> tuple[str | None, str | None]:
         # this check existed. Require at least one real letter/digit.
         if not re.search(r"[A-Za-z0-9]", university) or not re.search(r"[A-Za-z0-9]", lab):
             return None, None
+        if _is_unsubstituted_placeholder(university) or _is_unsubstituted_placeholder(lab):
+            return None, None
         return f"{university}, {lab}", "academic"
     # No ", ... Lab" shape — only valid as a bare company/org name, and
     # only if it actually reads like one (short, not a sentence the model
     # wrote instead of following the format, and not leading/trailing
     # punctuation left over from a malformed "<blank>, X Lab" attempt
     # that didn't even match the regex above).
-    if 0 < len(text.split()) <= 6 and "\n" not in text and re.match(r"^[A-Za-z0-9]", text):
+    if (
+        0 < len(text.split()) <= 6
+        and "\n" not in text
+        and re.match(r"^[A-Za-z0-9]", text)
+        and not _is_unsubstituted_placeholder(text)
+    ):
         return text, "industry"
     return None, None
 

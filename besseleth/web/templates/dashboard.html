@@ -448,6 +448,26 @@
 </main>
 
 <script>
+// Free-text values throughout this dashboard (org, title, org_description,
+// location_text, etc.) come from scraped pages or LLM output, not from us —
+// they can legitimately contain "<", ">", "&", or quotes (e.g. "AT&T Labs",
+// a paper title with a "<" comparison in it). Every place below that builds
+// HTML via a template literal and assigns it to .innerHTML must run such a
+// value through this first, or the browser silently swallows an unescaped
+// "<...>" as an unrecognized tag — that's what made an org like
+// "<University>, Deng Lab" display as just ", Deng Lab" with the whole
+// university name gone. Safe for both element content and quoted
+// attribute values.
+function esc(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // --- Reports sidebar collapse (per-viewer, remembered across reloads) ---
 (() => {
   const sidebar = document.getElementById('sidebar');
@@ -1294,10 +1314,10 @@ function renderMap() {
     <thead><tr><th>Org</th><th>Location</th><th>Org type</th><th>Items</th></tr></thead>
     <tbody>${mapLocations.slice().sort((a, b) => b.total - a.total).map(m => `
       <tr>
-        <td>${m.org}</td>
-        <td>${m.location_text || ''}</td>
-        <td>${m.org_type || ''}</td>
-        <td>${m.total} (${Object.entries(m.by_source).map(([s, n]) => `${s}: ${n}`).join(', ')})</td>
+        <td>${esc(m.org)}</td>
+        <td>${esc(m.location_text)}</td>
+        <td>${esc(m.org_type)}</td>
+        <td>${m.total} (${Object.entries(m.by_source).map(([s, n]) => `${esc(s)}: ${n}`).join(', ')})</td>
       </tr>`).join('')}</tbody>`;
   makeTableResizable(table, 'mapTable');
 
@@ -1323,7 +1343,7 @@ function renderMap() {
     name: 'Sources',
     lat: filteredLocations.map(m => m.lat),
     lon: filteredLocations.map(m => m.lon),
-    text: filteredLocations.map(m => `${m.org}<br>${m.location_text || ''}<br>${m.total} item(s)`),
+    text: filteredLocations.map(m => `${esc(m.org)}<br>${esc(m.location_text)}<br>${m.total} item(s)`),
     hoverinfo: 'text',
     mode: 'markers',
     marker: {
@@ -1539,15 +1559,15 @@ function renderOrgs() {
     <thead><tr><th>Org</th><th>Category</th><th>Type</th><th>Location</th><th>Items</th><th>Sources</th><th>Ticker</th><th>Funding</th><th>Source</th></tr></thead>
     <tbody>${rows.map(o => `
       <tr>
-        <td>${o.org}</td>
-        <td>${o.org_description || '<span class="hint">—</span>'}</td>
-        <td>${o.org_type || ''}</td>
-        <td>${o.location_text || (o.lat ? '' : '<span class="hint">not located</span>')}</td>
+        <td>${esc(o.org)}</td>
+        <td>${o.org_description ? esc(o.org_description) : '<span class="hint">—</span>'}</td>
+        <td>${esc(o.org_type)}</td>
+        <td>${o.location_text ? esc(o.location_text) : (o.lat ? '' : '<span class="hint">not located</span>')}</td>
         <td>${o.item_count}</td>
-        <td>${o.sources.join(', ')}</td>
-        <td>${o.stock_ticker || ''}</td>
-        <td>${fmtUsd(o.funding_total_usd)}${o.last_funding_round ? ` (${o.last_funding_round})` : ''}</td>
-        <td>${o.source_url ? `<a href="${o.source_url}" target="_blank" rel="noopener">link</a>` : '<span class="hint">—</span>'}</td>
+        <td>${o.sources.map(esc).join(', ')}</td>
+        <td>${esc(o.stock_ticker)}</td>
+        <td>${fmtUsd(o.funding_total_usd)}${o.last_funding_round ? ` (${esc(o.last_funding_round)})` : ''}</td>
+        <td>${o.source_url ? `<a href="${esc(o.source_url)}" target="_blank" rel="noopener">link</a>` : '<span class="hint">—</span>'}</td>
       </tr>`).join('')}</tbody>`;
   makeTableResizable(table, 'orgsTable', { 0: 200 });
 }
@@ -1584,13 +1604,13 @@ function renderJobs() {
     <thead><tr><th>Org</th><th>Title</th><th>Location</th><th>Platform</th><th>First seen</th><th>Status</th><th></th></tr></thead>
     <tbody>${rows.map(j => `
       <tr>
-        <td>${j.org}</td>
-        <td>${j.url ? `<a href="${j.url}" target="_blank" rel="noopener">${j.title}</a>` : j.title}</td>
-        <td>${j.location || ''}</td>
-        <td>${j.platform}</td>
+        <td>${esc(j.org)}</td>
+        <td>${j.url ? `<a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>` : esc(j.title)}</td>
+        <td>${esc(j.location)}</td>
+        <td>${esc(j.platform)}</td>
         <td>${(j.first_seen_at || '').slice(0, 10)}</td>
         <td>${j.removed_at ? `<span class="hint">Removed ${j.removed_at.slice(0, 10)}</span>` : 'Active'}</td>
-        <td><button class="delBtn" data-reject-org="${j.org}" title="Not actually a relevant org — clear it everywhere (Orgs/Map/Trends/Jobs), not just here">🗑 Org</button></td>
+        <td><button class="delBtn" data-reject-org="${esc(j.org)}" title="Not actually a relevant org — clear it everywhere (Orgs/Map/Trends/Jobs), not just here">🗑 Org</button></td>
       </tr>`).join('')}</tbody>`;
   makeTableResizable(table, 'jobsTable');
 
@@ -1790,7 +1810,7 @@ function renderPapers(resetPage = true) {
     const names = authorList(p);
     if (!names.length) return '';
     const shown = names.length > 1 ? `${names[0]} et al. (${names.length})` : names[0];
-    return `<span class="author-cell" data-author="${names[0]}" title="${names.join(', ')}" style="cursor:pointer; text-decoration:underline dotted;">${shown}</span>`;
+    return `<span class="author-cell" data-author="${esc(names[0])}" title="${esc(names.join(', '))}" style="cursor:pointer; text-decoration:underline dotted;">${esc(shown)}</span>`;
   }
 
   const table = document.getElementById('papersTable');
@@ -1801,14 +1821,14 @@ function renderPapers(resetPage = true) {
     <tbody>${visible.map(p => `
       <tr data-paper-row="${p.id}">
         <td>${(p.published_at || '').slice(0, 10)}</td>
-        <td>${p.title}</td>
-        <td>${p.url ? `<a href="${p.url}" target="_blank" rel="noopener">${p.source}</a>` : p.source}</td>
+        <td>${esc(p.title)}</td>
+        <td>${p.url ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.source)}</a>` : esc(p.source)}</td>
         <td>${authorCell(p)}</td>
-        <td>${p.org || (p.enriched ? '—' : '<span class="hint">pending</span>')}</td>
-        <td>${p.org_type || ''}</td>
-        <td>${p.modality || ''}</td>
-        <td>${p.therapeutic_target || ''}</td>
-        <td title="${p.novelty_rationale || ''}">${novelBadge(p.novelty_score)}</td>
+        <td>${p.org ? esc(p.org) : (p.enriched ? '—' : '<span class="hint">pending</span>')}</td>
+        <td>${esc(p.org_type)}</td>
+        <td>${esc(p.modality)}</td>
+        <td>${esc(p.therapeutic_target)}</td>
+        <td title="${esc(p.novelty_rationale)}">${novelBadge(p.novelty_score)}</td>
         <td><button class="delBtn" data-del-paper="${p.id}" title="Delete">🗑</button></td>
       </tr>`).join('')}</tbody>`;
 
@@ -2186,7 +2206,7 @@ function renderChart() {
   const traces = Object.entries(groups).map(([groupName, pts]) => ({
     x: pts.map(p => p.x),
     y: pts.map(p => p.y),
-    text: pts.map(p => currentDataset === 'devices' ? `${p.row.name} (${p.row.org})` : p.row.name),
+    text: pts.map(p => currentDataset === 'devices' ? `${esc(p.row.name)} (${esc(p.row.org)})` : esc(p.row.name)),
     customdata: pts.map(p => p.row.source_url || ''),
     mode: currentDataset === 'devices' ? 'markers' : 'markers+lines',
     type: 'scatter',
@@ -2368,12 +2388,12 @@ function renderTable() {
       <thead><tr><th>Org</th><th>Device</th><th>Stage</th><th>FDA status (raw)</th><th>Reported</th><th>Source</th></tr></thead>
       <tbody>${dated.map(d => `
         <tr>
-          <td>${d.org}</td>
-          <td>${d.name}</td>
-          <td>${d.fda_stage_label}</td>
-          <td>${d.fda_status}</td>
+          <td>${esc(d.org)}</td>
+          <td>${esc(d.name)}</td>
+          <td>${esc(d.fda_stage_label)}</td>
+          <td>${esc(d.fda_status)}</td>
           <td>${d.date_reported}</td>
-          <td>${d.source_url ? `<a href="${d.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
+          <td>${d.source_url ? `<a href="${esc(d.source_url)}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
         </tr>`).join('')}</tbody>`;
     makeTableResizable(table, 'dataTable:fda_timeline');
     return;
@@ -2384,12 +2404,12 @@ function renderTable() {
       <thead><tr><th>Org</th><th>Type</th><th>Title</th><th>Description</th><th>Date</th><th>Source</th><th></th></tr></thead>
       <tbody>${companyEvents.map(e => `
         <tr>
-          <td>${e.org}</td>
-          <td>${EVENT_TYPE_LABELS[e.event_type] || e.event_type}</td>
-          <td>${e.title}</td>
-          <td>${e.description || ''}</td>
+          <td>${esc(e.org)}</td>
+          <td>${esc(EVENT_TYPE_LABELS[e.event_type] || e.event_type)}</td>
+          <td>${esc(e.title)}</td>
+          <td>${esc(e.description)}</td>
           <td>${e.event_date || ''}</td>
-          <td>${e.source_url ? `<a href="${e.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
+          <td>${e.source_url ? `<a href="${esc(e.source_url)}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
           <td><button class="delBtn" data-event-id="${e.id}" title="Delete this event">🗑</button></td>
         </tr>`).join('')}</tbody>`;
     makeTableResizable(table, 'dataTable:events_timeline');
@@ -2429,18 +2449,18 @@ function renderTable() {
       ? metricsTable.filter(r => `${r.metric} ${r.subject} ${r.org}`.toLowerCase().includes(filter.toLowerCase()))
       : metricsTable;
     table.innerHTML = `
-      <p style="margin:.4rem 0;"><input type="text" id="metricsFilter" placeholder="Filter by metric/device/org…" value="${filter}" style="padding:.3rem .5rem; width:260px;"></p>
+      <p style="margin:.4rem 0;"><input type="text" id="metricsFilter" placeholder="Filter by metric/device/org…" value="${esc(filter)}" style="padding:.3rem .5rem; width:260px;"></p>
       <thead><tr><th>Metric</th><th>Value</th><th>Unit</th><th>Subject (device/company)</th><th>Org</th><th>Date</th><th>Auto-extracted?</th><th>Source</th></tr></thead>
       <tbody>${filtered.map(r => `
         <tr>
-          <td>${r.metric}</td>
-          <td>${typeof r.value === 'number' ? r.value.toLocaleString() : r.value}</td>
-          <td>${r.unit || ''}</td>
-          <td>${r.subject}${r.subject_type === 'device' ? ' <span class="hint">(device)</span>' : ''}</td>
-          <td>${r.org}</td>
+          <td>${esc(r.metric)}</td>
+          <td>${typeof r.value === 'number' ? r.value.toLocaleString() : esc(r.value)}</td>
+          <td>${esc(r.unit)}</td>
+          <td>${esc(r.subject)}${r.subject_type === 'device' ? ' <span class="hint">(device)</span>' : ''}</td>
+          <td>${esc(r.org)}</td>
           <td>${r.date || ''}</td>
           <td>${r.auto_extracted ? 'yes — verify' : 'no (hand-entered)'}</td>
-          <td>${r.source_url ? `<a href="${r.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
+          <td>${r.source_url ? `<a href="${esc(r.source_url)}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
         </tr>`).join('')}</tbody>`;
     makeTableResizable(table, 'dataTable:metrics_table');
     const filterInput = document.getElementById('metricsFilter');
@@ -2454,13 +2474,13 @@ function renderTable() {
       <thead><tr><th>Device</th><th>Org</th><th>Type</th><th>FDA status</th><th>Metrics</th><th>Reported</th><th>Source</th><th></th></tr></thead>
       <tbody>${devices.map(d => `
         <tr data-device-row="${d.id}">
-          <td>${d.name}</td>
-          <td>${d.org}</td>
-          <td>${d.org_type}</td>
-          <td>${d.fda_status || 'unknown'}</td>
+          <td>${esc(d.name)}</td>
+          <td>${esc(d.org)}</td>
+          <td>${esc(d.org_type)}</td>
+          <td>${esc(d.fda_status) || 'unknown'}</td>
           <td><div class="metric-tags">${Object.entries(d.metrics).map(([k, v]) => formatMetricValue(k, v)).join('')}</div></td>
           <td>${d.date_reported || ''}</td>
-          <td>${d.source_url ? `<a href="${d.source_url}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
+          <td>${d.source_url ? `<a href="${esc(d.source_url)}" target="_blank" rel="noopener">source</a>` : '<span class="hint">none cited</span>'}</td>
           <td><button class="delBtn" data-del-device="${d.id}" title="Delete this device row — e.g. a bad extraction (wrong unit conversion, hallucinated metric)">🗑</button></td>
         </tr>`).join('')}</tbody>`;
     makeTableResizable(table, 'dataTable:devices');
