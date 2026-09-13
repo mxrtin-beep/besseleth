@@ -531,7 +531,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
     @app.post("/api/locations/standardize")
     def api_standardize_locations():
         # One-time-or-whenever bulk reformat of every stored location to
-        # "City[, State], Country" — see enrich.standardize_location_labels's
+        # "Country[, State], City" — see enrich.standardize_location_labels's
         # docstring. Free (Nominatim), but one request per distinct
         # location at ~1/sec, so this can take a while for a large map —
         # safe to run synchronously since a Settings-tab click is
@@ -982,6 +982,54 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
             except Exception as e:
                 with status._lock:
                     status.last_error = f"reextract-paper-orgs: {e}"
+            finally:
+                status.clear_cancel()
+                status.set_progress(None)
+                with status._lock:
+                    status.running_now = False
+
+        threading.Thread(target=_work, daemon=True).start()
+        return jsonify({"ok": True, "message": "Started."})
+
+    @app.post("/api/enrich/reextract-org-locations")
+    def api_reextract_org_locations():
+        # Force-rechecks EVERY org's location, not just ones missing one
+        # (see enrich.reextract_org_locations's docstring) — the normal
+        # backfill pass never revisits an org that already has a
+        # location, even a wrong one written before a lookup-logic fix.
+        # Same async shape as the other re-extract endpoints.
+        status = app.config["BESSELETH_STATUS"]
+        if status.running_now:
+            return jsonify({"ok": False, "message": "Already running."}), 409
+        payload = request.get_json(silent=True) or {}
+        uncapped = bool(payload.get("all"))
+
+        with status._lock:
+            status.running_now = True
+        status.clear_cancel()
+        status.set_progress("Starting org location re-check...")
+
+        def _work():
+            try:
+                from ..enrich import reextract_org_locations
+
+                db = DB(config.db_path)
+                try:
+                    result = reextract_org_locations(
+                        config, db, cancel_event=status.cancel_event, progress_cb=status.set_progress,
+                        max_lookups=10**9 if uncapped else None,
+                    )
+                finally:
+                    db.close()
+                with status._lock:
+                    status.last_error = None
+                    status.last_enrich_result = result
+            except FetchCancelled:
+                with status._lock:
+                    status.last_error = "Org location re-check cancelled."
+            except Exception as e:
+                with status._lock:
+                    status.last_error = f"reextract-org-locations: {e}"
             finally:
                 status.clear_cancel()
                 status.set_progress(None)

@@ -935,15 +935,31 @@ def reextract_paper_orgs(
     instead of re-picking the same handful.
 
     Returns {"checked": int, "changed": int}."""
+    # Free, no-LLM cleanup pass first: a stored org that can only have
+    # come from a parsing bug since fixed (see
+    # paper_org.looks_like_malformed_paper_org's docstring — a leading
+    # "- \"" markdown-bullet artifact, an empty university before the
+    # comma) gets cleared outright rather than left to sit forever —
+    # the loop below only overwrites a stored value when it finds
+    # something NEW to replace it with, so without this a re-check run
+    # that can't do any better than before (no institution data, no LLM
+    # available) would silently leave known-garbage in place.
+    cleaned = 0
+    for row in db.papers_for_org_recheck():
+        if paper_org.looks_like_malformed_paper_org(row["org"]):
+            db.log_change(row["id"], row["title"], "papers", "org", row["org"], None, "cleared malformed org", item_url=row["url"])
+            db.sync_org(row["id"], None, None, None)
+            cleaned += 1
+
     if config.summarizer.get("backend", "groq") not in summarizer_mod.LLM_BACKENDS:
-        return {"checked": 0, "changed": 0}
+        return {"checked": 0, "changed": cleaned}
 
     rows = db.papers_for_org_recheck()
     cfg = config.raw.get("enrichment", {}) or {}
     budget = max_llm_calls if max_llm_calls is not None else cfg.get("max_items_per_run", 50)
 
     checked = 0
-    changed = 0
+    changed = cleaned
     for i, row in enumerate(rows):
         if budget <= 0:
             break
@@ -1110,7 +1126,7 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
         coords = geocode(location_text)
         if coords:
             lat, lon = coords
-            # Standardize to "City[, State], Country" regardless of
+            # Standardize to "Country[, State], City" regardless of
             # however the LLM happened to phrase its own guess ("London,
             # England", "London, UK", "London" alone all land here) —
             # falls back to the LLM's original text if the reverse
@@ -1348,6 +1364,63 @@ def _backfill_org_locations(
     return filled
 
 
+def reextract_org_locations(
+    config: Config, db: DB, cancel_event=None, progress_cb=None, max_lookups: int | None = None
+) -> dict:
+    """Retroactively force-re-resolves EVERY org's location, not just
+    ones missing one — the counterpart to reextract_paper_orgs/
+    reextract_org_names, for locations. _backfill_org_locations only
+    ever looks at orgs with NO location at all (db.orgs_missing_location),
+    so an org whose location was written wrong before a lookup-logic fix
+    (e.g. web_lookup._wikidata_location's entity-match validation) is
+    never revisited by the normal pass — it just sits wrong forever.
+    This is what actually goes back and re-checks already-resolved
+    orgs too, overwriting every item's location for that org
+    (db.set_org_location_all) when the re-check finds something
+    different, not just filling in blanks.
+
+    Same three-tier lookup as _backfill_org_locations (Wikidata/
+    Wikipedia, then a DuckDuckGo-search+LLM fallback) — re-running this
+    doesn't change WHICH tiers are tried, only WHETHER an already-set
+    org gets tried again at all. Bounded by `max_lookups` (defaults to
+    enrichment.max_org_lookups_per_run); ordered never-cache-checked-
+    first so repeated capped runs advance through the whole set instead
+    of re-picking the same handful. Returns {"checked": int, "changed": int}."""
+    cfg = config.raw.get("enrichment", {}) or {}
+    budget = max_lookups if max_lookups is not None else cfg.get("max_org_lookups_per_run", 8)
+
+    orgs = db.orgs_for_location_recheck()
+    checked = 0
+    changed = 0
+    for i, org in enumerate(orgs):
+        if budget <= 0:
+            break
+        check_cancelled(cancel_event)
+        budget -= 1
+        checked += 1
+
+        old_cached = db.get_org_location_cache(org)
+        old_label = old_cached["location_text"] if old_cached and old_cached["found"] else None
+
+        geocode_query = _institution_for_geocoding(org) or org
+        result = web_lookup.lookup_org_location(geocode_query) or _search_org_location(org, config.summarizer)
+        if result:
+            label, lat, lon = result
+            label = reverse_geocode(lat, lon) or label
+            if label != old_label:
+                db.log_change(None, org, "org", "location", old_label, label, "org location re-check")
+                changed += 1
+            db.set_org_location_all(org, label, lat, lon)
+            db.set_org_location_cache(org, found=True, location_text=label, lat=lat, lon=lon)
+        elif config.summarizer.get("backend", "groq") in summarizer_mod.LLM_BACKENDS:
+            db.set_org_location_cache(org, found=False)
+
+        if progress_cb:
+            progress_cb(f"Re-checking org locations... ({changed} changed)", i + 1, len(orgs))
+
+    return {"checked": checked, "changed": changed}
+
+
 def _backfill_contact_locations(
     config: Config, db: DB, max_lookups_override: int | None = None, cancel_event=None, progress_cb=None
 ) -> int:
@@ -1438,7 +1511,7 @@ def _standardize_location_names(db: DB) -> int:
 
 def standardize_location_labels(db: DB) -> dict:
     """One-time-or-whenever bulk reformat (Settings tab) of every
-    already-stored location_text to "City[, State], Country" via
+    already-stored location_text to "Country[, State], City" via
     reverse_geocode() — for a location stored before that standardizing
     was wired into the extraction paths themselves (see the two direct
     geocode() call sites and _backfill_org_locations/

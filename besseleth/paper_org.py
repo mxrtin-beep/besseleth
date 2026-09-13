@@ -107,11 +107,49 @@ def _build_prompt(
     )
 
 
+def looks_like_malformed_paper_org(org: str | None) -> bool:
+    """True for a stored org value that could only have come from a
+    parsing bug that has since been fixed (a leading "- \"" markdown-
+    bullet artifact, an empty/punctuation-only university before the
+    comma) — used by enrich.py's retroactive cleanup sweep to clear out
+    already-stored garbage from before _parse_response's cleaning/
+    validation existed, since a later re-resolution only overwrites a
+    stored value when it finds something NEW to replace it with, and
+    silently leaves old garbage in place forever otherwise."""
+    if not org:
+        return False
+    if not re.match(r"^[A-Za-z0-9]", org.strip()):
+        return True
+    if "," in org:
+        university, _, lab = org.partition(",")
+        if not re.search(r"[A-Za-z0-9]", university) or not re.search(r"[A-Za-z0-9]", lab):
+            return True
+    return False
+
+
 def _parse_response(raw: str) -> tuple[str | None, str | None]:
     """Returns (org, org_type). org_type is "academic" for the
     "<University>, ... Lab" shape, "industry" for a bare name — never
     guessed beyond what the shape itself already tells us."""
-    text = raw.strip().strip('"').strip().rstrip(".")
+    text = raw.strip()
+    # A weaker/local model doesn't reliably follow "ONLY the answer, no
+    # extra words" — it sometimes wraps the answer in a markdown bullet
+    # ("- \"University, X Lab\""), which used to become part of the
+    # "university" capture verbatim (real bug: this produced a stored
+    # org of literally "- \"İstanbul ... Üniversitesi, Karaçay Lab" that
+    # then got sent to the NIH RePORTER API and 400'd). Strip leading
+    # list markers/quotes and trailing quotes before matching, same idea
+    # as _clean_org_value's hedging-prose recovery in enrich.py.
+    text = re.sub(r"^[\s\-\*•>]+", "", text)
+    # None of the valid answer shapes legitimately contain a DOUBLE quote
+    # anywhere — a stray one (leading, trailing, or mid-string right
+    # before the comma, e.g. `"Penn State", Nguyen Lab`) is always
+    # leftover quoting artifact, never real content, so drop all of
+    # those outright. A single quote/apostrophe, unlike a double quote,
+    # can be real content ("O'Brien Lab", "Xi'an Jiaotong University"),
+    # so that one's only trimmed from the very ends, not mid-string.
+    text = text.replace('"', "").strip("'").strip()
+    text = text.rstrip(".")
     if not text or text.lower() in _NON_ANSWERS:
         return None, None
     match = _LAB_SHAPE_RE.match(text)

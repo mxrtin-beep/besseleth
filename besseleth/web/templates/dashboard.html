@@ -412,7 +412,8 @@
       <div><button class="btn" id="standardizeLocationsBtn">Standardize location names</button></div>
       <div><button class="btn" id="reextractOrgsBtn" title="News/blog only — re-derives just the org name for already-enriched items; modality/target/novelty/location are left untouched">Re-check org names (news/blog)</button></div>
       <div><button class="btn" id="reextractPaperOrgsBtn" title="Re-resolves org for already-stored papers using real OpenAlex author-institution data — fresh fetches already do this automatically">Re-resolve paper orgs</button></div>
-      <div><label style="font-weight:normal;"><input type="checkbox" id="reextractOrgsAll"> whole backlog (uncapped)</label></div>
+      <div><button class="btn" id="reextractOrgLocationsBtn" title="Force-rechecks EVERY org's location, not just ones missing one — fixes a location written wrong before a lookup fix, which the normal backfill never revisits on its own">Re-check org locations</button></div>
+      <div><label style="font-weight:normal;"><input type="checkbox" id="reextractOrgsAll"> whole backlog for any button above (uncapped)</label></div>
     </div>
     <p class="hint" id="dataMaintenanceResult"></p>
 
@@ -1101,7 +1102,7 @@ document.getElementById('standardizeLocationsBtn').onclick = async () => {
   const result = document.getElementById('dataMaintenanceResult');
   const btn = document.getElementById('standardizeLocationsBtn');
   btn.disabled = true;
-  result.textContent = 'Reformatting every stored location to "City[, State], Country"… one request per distinct location (~1/sec), can take a while for a large map.';
+  result.textContent = 'Reformatting every stored location to "Country[, State], City"… one request per distinct location (~1/sec), can take a while for a large map.';
   try {
     const res = await fetch('/api/locations/standardize', { method: 'POST' });
     const data = await res.json();
@@ -1171,6 +1172,37 @@ document.getElementById('reextractPaperOrgsBtn').onclick = async () => {
       : (s.last_error || 'Failed — see server log.');
     papersLoaded = false;
     if (orgsLoaded) { orgsLoaded = false; await loadOrgs(); }
+  } catch (e) {
+    result.textContent = 'Failed — see server log.';
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+document.getElementById('reextractOrgLocationsBtn').onclick = async () => {
+  const result = document.getElementById('dataMaintenanceResult');
+  const btn = document.getElementById('reextractOrgLocationsBtn');
+  btn.disabled = true;
+  const all = document.getElementById('reextractOrgsAll').checked;
+  result.textContent = all
+    ? 'Re-checking org locations for the whole backlog…'
+    : 'Re-checking org locations (Wikidata/Wikipedia, then a web-search fallback, capped per run)…';
+  try {
+    const started = await fetch('/api/enrich/reextract-org-locations', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ all }),
+    });
+    const startedData = await started.json();
+    if (!startedData.ok) {
+      result.textContent = startedData.message || 'Already running.';
+      return;
+    }
+    const s = await waitUntilDone();
+    const data = s.last_enrich_result;
+    result.textContent = data
+      ? `Checked ${data.checked} org(s): ${data.changed} location(s) changed. Run again to keep working through a larger backlog.`
+      : (s.last_error || 'Failed — see server log.');
+    if (orgsLoaded) { orgsLoaded = false; await loadOrgs(); }
+    if (mapLoaded) { mapLoaded = false; await loadMap(); }
   } catch (e) {
     result.textContent = 'Failed — see server log.';
   } finally {

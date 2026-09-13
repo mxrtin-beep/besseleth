@@ -10,7 +10,7 @@ Usage:
     python -m besseleth.cli social-add     [--url URL] [--text "..."]  # force-tag as social
     python -m besseleth.cli device-suggest --item-id <id>  # draft a devices.yaml entry from a scraped item
     python -m besseleth.cli company-refresh-stock          # update stock_price for companies.yaml's tickers (free)
-    python -m besseleth.cli standardize-locations            # reformat every stored location to "City[, State], Country" (free)
+    python -m besseleth.cli standardize-locations            # reformat every stored location to "Country[, State], City" (free)
     python -m besseleth.cli report-delete <report-id>       # e.g. report-delete 2026-09-01
     python -m besseleth.cli item-delete --item-id <id>       # remove a pasted (or any) item outright
     python -m besseleth.cli source-clear --source news       # delete EVERY item for a source (e.g. after a stale
@@ -24,6 +24,9 @@ Usage:
                                                               # OpenAlex author-institution data (paper_org.py) —
                                                               # fixes an existing backlog; fresh fetches resolve
                                                               # this automatically already — --all: uncapped
+    python -m besseleth.cli reextract-org-locations [--all]  # force-recheck EVERY org's location (not just
+                                                              # orgs missing one) — fixes a location written
+                                                              # wrong before a lookup fix; --all: uncapped
     python -m besseleth.cli serve          [--config config.yaml]   # run continuously per `schedule` in config.yaml
 
 `serve` is the "regularly updating" mode — start it once (e.g. as a
@@ -76,6 +79,7 @@ COMMANDS = [
     "device-suggest",
     "company-refresh-stock",
     "reextract-paper-orgs",
+    "reextract-org-locations",
     "standardize-locations",
     "report-delete",
     "item-delete",
@@ -198,6 +202,19 @@ def main(argv=None):
         finally:
             db.close()
         print(f"[cli] Re-resolved {result['checked']} paper(s): {result['changed']} org(s) changed.")
+        if not args.all:
+            print("[cli]   Run again (or with --all, uncapped) to keep working through the backlog.")
+        return
+
+    if args.command == "reextract-org-locations":
+        from .enrich import reextract_org_locations
+
+        db = DB(config.db_path)
+        try:
+            result = reextract_org_locations(config, db, max_lookups=10**9 if args.all else None)
+        finally:
+            db.close()
+        print(f"[cli] Re-checked {result['checked']} org(s): {result['changed']} location(s) changed.")
         if not args.all:
             print("[cli]   Run again (or with --all, uncapped) to keep working through the backlog.")
         return

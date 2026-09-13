@@ -1058,6 +1058,27 @@ class DB:
         ).fetchall()
         return [r[0] for r in rows]
 
+    def orgs_for_location_recheck(self) -> list[str]:
+        """Every distinct org with at least one item — unlike
+        orgs_missing_location(), this includes orgs that already HAVE a
+        location, since enrich.reextract_org_locations() needs to force-
+        recheck already-resolved-but-possibly-wrong ones too (the normal
+        backfill pass in _backfill_org_locations only ever looks at orgs
+        with no location at all, so a wrong one written before a lookup-
+        logic fix stays wrong forever without this). Ordered never-
+        cache-checked-first (org_location_cache.checked_at, NULLs first)
+        so a capped run advances through fresh orgs each time instead of
+        re-picking the same handful."""
+        self.conn.row_factory = sqlite3.Row
+        rows = self.conn.execute(
+            """SELECT i.org AS org, olc.checked_at AS checked_at FROM items i
+               LEFT JOIN org_location_cache olc ON olc.org = i.org
+               WHERE i.org IS NOT NULL AND i.org != ''
+               GROUP BY i.org
+               ORDER BY olc.checked_at IS NOT NULL, olc.checked_at ASC"""
+        ).fetchall()
+        return [r["org"] for r in rows]
+
     def clear_negative_location_cache(self) -> int:
         """Deletes every 'checked, nothing found' org_location_cache row
         (a real hit, found=1, is untouched) — used once to recover from

@@ -111,12 +111,12 @@ def geocode(location_text: str, cache_path: str | Path = ".geocode_cache.json") 
 
 def _format_address(address: dict) -> str | None:
     """Nominatim's `address` breakdown (from reverse geocoding, or a
-    forward search with addressdetails=1) into a standardized "City[,
-    State], Country" label — the state segment only when Nominatim
-    itself considers the place to have one at this administrative level
-    (most non-federal countries don't get one, e.g. UK/most of Europe —
-    that's what naturally produces "London, UK" for one and "Cambridge,
-    Massachusetts, USA" for the other, without hardcoding which
+    forward search with addressdetails=1) into a standardized "Country[,
+    State], City" label — the state segment only when Nominatim itself
+    considers the place to have one at this administrative level (most
+    non-federal countries don't get one, e.g. UK/most of Europe — that's
+    what naturally produces "UK, London" for one and "USA,
+    Massachusetts, Cambridge" for the other, without hardcoding which
     countries get a state segment). None if there's no city-level name
     to anchor on at all (open ocean, an unnamed area)."""
     city = (
@@ -128,13 +128,13 @@ def _format_address(address: dict) -> str | None:
     country = address.get("country") or ""
     country = _COUNTRY_ABBREVIATIONS.get(country.strip().lower(), country)
     state = address.get("state") or ""
-    parts = [p for p in (city, state, country) if p]
+    parts = [p for p in (country, state, city) if p]
     return ", ".join(parts) if parts else None
 
 
 def reverse_geocode(lat: float, lon: float, cache_path: str | Path = ".reverse_geocode_cache.json") -> str | None:
     """The inverse of geocode() — (lat, lon) back to a standardized
-    "City[, State], Country" label (see _format_address). Used to give
+    "Country[, State], City" label (see _format_address). Used to give
     every location_text a consistent format regardless of which tier
     produced the original guess (the item-extraction LLM, a web-search-
     plus-LLM lookup, or a Wikidata/Wikipedia entity label — none of
