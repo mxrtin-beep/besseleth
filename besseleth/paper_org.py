@@ -93,7 +93,9 @@ def _build_prompt(
         f'Paper title: "{title}"\n'
         f"{context_block}\n\n"
         f"Which specific {config.industry_name} lab or company produced this paper?{author_note} "
-        f"Answer with ONLY one of these exact shapes, nothing else — no explanation, no extra words:\n"
+        f"Answer with ONLY one of these exact shapes, nothing else — no explanation, no extra words, never a "
+        f'question mark or any other mark of hedging/uncertainty (use "Undetermined Lab"/"unknown" instead of '
+        f"hedging):\n"
         f'- "<University>, <Principal Investigator Last Name> Lab" if a specific PI-led academic lab is clear\n'
         f'- "<University>, <Lab Name> Lab" if the lab has its own name not tied to one PI\n'
         f'- "<University>, Undetermined Lab" if it is clearly academic work at a KNOWN university but no '
@@ -102,6 +104,11 @@ def _build_prompt(
         f'university/institution is NOT — use the literal words "Unknown Institution", never a placeholder '
         f'like "-", a blank, or punctuation for the university part\n'
         f'- "<Company Name>" ALONE (no "Lab" suffix, no university) if this is company/industry research\n'
+        f"IMPORTANT: the paper's title often names a technique, architecture, method, or model (e.g. "
+        f'"Transformer", "Mamba", "Diffusion") as its SUBJECT MATTER — that is what the paper is ABOUT, never '
+        f'the lab\'s own name, even though it fits grammatically into the "<Lab Name> Lab" shape. Only use a '
+        f"name explicitly given to you above (an author, institution, or corresponding-author note) for the "
+        f"lab/PI — never a term pulled from the title itself.\n"
         f'Never invent a name you are not reasonably confident in from what is actually given above — if you '
         f'genuinely cannot tell whether this is even academic or industry work, answer exactly "unknown".'
     )
@@ -109,15 +116,19 @@ def _build_prompt(
 
 def looks_like_malformed_paper_org(org: str | None) -> bool:
     """True for a stored org value that could only have come from a
-    parsing bug that has since been fixed (a leading "- \"" markdown-
-    bullet artifact, an empty/punctuation-only university before the
-    comma) — used by enrich.py's retroactive cleanup sweep to clear out
-    already-stored garbage from before _parse_response's cleaning/
-    validation existed, since a later re-resolution only overwrites a
-    stored value when it finds something NEW to replace it with, and
-    silently leaves old garbage in place forever otherwise."""
+    parsing/validation gap that has since been fixed (a leading "- \""
+    markdown-bullet artifact, an empty/punctuation-only university
+    before the comma, a literal "?" — the model hedging despite being
+    told not to, e.g. the reported "UC Berkeley?, Mamba Lab") — used by
+    enrich.py's retroactive cleanup sweep to clear out already-stored
+    garbage from before these checks existed, since a later
+    re-resolution only overwrites a stored value when it finds
+    something NEW to replace it with, and silently leaves old garbage
+    in place forever otherwise."""
     if not org:
         return False
+    if "?" in org:
+        return True
     if not re.match(r"^[A-Za-z0-9]", org.strip()):
         return True
     if "," in org:
@@ -151,6 +162,13 @@ def _parse_response(raw: str) -> tuple[str | None, str | None]:
     text = text.replace('"', "").strip("'").strip()
     text = text.rstrip(".")
     if not text or text.lower() in _NON_ANSWERS:
+        return None, None
+    # A "?" anywhere (e.g. the reported "UC Berkeley?, Mamba Lab") is the
+    # model hedging despite being told never to — explicitly told to use
+    # "Undetermined Lab"/"unknown" instead, so a "?" surviving means it
+    # ignored that; treat the whole answer as unreliable rather than
+    # storing a half-hedged guess.
+    if "?" in text:
         return None, None
     match = _LAB_SHAPE_RE.match(text)
     if match:
