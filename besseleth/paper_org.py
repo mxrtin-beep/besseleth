@@ -96,7 +96,11 @@ def _build_prompt(
         f"Answer with ONLY one of these exact shapes, nothing else — no explanation, no extra words:\n"
         f'- "<University>, <Principal Investigator Last Name> Lab" if a specific PI-led academic lab is clear\n'
         f'- "<University>, <Lab Name> Lab" if the lab has its own name not tied to one PI\n'
-        f'- "<University>, Undetermined Lab" if it is clearly academic work but no specific lab/PI is clear\n'
+        f'- "<University>, Undetermined Lab" if it is clearly academic work at a KNOWN university but no '
+        f'specific lab/PI is clear\n'
+        f'- "Unknown Institution, <PI/Lab Name> Lab" if a PI/lab name is reasonably clear but the specific '
+        f'university/institution is NOT — use the literal words "Unknown Institution", never a placeholder '
+        f'like "-", a blank, or punctuation for the university part\n'
         f'- "<Company Name>" ALONE (no "Lab" suffix, no university) if this is company/industry research\n'
         f'Never invent a name you are not reasonably confident in from what is actually given above — if you '
         f'genuinely cannot tell whether this is even academic or industry work, answer exactly "unknown".'
@@ -114,13 +118,19 @@ def _parse_response(raw: str) -> tuple[str | None, str | None]:
     if match:
         university = match.group("university").strip()
         lab = match.group("lab").strip()
-        if not university or not lab:
+        # A bare "-"/"—"/"." etc. passes a plain truthiness check (it's a
+        # non-empty string) but isn't a real university name — this is
+        # exactly what produced stored garbage like "- , Zhu Lab" before
+        # this check existed. Require at least one real letter/digit.
+        if not re.search(r"[A-Za-z0-9]", university) or not re.search(r"[A-Za-z0-9]", lab):
             return None, None
         return f"{university}, {lab}", "academic"
     # No ", ... Lab" shape — only valid as a bare company/org name, and
     # only if it actually reads like one (short, not a sentence the model
-    # wrote instead of following the format).
-    if 0 < len(text.split()) <= 6 and "\n" not in text:
+    # wrote instead of following the format, and not leading/trailing
+    # punctuation left over from a malformed "<blank>, X Lab" attempt
+    # that didn't even match the regex above).
+    if 0 < len(text.split()) <= 6 and "\n" not in text and re.match(r"^[A-Za-z0-9]", text):
         return text, "industry"
     return None, None
 
