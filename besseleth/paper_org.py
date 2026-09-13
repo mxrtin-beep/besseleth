@@ -54,26 +54,45 @@ _NON_ANSWERS = {"unknown", "n/a", "none", "null", "unclear", "not specified"}
 
 def _format_authors_with_institutions(authors_institutions: list[tuple[str, list[str], bool]]) -> str:
     parts = []
-    for name, institutions, is_corresponding in authors_institutions:
+    last_i = len(authors_institutions) - 1
+    for i, (name, institutions, is_corresponding) in enumerate(authors_institutions):
         inst_text = ", ".join(institutions) if institutions else "institution unknown"
-        marker = " [CORRESPONDING AUTHOR]" if is_corresponding else ""
+        markers = []
+        if is_corresponding:
+            markers.append("CORRESPONDING AUTHOR")
+        if i == 0 and last_i > 0:
+            markers.append("listed first")
+        if i == last_i and last_i > 0:
+            markers.append("listed last")
+        marker = f" [{', '.join(markers)}]" if markers else ""
         parts.append(f"{name} ({inst_text}){marker}")
     return "; ".join(parts) or "(no author information)"
 
 
-def _build_prompt(title: str, context_block: str, config: Config, has_corresponding: bool = False) -> str:
-    corresponding_note = (
-        " The author marked [CORRESPONDING AUTHOR] above is real metadata from the paper itself (who to "
-        "contact about it) and is usually the PI/lab head — weight them heavily for the PI/lab name, NOT "
-        "necessarily whichever author is listed first (a first-listed author is very often a student or "
-        "research assistant who did the hands-on work, not the lab's lead)."
-        if has_corresponding
-        else ""
-    )
+def _build_prompt(
+    title: str, context_block: str, config: Config, has_corresponding: bool = False, multiple_authors: bool = False
+) -> str:
+    if has_corresponding:
+        author_note = (
+            " The author marked CORRESPONDING AUTHOR above is real metadata from the paper itself (who to "
+            "contact about it) and is usually the PI/lab head — weight them heavily for the PI/lab name over "
+            "mere list position."
+        )
+    elif multiple_authors:
+        author_note = (
+            " No corresponding-author data is available for this one, so fall back on the general convention "
+            "in most STEM fields: the author listed LAST is usually the senior investigator/PI who leads the "
+            "lab, while the author listed FIRST is very often a student, postdoc, or research assistant who "
+            "did the hands-on work, not the lab's lead — prefer the last-listed author for the PI/lab name "
+            "unless something else in the title clearly points elsewhere. This is a convention, not a certainty "
+            "— use null/'Undetermined Lab' rather than force a confident answer you're not sure of."
+        )
+    else:
+        author_note = ""
     return (
         f'Paper title: "{title}"\n'
         f"{context_block}\n\n"
-        f"Which specific {config.industry_name} lab or company produced this paper?{corresponding_note} "
+        f"Which specific {config.industry_name} lab or company produced this paper?{author_note} "
         f"Answer with ONLY one of these exact shapes, nothing else — no explanation, no extra words:\n"
         f'- "<University>, <Principal Investigator Last Name> Lab" if a specific PI-led academic lab is clear\n'
         f'- "<University>, <Lab Name> Lab" if the lab has its own name not tied to one PI\n'
@@ -124,7 +143,10 @@ def resolve_paper_org(
         if authors_institutions
         else "(no author or institution information available)"
     )
-    prompt = _build_prompt(title, context_block, config, has_corresponding=has_corresponding)
+    prompt = _build_prompt(
+        title, context_block, config, has_corresponding=has_corresponding,
+        multiple_authors=len(authors_institutions) > 1,
+    )
     result = summarizer_mod._llm_generate(prompt, config.summarizer, timeout=60, num_thread=config.summarizer.get("num_thread"))
     if not result:
         return None, None
