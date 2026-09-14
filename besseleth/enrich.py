@@ -832,7 +832,7 @@ def _canonicalize_existing_orgs(db: DB) -> int:
 def sweep_invalid_orgs(config: Config, db: DB) -> int:
     """Free, no-LLM retroactive sweep: re-checks every distinct org value
     currently stored (news/blog path — papers have their own equivalent,
-    paper_org.looks_like_malformed_paper_org) against the same validity
+    paper_org.is_valid_stored_paper_org) against the same validity
     checks a fresh extraction applies (_clean_org_value,
     _looks_like_a_named_org), and clears whatever fails — a garbage org
     ("Frontiers", "BCI related researchers", a leftover "<...>" bracket)
@@ -1009,18 +1009,20 @@ def reextract_paper_orgs(
     instead of re-picking the same handful.
 
     Returns {"checked": int, "changed": int}."""
-    # Free, no-LLM cleanup pass first: a stored org that can only have
-    # come from a parsing bug since fixed (see
-    # paper_org.looks_like_malformed_paper_org's docstring — a leading
-    # "- \"" markdown-bullet artifact, an empty university before the
-    # comma) gets cleared outright rather than left to sit forever —
-    # the loop below only overwrites a stored value when it finds
+    # Free, no-LLM cleanup pass first: re-validates every stored org
+    # against paper_org.is_valid_stored_paper_org — literally the same
+    # validation a fresh resolution's output goes through, run back over
+    # what's already in the database, so nothing can be "valid when
+    # generated" but "invalid when stored" or vice versa. Clears
+    # anything that fails outright rather than leaving it to sit forever
+    # — the loop below only overwrites a stored value when it finds
     # something NEW to replace it with, so without this a re-check run
     # that can't do any better than before (no institution data, no LLM
     # available) would silently leave known-garbage in place.
     cleaned = 0
     for row in db.papers_for_org_recheck():
-        if paper_org.looks_like_malformed_paper_org(row["org"]):
+        authors = [name.strip() for name in (row["authors"] or "").split(",") if name.strip()]
+        if not paper_org.is_valid_stored_paper_org(row["org"], row["title"], authors):
             db.log_change(row["id"], row["title"], "papers", "org", row["org"], None, "cleared malformed org", item_url=row["url"])
             db.sync_org(row["id"], None, None, None)
             cleaned += 1

@@ -177,39 +177,38 @@ def _build_prompt(
     )
 
 
-def looks_like_malformed_paper_org(org: str | None) -> bool:
-    """True for a stored org value that could only have come from a
-    parsing/validation gap that has since been fixed (a leading "- \""
-    markdown-bullet artifact, an empty/punctuation-only university
-    before the comma, a literal un-substituted prompt placeholder like
-    "<University>, Deng Lab" or "Unknown Institution, Principal
-    Investigator Last Name Lab" — see _is_unsubstituted_placeholder)
-    — used by enrich.py's retroactive cleanup sweep to clear out
-    already-stored garbage from before these checks existed, since a
-    later re-resolution only overwrites a stored value when it finds
-    something NEW to replace it with, and silently leaves old garbage
-    in place forever otherwise."""
+def is_valid_stored_paper_org(org: str | None, title: str = "", authors: list[str] | None = None) -> bool:
+    """True if `org`, exactly as currently stored, is something a fresh
+    resolution could produce right now — checked by literally running it
+    back through the same validation real LLM output goes through
+    (_parse_response), rather than a separately hand-maintained "does
+    this look malformed" checklist. This used to be
+    looks_like_malformed_paper_org(), which re-implemented its own
+    subset of the real rules and had no way to even check the title-
+    hallucination case (a lab name lifted straight from the title, e.g.
+    "UC Berkeley?, Mamba Lab" on an unrelated paper) since that check
+    needs the title and the old function only ever took `org` — one
+    validator drifting out of sync with the other is exactly how a
+    value the live resolver would now reject could still sit there
+    forever, "cleaned up" only on paper. There is now exactly one set of
+    rules for what a valid paper org looks like, applied identically
+    whether the value was just generated or has been sitting in the
+    database for months.
+
+    `authors` (the same raw author-name list resolve_paper_org_with_fallback
+    would have had) is optional — pass it so a lab name that
+    legitimately IS an author's own name isn't flagged just because it
+    also happens to appear in the title."""
     if not org:
+        return True
+    parsed_org, parsed_type = _parse_response(org)
+    if parsed_org != org:
         return False
-    if not re.match(r"^[A-Za-z0-9]", org.strip()):
-        return True
-    if "," in org:
-        university, _, lab = org.partition(",")
-        if not re.search(r"[A-Za-z0-9]", university) or not re.search(r"[A-Za-z0-9]", lab):
-            return True
-        if _is_unsubstituted_placeholder(university) or _is_unsubstituted_placeholder(lab):
-            return True
-        if _is_slot_confused_university(university):
-            return True
-    elif _is_unsubstituted_placeholder(org):
-        return True
-    # A "?" anywhere is the model hedging in the stored answer itself —
-    # every valid answer shape is a plain name/phrase, never a question
-    # mark — so one surviving means this was never a real, confident
-    # answer to begin with.
-    if "?" in org:
-        return True
-    return False
+    if parsed_type == "academic" and "," in org:
+        authors_institutions = [(name, [], False) for name in (authors or [])]
+        if _lab_name_is_title_word(org.rpartition(",")[2], title, authors_institutions):
+            return False
+    return True
 
 
 def _parse_response(raw: str) -> tuple[str | None, str | None]:
