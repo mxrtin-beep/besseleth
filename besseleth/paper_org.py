@@ -78,6 +78,45 @@ def _is_unsubstituted_placeholder(segment: str) -> bool:
     return text.lower() in _PLACEHOLDER_TOKENS
 
 
+def _is_slot_confused_university(university: str) -> bool:
+    """"Undetermined" is only ever valid as the LAB slot ("<University>,
+    Undetermined Lab" — a known university but no specific lab/PI). A
+    model that instead writes "Undetermined, <Lab> Lab" has put the
+    same word in the wrong slot — still a real answer shape by every
+    other check (real letters on both sides of the comma), but not a
+    real university any more than "<University>" itself was."""
+    return university.strip().lower() == "undetermined"
+
+
+def _lab_name_is_title_word(lab: str, title: str, authors_institutions: list[tuple[str, list[str], bool]]) -> bool:
+    """True if `lab` (the parsed "... Lab" segment, minus that suffix)
+    is actually a word straight out of the paper's own title — the
+    prompt explicitly warns the model that a title often names the
+    paper's SUBJECT MATTER (a technique/architecture like "Mamba",
+    "Transformer") in a way that grammatically fits the "<Lab Name>
+    Lab" shape, but a weak/local model doesn't reliably follow that
+    warning (same reason the markdown-bullet and placeholder-echo bugs
+    exist). This is the deciding output-side check rather than relying
+    on the prompt alone: if the "lab" word also appears in the title
+    AND does not match any real author's name, it's the paper's own
+    subject matter reflected back, not a real lab — e.g. many
+    unrelated papers about the "Mamba" architecture all getting
+    labeled "Mamba Lab" regardless of their actual, wildly different
+    authors/institutions."""
+    core = re.sub(r"\s+lab$", "", lab.strip(), flags=re.IGNORECASE).strip().lower()
+    if not core:
+        return False
+    title_words = {w.lower() for w in re.findall(r"[A-Za-z][A-Za-z\-]*", title)}
+    if core not in title_words:
+        return False
+    author_words = {
+        w.lower()
+        for name, _, _ in authors_institutions
+        for w in re.findall(r"[A-Za-z][A-Za-z\-]*", name)
+    }
+    return core not in author_words
+
+
 def _format_authors_with_institutions(authors_institutions: list[tuple[str, list[str], bool]]) -> str:
     parts = []
     last_i = len(authors_institutions) - 1
@@ -160,7 +199,15 @@ def looks_like_malformed_paper_org(org: str | None) -> bool:
             return True
         if _is_unsubstituted_placeholder(university) or _is_unsubstituted_placeholder(lab):
             return True
+        if _is_slot_confused_university(university):
+            return True
     elif _is_unsubstituted_placeholder(org):
+        return True
+    # A "?" anywhere is the model hedging in the stored answer itself —
+    # every valid answer shape is a plain name/phrase, never a question
+    # mark — so one surviving means this was never a real, confident
+    # answer to begin with.
+    if "?" in org:
         return True
     return False
 
@@ -190,6 +237,13 @@ def _parse_response(raw: str) -> tuple[str | None, str | None]:
     text = text.rstrip(".")
     if not text or text.lower() in _NON_ANSWERS:
         return None, None
+    # A "?" anywhere is the model hedging despite the prompt never
+    # offering a hedge shape — it's told to use "Undetermined Lab"/
+    # "unknown" instead, so a "?" surviving means the rest of the
+    # answer is unreliable too; treat the whole thing as no answer
+    # rather than store a half-hedged guess.
+    if "?" in text:
+        return None, None
     match = _LAB_SHAPE_RE.match(text)
     if match:
         university = match.group("university").strip()
@@ -201,6 +255,8 @@ def _parse_response(raw: str) -> tuple[str | None, str | None]:
         if not re.search(r"[A-Za-z0-9]", university) or not re.search(r"[A-Za-z0-9]", lab):
             return None, None
         if _is_unsubstituted_placeholder(university) or _is_unsubstituted_placeholder(lab):
+            return None, None
+        if _is_slot_confused_university(university):
             return None, None
         return f"{university}, {lab}", "academic"
     # No ", ... Lab" shape — only valid as a bare company/org name, and
@@ -243,7 +299,10 @@ def resolve_paper_org(
     result = summarizer_mod._llm_generate(prompt, config.summarizer, timeout=60, num_thread=config.summarizer.get("num_thread"))
     if not result:
         return None, None
-    return _parse_response(result)
+    org, org_type = _parse_response(result)
+    if org_type == "academic" and "," in org and _lab_name_is_title_word(org.rpartition(",")[2], title, authors_institutions):
+        return None, None
+    return org, org_type
 
 
 def resolve_paper_org_via_search(title: str, config: Config) -> tuple[str | None, str | None]:
@@ -259,7 +318,13 @@ def resolve_paper_org_via_search(title: str, config: Config) -> tuple[str | None
     result = summarizer_mod._llm_generate(prompt, config.summarizer, timeout=60, num_thread=config.summarizer.get("num_thread"))
     if not result:
         return None, None
-    return _parse_response(result)
+    org, org_type = _parse_response(result)
+    # No author data at all reached this tier — there's nothing an
+    # overlapping word COULD legitimately be except the title's own
+    # subject matter, so no author-name exception here.
+    if org_type == "academic" and "," in org and _lab_name_is_title_word(org.rpartition(",")[2], title, []):
+        return None, None
+    return org, org_type
 
 
 def resolve_paper_org_with_fallback(
