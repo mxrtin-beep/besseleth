@@ -132,7 +132,21 @@ def fetch(config, days_back: int, max_results_per_keyword: int, mailto: str | No
     default. Combined with retry-with-backoff on a 429 (same pattern as
     arxiv_scraper's fix), this should get a deep backfill through without
     the sustained failure cascade you'd get from hammering the anonymous
-    pool with no pacing at all."""
+    pool with no pacing at all.
+
+    filter=type:article|review — OpenAlex classifies works by a real
+    `type` field (article, review, preprint, book-chapter, editorial,
+    letter, dataset, ...), distinct from its own subject/relevance
+    matching; a perspective/review piece that's still genuine, on-topic
+    field coverage (survey articles, "state of the field" pieces — real
+    Science Robotics/Nature Reviews-style content a briefing tool should
+    plausibly want) was type "review", not "article", and got silently
+    excluded before this covered both. Deliberately still excludes
+    "preprint" (arxiv_scraper already covers preprints — this scraper's
+    whole reason to exist is what's actually been formally published,
+    see the module docstring) and other non-article types (editorial,
+    letter, dataset, book-chapter, ...) that are rarely real research
+    content on their own."""
     cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days_back)).date()
     cutoff = cutoff_date.isoformat()
     items: list[Item] = []
@@ -146,7 +160,7 @@ def fetch(config, days_back: int, max_results_per_keyword: int, mailto: str | No
             check_cancelled(cancel_event)
             params = {
                 "search": keyword,
-                "filter": f"from_publication_date:{cutoff},type:article",
+                "filter": f"from_publication_date:{cutoff},type:article|review",
                 "sort": "publication_date:desc",
                 "per-page": max_results_per_keyword,
                 "page": page,
@@ -362,7 +376,7 @@ def fetch_known_lab_papers(
         while True:
             check_cancelled(cancel_event)
             params = {
-                "filter": f"author.id:{author_id},from_publication_date:{cutoff},type:article",
+                "filter": f"author.id:{author_id},from_publication_date:{cutoff},type:article|review",
                 "sort": "publication_date:desc",
                 "per-page": max_results_per_author,
                 "page": page,
