@@ -1385,6 +1385,16 @@ def _search_org_location(org: str, summarizer_cfg: dict) -> tuple[str, float, fl
     snippets = web_lookup.duckduckgo_search(f"{org} headquarters location city")
     if not snippets:
         return None
+    # A non-empty result set isn't the same as a RELEVANT one — a search
+    # that silently degraded (network trouble, no real match) can still
+    # come back with generic snippets about something else entirely.
+    # Feeding those to the LLM anyway doesn't produce "no answer", it
+    # produces a confident answer about whatever the snippets actually
+    # discuss, geocoded and stored as if it were real — require at least
+    # one snippet to actually mention the org's own name before trusting
+    # anything synthesized from them.
+    if not any(_squash(org) in _squash(s) for s in snippets):
+        return None
 
     prompt = (
         f'Based on these web search result snippets, what city and country is "{org}"\'s headquarters or main '

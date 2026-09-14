@@ -288,6 +288,25 @@ def _wikipedia_location(org_name: str) -> tuple[str, float, float] | None:
     except (TypeError, KeyError, IndexError):
         return None
 
+    # Same entity-match requirement _wikidata_location applies to its own
+    # fuzzy search, and for the same reason: srsearch is full-text
+    # search, not an exact lookup, so its top hit for an org that has no
+    # matching Wikipedia article can be some unrelated page that merely
+    # ranked highest for those search terms. Trusting whatever
+    # coordinates that page happens to have is exactly how orgs with no
+    # dedicated, well-matched article (Neuralink, Synchron, Blackrock
+    # Neurotech, ...) kept landing on the same wrong place (a small
+    # article's infobox coordinates, unrelated to the org) — this tier
+    # had no equivalent check while _wikidata_location's already did, so
+    # the bug kept happening here even after that fix. Require the found
+    # title to actually match org_name (squashed, and with a trailing
+    # Wikipedia disambiguator like "(company)" ignored) before trusting
+    # its coordinates; anything else is a clean miss that falls through
+    # to the next tier instead.
+    found = re.sub(r"\s*\([^)]*\)\s*$", "", title)
+    if _squash(found) != _squash(org_name):
+        return None
+
     global _last_request_at
     _throttle()
     try:

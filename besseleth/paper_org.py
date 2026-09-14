@@ -72,6 +72,39 @@ _PLACEHOLDER_TOKENS = {
 }
 
 
+def _snippets_mention_title(snippets: list[str], title: str) -> bool:
+    """True if at least one search snippet plausibly discusses THIS
+    paper, not just the general topic it's about — the same "the
+    grounding must actually be about the thing being asked, not merely
+    superficially related" principle web_lookup.py's Wikidata/Wikipedia
+    entity-match checks apply to org locations. A DuckDuckGo response
+    that comes back non-empty isn't necessarily a real match for the
+    quoted-title search that was asked for — an exact-phrase search that
+    silently degraded to a broad one (network trouble, no real hit) can
+    still return snippets about something else in the same field
+    entirely. Feeding those to the LLM anyway doesn't produce "no
+    answer" — it produces a confident answer about whatever the
+    snippets DO discuss, which for a well-covered field tends to be its
+    single most prominent name (this is how "Shenoy Lab" — a genuinely
+    famous BCI lab — ended up mislabeled onto several unrelated papers
+    by different real authors, the exact same failure shape as a title
+    word getting hallucinated into the lab-name slot). Requires a
+    several-word run of the actual title to appear in at least one
+    snippet; a title too short to build a reliable phrase from is let
+    through rather than blocked on this check alone."""
+    title_words = re.findall(r"[a-z0-9]+", title.lower())
+    if len(title_words) < 4:
+        return True
+    normalized_snippets = [re.sub(r"[^a-z0-9]+", " ", s.lower()) for s in snippets]
+    phrase_len = min(6, len(title_words))
+    for n in range(phrase_len, 3, -1):
+        for i in range(len(title_words) - n + 1):
+            phrase = " ".join(title_words[i : i + n])
+            if any(phrase in s for s in normalized_snippets):
+                return True
+    return False
+
+
 def _is_unsubstituted_placeholder(segment: str) -> bool:
     text = (segment or "").strip().strip("<>").strip()
     text = re.sub(r"\s+lab$", "", text, flags=re.IGNORECASE)
@@ -343,7 +376,7 @@ def resolve_paper_org_via_search(title: str, config: Config) -> tuple[str | None
     if config.summarizer.get("backend", "groq") not in summarizer_mod.LLM_BACKENDS:
         return None, None
     snippets = web_lookup.duckduckgo_search(f'"{title}" lab university')
-    if not snippets:
+    if not snippets or not _snippets_mention_title(snippets, title):
         return None, None
     context_block = "Web search snippets about this paper:\n" + "\n".join(f"- {s}" for s in snippets)
     prompt = _build_prompt(title, context_block, config)
