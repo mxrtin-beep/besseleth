@@ -259,14 +259,20 @@ _KNOWN_MEDIA_OUTLETS = {
     "hcplive", "pandaily", "36kr", "cgtn", "tech times", "techtimes",
     "rockefeller university press", "baishideng publishing group",
     "mercator institute for china studies", "the milelion", "milelion", "moomoo",
+    "frontiers", "freethink",
 }
-# "<Demonym/adjective> <generic role noun>" — e.g. "Chinese scientists",
-# "European researchers". Deliberately doesn't include "lab(s)"/"labs" or
-# "institute" etc. in the role-noun list: those are common LEGITIMATE org
-# name endings (e.g. "Merge Labs"), unlike "scientists"/"researchers"/
-# "team", which are never part of an actual org's name.
+# "<Demonym/adjective(s)> <generic role noun>" — e.g. "Chinese scientists",
+# "European researchers", "BCI related researchers". The description
+# before the role noun can be any number of words (not just one — a
+# single-adjective requirement missed multi-word descriptions like "BCI
+# related"), since the reasoning is about the role noun itself, not how
+# many words precede it: "scientists"/"researchers"/"team" etc. are never
+# part of an actual org's name no matter how they're qualified.
+# Deliberately doesn't include "lab(s)"/"labs" or "institute" etc. in the
+# role-noun list: those are common LEGITIMATE org name endings (e.g.
+# "Merge Labs"), unlike "scientists"/"researchers"/"team".
 _GENERIC_GROUP_RE = re.compile(
-    r"^(the\s+)?[A-Za-z]+\s+(scientists|researchers|engineers|team|teams|group|groups|authors|academics|"
+    r"^(the\s+)?[\w][\w\s\-/]*?\s+(scientists|researchers|engineers|team|teams|group|groups|authors|academics|"
     r"investigators|physicians|doctors|clinicians|developers|students|professors)$",
     re.IGNORECASE,
 )
@@ -470,7 +476,16 @@ def _clean_org_value(raw: str | None) -> str | None:
     trailing_paren = re.search(r"\s*\(([^)]*)\)\s*$", org)
     if trailing_paren:
         inner = trailing_paren.group(1).strip()
-        if any(phrase in inner.lower() for phrase in _HEDGING_PHRASES) or len(inner.split()) > 3:
+        # "UCSF/UCB speech decoder (academic)" — org_type (academic/
+        # industry/government/nonprofit/unknown) is its own separate
+        # field the model is asked for alongside org; a copy of it
+        # tacked onto the org string itself is never part of the name,
+        # regardless of word count.
+        if (
+            inner.lower() in {"academic", "industry", "company", "government", "nonprofit", "unknown"}
+            or any(phrase in inner.lower() for phrase in _HEDGING_PHRASES)
+            or len(inner.split()) > 3
+        ):
             org = org[: trailing_paren.start()].strip()
 
     # "Merge Labs [undisclosed]", "University of [not specified]" — a
@@ -572,6 +587,16 @@ def _looks_like_a_named_org(org: str, config: Config) -> bool:
     normalized = org.strip().lower()
     if not normalized:
         return False
+    # A real org name never starts with something other than a letter or
+    # digit — a leading "<" is the same "<University>"-style placeholder-
+    # echo failure paper_org.py guards against (a weak/local model
+    # occasionally outputs a bracketed template token literally instead
+    # of substituting a real value); other leading punctuation is the
+    # same "- \"..." markdown-bullet/quote artifact _clean_org_value
+    # already recovers from when it CAN, but this is the backstop for
+    # whatever's left over (or wasn't caught before this check existed).
+    if not re.match(r"^[A-Za-z0-9]", org.strip()):
+        return False
     non_orgs = (
         _NON_ORG_EXACT | _KNOWN_MEDIA_OUTLETS
         | {config.industry_name.strip().lower()} | {k.strip().lower() for k in config.keywords}
@@ -644,6 +669,23 @@ _LAB_NAME_RE = re.compile(
     r"(?:\s*(?:at|@|,|\()\s*(?P<inst>[^)]+?)\)?)?$",
     re.IGNORECASE,
 )
+# "Guiran Liu's lab", "Jane A. Smith's laboratory" — a full first+last
+# (+middle) PI name before a possessive "'s lab". _LAB_NAME_RE above only
+# ever captures ONE word as the PI name, so a full "First Last" name was
+# a silent no-op — it never matched either lab-name regex, so it never
+# got normalized into "<Institution>, <PI> Lab" at all, landing as its
+# own raw, un-normalized Orgs-table row instead. Multi-word is only
+# allowed here when the possessive "'s" marker is present: an
+# institution name is essentially never followed by a possessive "'s
+# lab" ("MIT's lab" isn't how anyone refers to a specific lab, unlike
+# "MIT, Smith Lab" or "Smith Lab at MIT"), so requiring it avoids
+# mistaking an institution-first name like "Stanford Shenoy Lab" (no
+# apostrophe) for a two-word PI.
+_MULTIWORD_PI_LAB_RE = re.compile(
+    r"^(?:the\s+)?(?P<pi>[A-Za-z][\w.-]*(?:\s+[A-Za-z][\w.-]*){1,3})'s\s+lab(?:oratory)?"
+    r"(?:\s*(?:at|@|,|\()\s*(?P<inst>[^)]+?)\)?)?$",
+    re.IGNORECASE,
+)
 # Same idea, institution named FIRST — "Stanford University, Shenoy Lab",
 # "Stanford University's Shenoy Lab". Without this, only the PI-first
 # ordering above got normalized, so these two (and "Shenoy Lab at
@@ -680,7 +722,9 @@ def _normalize_lab_name(org: str) -> str:
     `org` unchanged) for anything that doesn't match either lab shape —
     never guesses at a name it isn't confident is a PI-named lab."""
     stripped = org.strip()
-    match = _LAB_NAME_RE.match(stripped)
+    match = _MULTIWORD_PI_LAB_RE.match(stripped)
+    if not match:
+        match = _LAB_NAME_RE.match(stripped)
     inst = None
     if match:
         pi = match.group("pi").strip()
@@ -692,7 +736,7 @@ def _normalize_lab_name(org: str) -> str:
         pi = match.group("pi").strip()
         inst = match.group("inst")
     if pi.islower() or pi.isupper():
-        pi = pi.capitalize()  # leaves mixed-case names ("McCarthy") alone
+        pi = " ".join(w.capitalize() for w in pi.split())  # leaves mixed-case names ("McCarthy") alone
     inst = re.sub(r"\s+", " ", (inst or "").strip()).rstrip(".") or UNDETERMINED_LAB_INSTITUTION
     return f"{inst}, {pi} Lab"
 
@@ -785,6 +829,35 @@ def _canonicalize_existing_orgs(db: DB) -> int:
     return renamed
 
 
+def sweep_invalid_orgs(config: Config, db: DB) -> int:
+    """Free, no-LLM retroactive sweep: re-checks every distinct org value
+    currently stored (news/blog path — papers have their own equivalent,
+    paper_org.looks_like_malformed_paper_org) against the same validity
+    checks a fresh extraction applies (_clean_org_value,
+    _looks_like_a_named_org), and clears whatever fails — a garbage org
+    ("Frontiers", "BCI related researchers", a leftover "<...>" bracket)
+    only ever gets fixed when something NEW overwrites it, so without
+    this it would sit there forever between LLM re-checks, exactly like
+    papers' malformed-value sweep. Cheap (one query for the distinct
+    list, then an indexed exact-match update) — safe to run every call.
+    Called both from enrich_items_detailed() (every scheduled enrich
+    cycle) and from reextract_org_names() (the dashboard's "Re-check
+    org names" button), so a manual re-check actually clears this, not
+    just a periodic background run. Returns how many items were
+    cleared."""
+    existing_orgs = db.distinct_orgs()
+    invalid_orgs = []
+    for o in existing_orgs:
+        cleaned = _clean_org_value(o)
+        if cleaned is None:
+            invalid_orgs.append(o)
+        elif cleaned != o:
+            db.rename_org(o, cleaned)
+        elif not _looks_like_a_named_org(o, config):
+            invalid_orgs.append(o)
+    return db.clear_org_matches(invalid_orgs)
+
+
 def _reapply_known_lab_matches(config: Config, db: DB) -> int:
     """Free, no-LLM retroactive sweep: re-runs _match_known_lab() against
     every already-enriched item's own stored title/summary, and re-points
@@ -840,7 +913,8 @@ def reextract_org_names(
          correct while the real problem items were never reached).
 
     Returns {"checked": int, "changed": int, "llm_checked": int}."""
-    free_changed = _reapply_known_lab_matches(config, db)
+    swept = sweep_invalid_orgs(config, db)
+    free_changed = swept + _reapply_known_lab_matches(config, db)
 
     rows = db.enriched_items_for_org_recheck()
     cfg = config.raw.get("enrichment", {}) or {}
@@ -1763,28 +1837,7 @@ def enrich_items_detailed(
     if org_nulled:
         print(f"[enrich] Cleared org on {org_nulled} duplicate item(s) whose org disagreed with no clear majority.")
 
-    # Self-healing cleanup for items enriched before this guard existed
-    # (or before it covered vague-group phrasing like "Chinese scientists")
-    # — sweeps every org value currently stored against the same check a
-    # fresh enrichment applies. Cheap (one query for the distinct list,
-    # then an indexed exact-match update), safe to run every call.
-    #
-    # Also retroactively applies _clean_org_value (existing rows saved
-    # before that existed can still have the raw hedging-prose org value
-    # verbatim): a value it can't recover a name from joins invalid_orgs
-    # below (nulled); one it rewrites to something shorter gets renamed
-    # to the cleaned form instead of nulled.
-    existing_orgs = db.distinct_orgs()
-    invalid_orgs = []
-    for o in existing_orgs:
-        cleaned = _clean_org_value(o)
-        if cleaned is None:
-            invalid_orgs.append(o)
-        elif cleaned != o:
-            db.rename_org(o, cleaned)
-        elif not _looks_like_a_named_org(o, config):
-            invalid_orgs.append(o)
-    cleared = db.clear_org_matches(invalid_orgs)
+    cleared = sweep_invalid_orgs(config, db)
     if cleared:
         print(f"[enrich] Cleared {cleared} item(s) whose 'org' was actually the industry name/a keyword (or unrecoverable hedging text).")
 

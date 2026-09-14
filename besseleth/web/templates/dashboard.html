@@ -411,7 +411,8 @@
     <div class="controls" style="align-items:center; flex-wrap:wrap">
       <div><button class="btn" id="reextractOrgNamesBtn" title="Re-checks org names for every source (papers and news/blog)">Re-check org names</button></div>
       <div><button class="btn" id="refreshOrgLocationsBtn" title="Re-checks and standardizes every org's location">Re-check org locations</button></div>
-      <div><label style="font-weight:normal;"><input type="checkbox" id="reextractOrgsAll"> whole backlog (uncapped)</label></div>
+      <div><button class="btn" id="runBothMaintenanceBtn" title="Runs org names, then org locations, back to back — start it and walk away">Re-check names then locations</button></div>
+      <div><label style="font-weight:normal;"><input type="checkbox" id="reextractOrgsAll"> whole backlog (uncapped — leave this on to run overnight)</label></div>
     </div>
     <p class="hint" id="dataMaintenanceResult"></p>
 
@@ -1120,25 +1121,32 @@ document.getElementById('saveSettingsIndustryBtn').onclick = async () => {
 // in one click — used to be three separate buttons; nobody actually
 // wants to reason about which of "papers" vs "news/blog" vs "labs.yaml
 // re-match" applies right now, they just want stale org names fixed.
-document.getElementById('reextractOrgNamesBtn').onclick = async () => {
+// Pulled out of the button handler so the combined "names then
+// locations" button below can run this same logic without duplicating
+// it, then chain straight into the locations pass.
+async function runOrgNamesMaintenance(all) {
   const result = document.getElementById('dataMaintenanceResult');
+  result.textContent = 'Re-checking paper org names…';
+  const paperResult = await runMaintenancePass('/api/enrich/reextract-paper-orgs', all);
+  result.textContent = 'Re-checking news/blog org names…';
+  const newsResult = await runMaintenancePass('/api/enrich/reextract-orgs', all);
+  const changed = (paperResult?.changed || 0) + (newsResult?.changed || 0);
+  const checked = (paperResult?.checked || 0) + (newsResult?.checked || 0);
+  result.textContent = (paperResult || newsResult)
+    ? `Checked ${checked} item(s): ${changed} org(s) changed. Run again to keep working through a larger backlog.`
+    : 'Failed — see server log.';
+  papersLoaded = false;
+  if (orgsLoaded) { orgsLoaded = false; await loadOrgs(); }
+  return Boolean(paperResult || newsResult);
+}
+
+document.getElementById('reextractOrgNamesBtn').onclick = async () => {
   const btn = document.getElementById('reextractOrgNamesBtn');
   btn.disabled = true;
-  const all = document.getElementById('reextractOrgsAll').checked;
   try {
-    result.textContent = 'Re-checking paper org names…';
-    const paperResult = await runMaintenancePass('/api/enrich/reextract-paper-orgs', all);
-    result.textContent = 'Re-checking news/blog org names…';
-    const newsResult = await runMaintenancePass('/api/enrich/reextract-orgs', all);
-    const changed = (paperResult?.changed || 0) + (newsResult?.changed || 0);
-    const checked = (paperResult?.checked || 0) + (newsResult?.checked || 0);
-    result.textContent = (paperResult || newsResult)
-      ? `Checked ${checked} item(s): ${changed} org(s) changed. Run again to keep working through a larger backlog.`
-      : 'Failed — see server log.';
-    papersLoaded = false;
-    if (orgsLoaded) { orgsLoaded = false; await loadOrgs(); }
+    await runOrgNamesMaintenance(document.getElementById('reextractOrgsAll').checked);
   } catch (e) {
-    result.textContent = 'Failed — see server log.';
+    document.getElementById('dataMaintenanceResult').textContent = 'Failed — see server log.';
   } finally {
     btn.disabled = false;
   }
@@ -1146,21 +1154,44 @@ document.getElementById('reextractOrgNamesBtn').onclick = async () => {
 
 // Same idea for locations: force-relookup every org's location AND
 // standardize any leftover item-level location text, in one click.
-document.getElementById('refreshOrgLocationsBtn').onclick = async () => {
+async function runOrgLocationsMaintenance(all) {
   const result = document.getElementById('dataMaintenanceResult');
+  result.textContent = 'Re-checking org locations…';
+  const locResult = await runMaintenancePass('/api/enrich/reextract-org-locations', all);
+  result.textContent = 'Standardizing location formatting…';
+  const stdRes = await fetch('/api/locations/standardize', { method: 'POST' });
+  const stdData = await stdRes.json();
+  const changed = (locResult?.changed || 0) + (stdData.updated || 0);
+  result.textContent = `${locResult?.checked || 0} org(s) re-checked, ${stdData.checked || 0} location(s) reformatted: ${changed} total change(s). Run again to keep working through a larger backlog.`;
+  if (orgsLoaded) { orgsLoaded = false; await loadOrgs(); }
+  if (mapLoaded) { mapLoaded = false; await loadMap(); }
+}
+
+document.getElementById('refreshOrgLocationsBtn').onclick = async () => {
   const btn = document.getElementById('refreshOrgLocationsBtn');
+  btn.disabled = true;
+  try {
+    await runOrgLocationsMaintenance(document.getElementById('reextractOrgsAll').checked);
+  } catch (e) {
+    document.getElementById('dataMaintenanceResult').textContent = 'Failed — see server log.';
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+// "Start it and walk away overnight": org names (papers, then
+// news/blog), then org locations, back to back, in one click — check
+// "whole backlog" first so each pass actually finishes the backlog
+// instead of stopping at the default per-run cap.
+document.getElementById('runBothMaintenanceBtn').onclick = async () => {
+  const result = document.getElementById('dataMaintenanceResult');
+  const btn = document.getElementById('runBothMaintenanceBtn');
   btn.disabled = true;
   const all = document.getElementById('reextractOrgsAll').checked;
   try {
-    result.textContent = 'Re-checking org locations…';
-    const locResult = await runMaintenancePass('/api/enrich/reextract-org-locations', all);
-    result.textContent = 'Standardizing location formatting…';
-    const stdRes = await fetch('/api/locations/standardize', { method: 'POST' });
-    const stdData = await stdRes.json();
-    const changed = (locResult?.changed || 0) + (stdData.updated || 0);
-    result.textContent = `${locResult?.checked || 0} org(s) re-checked, ${stdData.checked || 0} location(s) reformatted: ${changed} total change(s). Run again to keep working through a larger backlog.`;
-    if (orgsLoaded) { orgsLoaded = false; await loadOrgs(); }
-    if (mapLoaded) { mapLoaded = false; await loadMap(); }
+    await runOrgNamesMaintenance(all);
+    await runOrgLocationsMaintenance(all);
+    result.textContent += ' — org names and locations both done.';
   } catch (e) {
     result.textContent = 'Failed — see server log.';
   } finally {

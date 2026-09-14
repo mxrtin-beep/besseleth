@@ -77,7 +77,7 @@ def geocode(location_text: str, cache_path: str | Path = ".geocode_cache.json") 
     try:
         resp = requests.get(
             NOMINATIM_URL,
-            params={"q": location_text, "format": "json", "limit": 1},
+            params={"q": location_text, "format": "json", "limit": 1, "accept-language": "en"},
             headers={"User-Agent": USER_AGENT},
             timeout=15,
         )
@@ -145,7 +145,14 @@ def reverse_geocode(lat: float, lon: float, cache_path: str | Path = ".reverse_g
     Returns None on any failure — callers should fall back to whatever
     label they already had rather than losing the location entirely."""
     global _last_request_at
-    key = f"{round(lat, 4)},{round(lon, 4)}"
+    # Cache key carries the language tag ("en") so a coordinate cached
+    # before English was forced (see accept-language below) doesn't
+    # shadow a fresh, correctly-localized lookup forever — a plain
+    # lat/lon key has no way to tell "cached in whatever language
+    # Nominatim felt like" apart from "cached in English", so it would
+    # otherwise keep serving a stale non-English label from disk no
+    # matter how many times a re-check ran at the DB level above this.
+    key = f"{round(lat, 4)},{round(lon, 4)}:en"
     path = Path(cache_path)
     cache = _load_cache(path)
     if key in cache:
@@ -158,7 +165,7 @@ def reverse_geocode(lat: float, lon: float, cache_path: str | Path = ".reverse_g
     try:
         resp = requests.get(
             NOMINATIM_REVERSE_URL,
-            params={"lat": lat, "lon": lon, "format": "json", "addressdetails": 1, "zoom": 14},
+            params={"lat": lat, "lon": lon, "format": "json", "addressdetails": 1, "zoom": 14, "accept-language": "en"},
             headers={"User-Agent": USER_AGENT},
             timeout=15,
         )
