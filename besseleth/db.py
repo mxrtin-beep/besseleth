@@ -992,12 +992,13 @@ class DB:
         self.conn.commit()
 
     def items_with_org(self) -> list[sqlite3.Row]:
-        """(id, org, url) for every item with an org set — for a per-item
-        cleanup check that can't be expressed as a plain org-name-list
-        match (e.g. comparing an item's own org against its own url's
-        hostname), unlike clear_org_matches()/clear_org_matches_by_id()."""
+        """(id, org, url, title) for every item with an org set — for a
+        per-item cleanup check that can't be expressed as a plain
+        org-name-list match (e.g. comparing an item's own org against
+        its own url's hostname, or its own title's trailing publisher-
+        suffix), unlike clear_org_matches()/clear_org_matches_by_id()."""
         self.conn.row_factory = sqlite3.Row
-        return list(self.conn.execute("SELECT id, org, url FROM items WHERE org IS NOT NULL").fetchall())
+        return list(self.conn.execute("SELECT id, org, url, title FROM items WHERE org IS NOT NULL").fetchall())
 
     def clear_org_matches_by_id(self, ids: list[str]) -> int:
         """Like clear_org_matches(), but for specific item ids rather

@@ -229,7 +229,7 @@ def _build_prompt(row, config: Config, context: str, author_affiliations: str = 
         "(funding rounds and IPOs go there, not here) — use {} if none of this applies\n"
         f"{affiliations_block}"
         f"{benchmarks_block}\n"
-        f"Item title: {row['title']}\nItem text: {(row['summary'] or '')[:1500]}\n\n"
+        f"Item title: {_strip_title_source_suffix(row['title'])[0]}\nItem text: {(row['summary'] or '')[:1500]}\n\n"
         f"Other recent items on the same topic, across every source type (for novelty comparison):\n{context}\n\n"
         "Respond with ONLY the JSON object, no other text."
     )
@@ -272,6 +272,19 @@ _KNOWN_MEDIA_OUTLETS = {
 _GENERIC_GROUP_RE = re.compile(
     r"^(the\s+)?[\w][\w\s\-/]*?\s+(scientists|researchers|engineers|team|teams|group|groups|authors|academics|"
     r"investigators|physicians|doctors|clinicians|developers|students|professors)$",
+    re.IGNORECASE,
+)
+# "Elon Musk's Company", "Jeff Bezos's Startup" — a real person's name
+# used as a stand-in for the actual company name, describing WHO owns/
+# founded it rather than naming it. Reject regardless of how famous the
+# person is; the real company name (Neuralink, say) is what "org" means
+# here, and a possessive-plus-generic-business-noun is never that name
+# itself, same reasoning as the vague-group-description check above.
+_POSSESSIVE_VAGUE_ORG_RE = re.compile(
+    r"^[\w.\-' ]+'s\s+(company|startup|firm|venture|business)$"
+    # Same idea, adjective-compound phrasing instead of a possessive —
+    # "Jeff Bezos-backed Startup", "Musk-founded Company".
+    r"|^[\w.\-' ]+-(backed|founded|led)\s+(company|startup|firm|venture|business)$",
     re.IGNORECASE,
 )
 
@@ -325,6 +338,31 @@ def _looks_like_a_real_location(location_text: str) -> bool:
     if not any(c.isalpha() for c in normalized):
         return False
     return True
+
+
+# A news headline reached via an aggregator (Google News, NewsAPI) is
+# routinely formatted "<actual headline> - <Publisher Name>" — the
+# publisher gets appended as a short, capitalized, proper-noun-shaped
+# tail, which is exactly the shape a real org name also takes. An LLM
+# extracting "org" from the raw title sometimes grabs that tail
+# thinking it found a clean, specific name, when it's actually who
+# published the story, not who it's about (e.g. "...brain implant that
+# can control technology - Moneycontrol.com"). Matches a trailing
+# " - Name", " | Name", " — Name" (1-6 words, starting with a capital
+# letter, no sentence-ending punctuation inside it — a real clause
+# wouldn't look like this).
+_TITLE_SOURCE_SUFFIX_RE = re.compile(r"\s+[-|–—]\s+([A-Z][\w.&']*(?:\s+[\w.&']+){0,5})$")
+
+
+def _strip_title_source_suffix(title: str) -> tuple[str, str | None]:
+    """Returns (title_with_suffix_removed, suffix_or_None) — see
+    _TITLE_SOURCE_SUFFIX_RE. Used both to keep this noise out of what
+    the LLM sees when extracting fields from the title, and to reject
+    an extracted org that turns out to just be that same suffix."""
+    match = _TITLE_SOURCE_SUFFIX_RE.search(title or "")
+    if not match:
+        return title, None
+    return title[: match.start()].rstrip(), match.group(1).strip()
 
 
 def _hostname(url: str) -> str:
@@ -563,7 +601,7 @@ def _looks_like_a_named_org(org: str, config: Config) -> bool:
     )
     if normalized in non_orgs or _squash(org) in {_squash(n) for n in _KNOWN_MEDIA_OUTLETS}:
         return False
-    if _GENERIC_GROUP_RE.match(org.strip()):
+    if _GENERIC_GROUP_RE.match(org.strip()) or _POSSESSIVE_VAGUE_ORG_RE.match(org.strip()):
         return False
     if normalized in _COUNTRIES or _COUNTRY_POSSESSIVE_RE.match(org.strip()):
         return False
@@ -634,25 +672,53 @@ def _normalize_org_name(org: str) -> str:
     return re.sub(r"\s+", " ", org.strip()).rstrip(".")
 
 
+# A trailing standalone "University"/"Univ"/"Univ."/"U" token — "MIT",
+# "Caltech" etc. never carry one of these to begin with, so this only
+# ever fires on an institution actually named that way.
+_TRAILING_UNIVERSITY_ABBREV_RE = re.compile(r"\buniv(?:ersity|\.)?\.?$|\bu\.?$", re.IGNORECASE)
+# Contains a full, unambiguous institution-type word — used to prefer
+# "Stanford University" as canonical over a same-institution "Stanford"
+# or "Stanford U" once they're known to be the same place (see
+# _institution_squash), rather than whichever spelling happened to be
+# seen/counted first.
+_FULL_INSTITUTION_NAME_RE = re.compile(r"\b(university|college|institute|polytechnic)\b", re.IGNORECASE)
+
+
+def _institution_squash(org: str) -> str:
+    """Same idea as _squash, but also strips a trailing "University"/
+    "Univ"/"Univ."/"U" token first — "Stanford", "Stanford University",
+    "Stanford Univ", and "Stanford U" otherwise squash to four
+    different strings despite being the same institution (a plain
+    _squash-based duplicate check catches a casing/spacing/punctuation
+    variant, but not this — an abbreviation isn't any of those)."""
+    stripped = _TRAILING_UNIVERSITY_ABBREV_RE.sub("", org.strip()).strip()
+    return _squash(stripped) or _squash(org)
+
+
 def _canonicalize_new_org(org: str, db: DB) -> str:
     """Normalizes formatting first (see _normalize_org_name), then: if
-    an org that's letters/digits-equivalent to the result (ignoring
-    case, spacing, punctuation) is already stored under different
-    casing/spacing, reuses that exact existing spelling instead of
-    adding a near-duplicate ("Ability Neurotech" vs "Ability NeuroTech"
-    from two separate LLM calls, which otherwise show up as two
-    different Orgs-table rows). Whichever spelling was seen first wins
-    and stays canonical going forward; a genuinely new org is stored
-    already in its normalized form rather than however this one mention
+    an org that's the same institution (ignoring case/spacing/
+    punctuation, AND a trailing "University"/"U" abbreviation — see
+    _institution_squash) is already stored under a different spelling,
+    reuses that one instead of adding a near-duplicate ("Ability
+    Neurotech" vs "Ability NeuroTech" from two separate LLM calls, or
+    "Stanford" vs "Stanford University", which otherwise show up as
+    separate Orgs-table rows). Among multiple existing matches, prefers
+    whichever spelling most fully names the institution (contains
+    "University"/"Institute"/etc.) over a bare/abbreviated one — so a
+    fuller name already on record always wins, not just whichever
+    happened to be stored first; a genuinely new org is stored already
+    in its normalized form rather than however this one mention
     happened to phrase it."""
     org = _normalize_org_name(org)
-    target = _squash(org)
+    target = _institution_squash(org)
     if not target:
         return org
-    for existing in db.distinct_orgs():
-        if _squash(existing) == target:
-            return existing
-    return org
+    matches = [existing for existing in db.distinct_orgs() if _institution_squash(existing) == target]
+    if not matches:
+        return org
+    full_matches = [m for m in matches if _FULL_INSTITUTION_NAME_RE.search(m)]
+    return (full_matches or matches)[0]
 
 
 def _self_referential_org_ids(db: DB) -> list[str]:
@@ -671,26 +737,51 @@ def _self_referential_org_ids(db: DB) -> list[str]:
     return ids
 
 
+def _title_suffix_org_ids(db: DB) -> list[str]:
+    """Retroactive counterpart to the title-source-suffix check in
+    _enrich_one/_reextract_org_via_llm (see _strip_title_source_suffix):
+    item ids whose stored `org` squashes to their OWN title's trailing
+    "- Publisher"-shaped suffix — the same "who reported it, not who
+    it's about" mistake as _self_referential_org_ids, just caught via
+    the title's own formatting instead of the item's url. Same reason
+    this can't be a plain org-name-list sweep: the same org string
+    could be legitimate on a different item whose title just doesn't
+    happen to end that way."""
+    ids = []
+    for row in db.items_with_org():
+        _, suffix = _strip_title_source_suffix(row["title"] or "")
+        if suffix and _squash(row["org"]) == _squash(suffix):
+            ids.append(row["id"])
+    return ids
+
+
 def _canonicalize_existing_orgs(db: DB) -> int:
     """Retroactive sweep: clusters every currently-stored org by the same
-    normalize-then-squash equivalence as _canonicalize_new_org(), and
-    renames every variant in a cluster to the normalized form of
-    whichever spelling has the most items (a tiebreak that's stable and
-    doesn't need any judgment call). Returns how many rows were renamed."""
+    institution-aware equivalence as _canonicalize_new_org() (so
+    "Stanford", "Stanford University", and "Stanford U" all land in one
+    cluster despite not being letters/digits-equivalent), and renames
+    every variant in a cluster to whichever spelling most fully names
+    the institution (contains "University"/"Institute"/etc.) — falling
+    back to whichever spelling has the most items only when no variant
+    in the cluster is a full name (a tiebreak that's stable and doesn't
+    need any judgment call either way). Returns how many rows were
+    renamed."""
     counts = db.org_item_counts()
     clusters: dict[str, list[str]] = {}
     for org in counts:
-        clusters.setdefault(_squash(_normalize_org_name(org)), []).append(org)
+        clusters.setdefault(_institution_squash(_normalize_org_name(org)), []).append(org)
 
     renamed = 0
     for variants in clusters.values():
         if len(variants) < 2:
             continue
-        # Prefer the most-used spelling, but always collapse its own
-        # whitespace to single spaces — a tie between "Ability Neurotech"
-        # and "Ability  NeuroTech" (double space) shouldn't crown the
-        # double-space one just because it happened to sort higher.
-        winner = re.sub(r"\s+", " ", max(variants, key=lambda o: counts[o])).strip()
+        full_variants = [v for v in variants if _FULL_INSTITUTION_NAME_RE.search(v)]
+        # Prefer the most-used spelling among whichever pool applies,
+        # but always collapse its own whitespace to single spaces — a
+        # tie between "Ability Neurotech" and "Ability  NeuroTech"
+        # (double space) shouldn't crown the double-space one just
+        # because it happened to sort higher.
+        winner = re.sub(r"\s+", " ", max(full_variants or variants, key=lambda o: counts[o])).strip()
         canonical = _normalize_org_name(winner)
         for variant in variants:
             if variant != canonical:
@@ -783,6 +874,8 @@ def reextract_org_names(
 
     Returns {"checked": int, "changed": int, "llm_checked": int}."""
     swept = sweep_invalid_orgs(config, db)
+    swept += db.clear_org_matches_by_id(_self_referential_org_ids(db))
+    swept += db.clear_org_matches_by_id(_title_suffix_org_ids(db))
     free_changed = swept + _reapply_known_lab_matches(config, db)
 
     rows = db.enriched_items_for_org_recheck()
@@ -827,7 +920,7 @@ def _reextract_org_via_llm(row, config: Config, db: DB) -> str | None:
     normal enrichment."""
     author_affiliations = _author_affiliations_block(row)
     prompt = (
-        f"Item title: {row['title']}\n"
+        f"Item title: {_strip_title_source_suffix(row['title'])[0]}\n"
         f"Item summary: {row['summary'] or '(none)'}\n"
         + (f"\nReal author affiliation data (from OpenAlex — factual, not a guess):\n{author_affiliations}\n" if author_affiliations else "")
         + '\nWhat SPECIFIC organization, company, university, or institution is this item actually ABOUT (never '
@@ -844,6 +937,14 @@ def _reextract_org_via_llm(row, config: Config, db: DB) -> str | None:
     if not org or not _looks_like_a_named_org(org, config):
         return None
     if _squash(org) == _squash(_hostname(row["url"] or "").split(".")[0]):
+        return None
+    _, title_suffix = _strip_title_source_suffix(row["title"])
+    if title_suffix and _squash(org) == _squash(title_suffix):
+        return None
+    # Same textual-grounding requirement as the main enrichment prompt's
+    # org field (see _enrich_one) — an org that isn't even present in
+    # the item's own text is a recalled guess, not an extraction.
+    if _squash(org) not in _squash(f"{row['title']} {row['summary'] or ''}"):
         return None
     return org
 
@@ -1063,6 +1164,18 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
     org = _clean_org_value(data.get("org"))
     if org and not _looks_like_a_named_org(org, config):
         org = None
+    # The item's own title/summary is the only real grounding this
+    # prompt is given — an org that doesn't even appear there isn't
+    # "extracted," it's recalled from the model's own training data,
+    # the same ungrounded-guess failure this whole org-extraction
+    # approach exists to avoid. This is what let a real but WRONG
+    # company (e.g. "Kernel" on an article actually about "Synchron" —
+    # both real, prominent names in the same space) through: shape-valid
+    # and even textually plausible, just not what this specific item is
+    # about. Squashed substring check, so "Neuralink Corp" vs. text
+    # saying plain "Neuralink" still counts as present.
+    if org and _squash(org) not in _squash(f"{row['title']} {row['summary'] or ''}"):
+        org = None
     if org and _squash(org) == _squash(_hostname(row["url"] or "").split(".")[0]):
         # The org the LLM named squashes to the same base name as the
         # item's OWN url's hostname — e.g. org="36Kr" on an item from
@@ -1072,6 +1185,18 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
         # feed (Google News search, NewsAPI) that was never itself
         # configured anywhere, so that list has no way to know about it.
         org = None
+    if org:
+        _, title_suffix = _strip_title_source_suffix(row["title"])
+        if title_suffix and _squash(org) == _squash(title_suffix):
+            # A news title reached via an aggregator is routinely
+            # "<headline> - <Publisher>" — see _strip_title_source_suffix.
+            # The prompt is built from the stripped title now, so this
+            # shouldn't happen from THIS call, but stays as a backstop
+            # for whatever slips through anyway (a weak/local model
+            # ignoring the stripped prompt text and recalling the raw
+            # title some other way, a stored value from before this
+            # existed getting re-validated, etc).
+            org = None
     known_lab = _match_known_lab(f"{row['title']} {row['summary'] or ''}", config)
     if known_lab:
         org = known_lab  # real ground truth (labs.yaml) wins over the LLM's own extraction
@@ -1744,6 +1869,11 @@ def enrich_items_detailed(
     cleared_self_ref = db.clear_org_matches_by_id(self_referential)
     if cleared_self_ref:
         print(f"[enrich] Cleared {cleared_self_ref} item(s) whose 'org' was actually who reported the story (its own url's publisher).")
+
+    title_suffix_matches = _title_suffix_org_ids(db)
+    cleared_title_suffix = db.clear_org_matches_by_id(title_suffix_matches)
+    if cleared_title_suffix:
+        print(f"[enrich] Cleared {cleared_title_suffix} item(s) whose 'org' was actually the publisher named at the end of its own title.")
 
     renamed = _canonicalize_existing_orgs(db)
     if renamed:
