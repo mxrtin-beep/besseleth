@@ -27,6 +27,7 @@ labs.yaml-based override) that was producing confidently wrong answers.
 """
 from __future__ import annotations
 
+import re
 import time
 from datetime import date, datetime, timedelta, timezone
 
@@ -40,6 +41,11 @@ from .util import stable_id, text_matches_keywords
 
 OPENALEX_WORKS_API = "https://api.openalex.org/works"
 MAX_RESULTS_PER_KEYWORD_HARD_CAP = 1000  # backfill safety valve — see fetch()'s docstring
+LAB_AUTHOR_RECHECK_DAYS = 30  # see _resolve_author_id's docstring
+
+
+def _squash(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", s.lower())
 
 
 def _reconstruct_abstract(inverted_index: dict | None) -> str:
@@ -249,15 +255,32 @@ def _resolve_author_id(db, pi: str, university: str, mailto: str | None, headers
     ever runs once per lab, not on every fetch. OpenAlex's author search
     is fuzzy/relevance-ranked, so the top hit for a common surname alone
     could easily be the wrong person entirely; requiring `university` to
-    actually appear (case-insensitively) somewhere in that author's own
-    listed institution history is the same "don't guess when ambiguous"
-    standard the rest of labs.yaml matching uses (see _match_known_lab).
-    Returns None (and caches that) if nothing sufficiently confident was
-    found — a common/short surname with no matching institution, or an
-    author OpenAlex just doesn't have."""
+    actually match somewhere in that author's own listed institution
+    history is the same "don't guess when ambiguous" standard the rest
+    of labs.yaml matching uses (see _match_known_lab). Matched on
+    squashed (lowercased, punctuation/whitespace-stripped) text in
+    EITHER direction — labs.yaml's own "Brown"/"Johns Hopkins" style
+    short form vs. OpenAlex's fuller "Brown University"/"Johns Hopkins
+    University" is a real, common mismatch a one-directional substring
+    check misses depending on which one happens to be the longer string.
+
+    Returns None if nothing sufficiently confident was found — a
+    common/short surname with no matching institution, or an author
+    OpenAlex just doesn't have. A None result is cached, but only for
+    LAB_AUTHOR_RECHECK_DAYS: caching it forever (the original behavior)
+    meant a genuinely well-known, prolific author could go permanently
+    unresolved — and so silently absent from every future fetch no
+    matter how many times labs.yaml is re-run — over a single
+    transient miss (an OpenAlex hiccup, a name/institution phrasing
+    that didn't match at the time), with no way to recover short of
+    manually clearing the row from the database."""
     cached = db.get_lab_author_cache(pi, university)
-    if cached:
+    if cached and cached["author_id"]:
         return cached["author_id"]
+    if cached and not cached["author_id"]:
+        checked_at = datetime.fromisoformat(cached["checked_at"])
+        if datetime.now(timezone.utc) - checked_at < timedelta(days=LAB_AUTHOR_RECHECK_DAYS):
+            return None  # checked recently, nothing found — don't re-probe yet
 
     try:
         resp = requests.get(
@@ -272,7 +295,7 @@ def _resolve_author_id(db, pi: str, university: str, mailto: str | None, headers
         print(f"[papers] OpenAlex author search failed for {pi!r} ({university}): {e}")
         return None  # NOT cached — a transient network failure shouldn't lock this lab out permanently
 
-    university_lower = university.lower()
+    university_squashed = _squash(university)
     for candidate in candidates:
         institutions = candidate.get("affiliations") or candidate.get("last_known_institutions") or []
         names = [
@@ -280,7 +303,10 @@ def _resolve_author_id(db, pi: str, university: str, mailto: str | None, headers
             if isinstance(inst.get("institution", inst), dict) else ""
             for inst in institutions
         ]
-        if any(university_lower in (n or "").lower() for n in names):
+        if any(
+            university_squashed and (university_squashed in (n_squashed := _squash(n or "")) or n_squashed in university_squashed)
+            for n in names
+        ):
             author_id = (candidate.get("id") or "").rsplit("/", 1)[-1]
             db.set_lab_author_cache(pi, university, author_id)
             return author_id
