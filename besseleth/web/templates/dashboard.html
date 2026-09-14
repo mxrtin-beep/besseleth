@@ -172,7 +172,7 @@
       <div><label for="pfSource">Source</label><select id="pfSource"><option value="">All</option></select></div>
       <div><label for="pfOrgType">Org type</label><select id="pfOrgType"><option value="">All</option></select></div>
       <div><label for="pfOrg">Org</label><input id="pfOrg" list="pfOrgList" placeholder="All" autocomplete="off"><datalist id="pfOrgList"></datalist></div>
-      <div><label for="pfModality" title="Multi-select — matches any of your item's tags, ctrl/cmd-click for more than one">Modality</label><select id="pfModality" multiple size="4"></select></div>
+      <div><label for="pfModality" title="Type to search; exact-string match against one of the item's tags">Modality</label><input id="pfModality" list="pfModalityList" placeholder="All" autocomplete="off"><datalist id="pfModalityList"></datalist></div>
       <div><label for="pfAuthor" title="Type to search — most prolific first; exact-string match, so &quot;J. Smith&quot; and &quot;John Smith&quot; count separately">Author</label><input id="pfAuthor" list="pfAuthorList" placeholder="All" autocomplete="off"><datalist id="pfAuthorList"></datalist></div>
       <div><label for="pfTarget">Therapeutic target</label><select id="pfTarget"><option value="">All</option></select></div>
       <div><label for="pfNovelty">Min novelty</label><select id="pfNovelty">
@@ -1480,14 +1480,7 @@ function populateSelect(id, values) {
 // `.value` still ends up exactly one of `values` once picked (or
 // whatever was typed, for filter code below to compare against).
 function populateDatalist(inputId, values) {
-  document.getElementById(`${inputId}List`).innerHTML = values.map(v => `<option value="${v}">`).join('');
-}
-
-function populateMultiSelect(id, values) {
-  const sel = document.getElementById(id);
-  const current = new Set(Array.from(sel.selectedOptions).map(o => o.value));
-  sel.innerHTML = values.map(v => `<option value="${v}">${v}</option>`).join('');
-  Array.from(sel.options).forEach(o => { if (current.has(o.value)) o.selected = true; });
+  document.getElementById(`${inputId}List`).innerHTML = values.map(v => `<option value="${esc(v)}">`).join('');
 }
 
 async function loadPapers() {
@@ -1497,15 +1490,15 @@ async function loadPapers() {
   populateSelect('pfSource', uniqueSorted(papers.map(p => p.source)));
   populateSelect('pfOrgType', uniqueSorted(papers.map(p => p.org_type)));
   populateDatalist('pfOrg', uniqueSorted(papers.map(p => p.org)));
-  populateMultiSelect('pfModality', uniqueSorted(papers.flatMap(modalityTags)));
+  populateDatalist('pfModality', uniqueSorted(papers.flatMap(modalityTags)));
   populateAuthorSelect(papers);
   populateSelect('pfTarget', uniqueSorted(papers.map(p => p.therapeutic_target)));
-  ['pfFrom', 'pfTo', 'pfSource', 'pfOrgType', 'pfModality', 'pfTarget', 'pfNovelty', 'pfSort']
+  ['pfFrom', 'pfTo', 'pfSource', 'pfOrgType', 'pfTarget', 'pfNovelty', 'pfSort']
     .forEach(id => document.getElementById(id).onchange = renderPapers);
   // 'input' (not 'change') for the datalist-backed text fields — fires as
   // soon as a suggestion is picked (or typing clears/matches), not only
   // on blur, so the table updates immediately the way the selects do.
-  ['pfOrg', 'pfAuthor'].forEach(id => document.getElementById(id).oninput = renderPapers);
+  ['pfOrg', 'pfModality', 'pfAuthor'].forEach(id => document.getElementById(id).oninput = renderPapers);
   renderPapers();
 }
 
@@ -1792,7 +1785,7 @@ function renderPapers(resetPage = true) {
   const source = document.getElementById('pfSource').value;
   const orgType = document.getElementById('pfOrgType').value;
   const org = document.getElementById('pfOrg').value;
-  const modalitySelected = Array.from(document.getElementById('pfModality').selectedOptions).map(o => o.value);
+  const modality = document.getElementById('pfModality').value;
   const author = document.getElementById('pfAuthor').value;
   const target = document.getElementById('pfTarget').value;
   const minNovelty = parseInt(document.getElementById('pfNovelty').value, 10);
@@ -1805,7 +1798,7 @@ function renderPapers(resetPage = true) {
     if (source && p.source !== source) return false;
     if (orgType && p.org_type !== orgType) return false;
     if (org && p.org !== org) return false;
-    if (modalitySelected.length && !modalityTags(p).some(t => modalitySelected.includes(t))) return false;
+    if (modality && !modalityTags(p).includes(modality)) return false;
     if (author && !authorList(p).includes(author)) return false;
     if (target && p.therapeutic_target !== target) return false;
     if (minNovelty === 5 && p.novelty_score !== 5) return false;

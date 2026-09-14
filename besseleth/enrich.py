@@ -123,9 +123,8 @@ def _build_prompt(row, config: Config, context: str, author_affiliations: str = 
     categorical_keys = ", ".join(m["key"] for m in config.trend_metrics if m.get("type") == "categorical")
 
     affiliations_block = (
-        f"\nReal author affiliation data (from OpenAlex — factual, not a guess; use it to help identify the org, "
-        f"e.g. pair an author's institution here with a lab/PI name mentioned in the item text, but still follow "
-        f'the "org" rule below — a bare institution name with no specific lab identified is still null):\n'
+        f"\nReal author affiliation data (from OpenAlex — factual, not a guess; use it to help identify the org "
+        f"below):\n"
         f"{author_affiliations}\n"
         if author_affiliations
         else ""
@@ -144,11 +143,10 @@ def _build_prompt(row, config: Config, context: str, author_affiliations: str = 
     return (
         f"Read this {row['source']} item about {config.industry_name}. Extract structured metadata as JSON with "
         "exactly these keys (use null for anything not present or unclear — never invent a number):\n"
-        f'  "org": the primary company, lab, or institution the item is about — a specific NAMED organization only, '
-        f'e.g. "Neuralink". For academic work, this means the specific LAB or research group — ideally named after '
-        f'its lead/PI (e.g. "Poon Lab", "the Shenoy Lab at Stanford", "Smith\'s lab") — NEVER the university alone '
-        f'("Stanford University", "MIT" by itself); if the text only names the university with no specific lab or '
-        f"lead identifiable, that's null, not the university's name. Use null for anything else too, INCLUDING: "
+        f'  "org": the primary company, university, research institute, or hospital the item is about — a specific '
+        f'NAMED organization only, e.g. "Neuralink", "Stanford University". Just the institution/company itself — '
+        f"do NOT try to name a specific lab, PI, or research group within it (that turned out to be too error-prone "
+        f"to extract reliably; the institution alone is what's tracked). Use null for anything else too, INCLUDING: "
         f'the general field/industry itself (never "{config.industry_name}" or a synonym for it); a vague group '
         f'description like "Chinese scientists", "researchers", "a team at the university", or "the company"; and '
         f'— a common mistake — the PUBLICATION or news outlet reporting the story (e.g. if the text says '
@@ -374,49 +372,16 @@ def _known_publisher_names(config: Config) -> set[str]:
     return names
 
 
-# A bare institution name with no specific lab/center/group named — e.g.
-# "Stanford University", "University of Tokyo", "MIT", "Caltech". Not
-# rejected if it also names a specific unit (contains "Lab"/"Institute"/
-# "Center"/etc, or a possessive — "Poon Lab", "Wu Tsai Neurosciences
-# Institute", "Smith's lab at Stanford" all pass through fine).
-_BARE_UNIVERSITY_RE = re.compile(
-    r"^(the\s+)?[\w&,.\-' ]+?\s(university|college)$"
-    r"|^university of [\w&,.\-' ]+$"
-    r"|^(mit|caltech|ucla|ucsd|ucsf|ucb)$",
-    re.IGNORECASE,
-)
-_SPECIFIC_UNIT_RE = re.compile(
-    r"\b(lab|labs|laboratory|institute|center|centre|group|department|dept|program|initiative)\b",
-    re.IGNORECASE,
-)
 # "Stanford-affiliated research group", "a Berkeley-affiliated research
-# lab" — names an institution but, just like a bare university name
-# alone, no actual specific lab/PI — the word "group"/"lab" here doesn't
-# save it from being too coarse the way it would for _SPECIFIC_UNIT_RE's
-# purpose elsewhere (that check assumes the specific-sounding word means
-# a REAL unit was named; "research group" here is exactly as generic as
-# "the university" itself, not a name).
+# lab" — names an institution but only vaguely/descriptively, not as a
+# clean, canonical institution name in its own right (contrast "Stanford
+# University", which is one) — reject it rather than let a slightly
+# different phrasing of "Stanford" fork into its own separate Orgs-table
+# row.
 _AFFILIATED_GROUP_RE = re.compile(
     r"-affiliated\s+research\s+(group|team|lab|labs|laboratory|center|centre)s?\s*$",
     re.IGNORECASE,
 )
-
-
-def _is_bare_university(org: str) -> bool:
-    """True for a university/college name with nothing more specific
-    attached — the point isn't that the university is wrong, it's that
-    it's too coarse to be useful as "the org": besseleth should track
-    the specific lab or research group (ideally named after its PI/
-    lead) doing the actual work, the way it already does for a company.
-    Only fires when the string is JUST the institution — any of the
-    words above, or a possessive ('X's lab'), means a specific unit was
-    already named and this doesn't apply."""
-    stripped = org.strip()
-    if not _BARE_UNIVERSITY_RE.match(stripped):
-        return False
-    if _SPECIFIC_UNIT_RE.search(stripped) or "'s" in stripped:
-        return False
-    return True
 
 
 _HEDGING_PHRASES = (
@@ -521,38 +486,31 @@ def _clean_org_value(raw: str | None) -> str | None:
 def _match_known_lab(text: str, config: Config) -> str | None:
     """Deterministic override using labs.yaml (see labs_store.py) — real
     ground truth you supplied, not an LLM guess. If `text` mentions a
-    listed PI's surname, AND (when the entry gives one) their university,
-    returns the canonical "<University>, <PI> Lab" form directly (same
-    format _normalize_lab_name produces — routed through it here too, so
-    labs.yaml-sourced and LLM-extracted orgs for the same lab always
-    match exactly rather than merely being squash-equivalent); checked
-    BEFORE the LLM's own org extraction is used, so a listed lab is
-    never subject to however the LLM's phrasing or normalization happens
-    to shake out. Requiring the university too (when given) is what
-    keeps a common surname from matching every item that happens to
-    share it — "Chen" alone proves nothing, "Chen" + "USC" is specific —
-    but only when labs.yaml itself has more than one PI with that
-    surname: a surname that's unique across labs.yaml is already
-    unambiguous ground truth on its own (e.g. a plain "Poon Lab" mention
-    with no "Stanford" anywhere in that item's own text otherwise fell
-    through to the LLM, which has no way to know which of the many real-
-    world Poon labs is meant, and correctly gave up with "Undetermined"
-    instead of guessing — this is what actually resolves it). None if
-    nothing in labs.yaml matches (falls through to the LLM's own
-    extraction, exactly as before labs.yaml existed)."""
+    listed PI's surname, returns that PI's own `university` directly
+    (org identity is the institution only now — see module docstring);
+    checked BEFORE the LLM's own org extraction is used, so a listed
+    lab is never subject to however the LLM's phrasing happens to shake
+    out. Requiring the university to also appear in the text is only
+    enforced when labs.yaml has more than one PI sharing that surname
+    (a common surname alone proves nothing — "Chen" + "USC" mentioned
+    together is specific; a unique surname across labs.yaml is already
+    unambiguous ground truth on its own). None if nothing in labs.yaml
+    matches, or the matching entry has no `university` set (nothing
+    useful to return), or the entry is ambiguous and the disambiguating
+    university text isn't present — falls through to the LLM's own
+    extraction, exactly as before labs.yaml existed."""
     surnames = [lab["pi"].split()[-1] for lab in config.labs if lab.get("pi")]
     for lab in config.labs:
-        pi = lab["pi"]
-        if not pi:
+        pi, university = lab.get("pi"), lab.get("university")
+        if not pi or not university:
             continue
         surname = pi.split()[-1]
         if not re.search(rf"\b{re.escape(surname)}\b", text, re.IGNORECASE):
             continue
-        university = lab["university"]
         ambiguous_surname = surnames.count(surname) > 1
-        if university and ambiguous_surname and not re.search(rf"\b{re.escape(university)}\b", text, re.IGNORECASE):
+        if ambiguous_surname and not re.search(rf"\b{re.escape(university)}\b", text, re.IGNORECASE):
             continue
-        return _normalize_lab_name(f"{pi} Lab at {university}" if university else f"{pi} Lab")
+        return university
     return None
 
 
@@ -568,9 +526,11 @@ def _looks_like_a_named_org(org: str, config: Config) -> bool:
     'n/a', ...), a vague group description ('Chinese scientists', 'the
     researchers'), one of besseleth's own configured news/blog feed
     sources (e.g. "Tech Times", "36Kr", "bioengineer.org") — those are
-    who reported the story, not who it's about — a bare university/
-    college name with no specific lab named (see _is_bare_university), or
-    a bare domain-shaped string ("bioengineer.org", "techtimes.com").
+    who reported the story, not who it's about — or a bare domain-shaped
+    string ("bioengineer.org", "techtimes.com"). A bare university/
+    college name ("Stanford University", "MIT") is explicitly VALID —
+    that's the whole point now (see module docstring: org identity is
+    the institution only, not a specific PI-led lab within it).
 
     That last check matters beyond the configured-feed list above: a news
     item reached via an aggregator/search feed (Google News search,
@@ -606,8 +566,6 @@ def _looks_like_a_named_org(org: str, config: Config) -> bool:
     if _GENERIC_GROUP_RE.match(org.strip()):
         return False
     if normalized in _COUNTRIES or _COUNTRY_POSSESSIVE_RE.match(org.strip()):
-        return False
-    if _is_bare_university(org):
         return False
     if _AFFILIATED_GROUP_RE.search(org.strip()):
         return False
@@ -664,114 +622,30 @@ def _clean_modality_tags(raw, config: Config) -> str:
     return ", ".join(tags) if tags else "unknown"
 
 
-_LAB_NAME_RE = re.compile(
-    r"^(?:the\s+)?(?P<pi>[A-Za-z][\w-]*)(?:'s)?\s+lab(?:oratory)?"
-    r"(?:\s*(?:at|@|,|\()\s*(?P<inst>[^)]+?)\)?)?$",
-    re.IGNORECASE,
-)
-# "Guiran Liu's lab", "Jane A. Smith's laboratory" — a full first+last
-# (+middle) PI name before a possessive "'s lab". _LAB_NAME_RE above only
-# ever captures ONE word as the PI name, so a full "First Last" name was
-# a silent no-op — it never matched either lab-name regex, so it never
-# got normalized into "<Institution>, <PI> Lab" at all, landing as its
-# own raw, un-normalized Orgs-table row instead. Multi-word is only
-# allowed here when the possessive "'s" marker is present: an
-# institution name is essentially never followed by a possessive "'s
-# lab" ("MIT's lab" isn't how anyone refers to a specific lab, unlike
-# "MIT, Smith Lab" or "Smith Lab at MIT"), so requiring it avoids
-# mistaking an institution-first name like "Stanford Shenoy Lab" (no
-# apostrophe) for a two-word PI.
-_MULTIWORD_PI_LAB_RE = re.compile(
-    r"^(?:the\s+)?(?P<pi>[A-Za-z][\w.-]*(?:\s+[A-Za-z][\w.-]*){1,3})'s\s+lab(?:oratory)?"
-    r"(?:\s*(?:at|@|,|\()\s*(?P<inst>[^)]+?)\)?)?$",
-    re.IGNORECASE,
-)
-# Same idea, institution named FIRST — "Stanford University, Shenoy Lab",
-# "Stanford University's Shenoy Lab". Without this, only the PI-first
-# ordering above got normalized, so these two (and "Shenoy Lab at
-# Stanford") landed in three different Orgs-table rows instead of one —
-# exactly the kind of duplicate-by-phrasing this whole mechanism exists
-# to prevent, just missed for the other word order.
-_INSTITUTION_FIRST_LAB_RE = re.compile(
-    r"^(?P<inst>[A-Za-z][\w&.\-' ]*?)(?:'s|\s*,)\s+(?:the\s+)?(?P<pi>[A-Za-z][\w-]*)(?:'s)?\s+lab(?:oratory)?$",
-    re.IGNORECASE,
-)
-
-
-UNDETERMINED_LAB_INSTITUTION = "Undetermined"
-
-
-def _normalize_lab_name(org: str) -> str:
-    """Collapses the handful of ways a PI-named lab gets phrased — "the
-    Shenoy Lab at Stanford", "Shenoy's lab at Stanford", "Shenoy Lab",
-    "the Shenoy Laboratory", "Shenoy Lab (Stanford)", "Shenoy Lab,
-    Stanford", "Stanford University, Shenoy Lab", "Stanford University's
-    Shenoy Lab" — into ONE consistent "<Institution>, <PI> Lab" form,
-    institution always first, so the same lab doesn't fork into multiple
-    Orgs-table rows just because the LLM (or the source text) phrased it
-    differently from one item to the next — and so every lab org reads
-    the same shape at a glance instead of some being "X Lab at Y" and
-    others "Y, X Lab". When no institution was ever given, that segment
-    becomes the literal word "Undetermined" (see
-    UNDETERMINED_LAB_INSTITUTION) rather than being dropped — "Shenoy
-    Lab" alone is ambiguous with every other Shenoy across every
-    university; "Undetermined, Shenoy Lab" says plainly that the
-    institution just hasn't been established yet, and is one exact
-    string away from being merged into the real thing once it is
-    (rename_org/merge_org, same as any other org). A no-op (returns
-    `org` unchanged) for anything that doesn't match either lab shape —
-    never guesses at a name it isn't confident is a PI-named lab."""
-    stripped = org.strip()
-    match = _MULTIWORD_PI_LAB_RE.match(stripped)
-    if not match:
-        match = _LAB_NAME_RE.match(stripped)
-    inst = None
-    if match:
-        pi = match.group("pi").strip()
-        inst = match.group("inst")
-    else:
-        match = _INSTITUTION_FIRST_LAB_RE.match(stripped)
-        if not match:
-            return org
-        pi = match.group("pi").strip()
-        inst = match.group("inst")
-    if pi.islower() or pi.isupper():
-        pi = " ".join(w.capitalize() for w in pi.split())  # leaves mixed-case names ("McCarthy") alone
-    inst = re.sub(r"\s+", " ", (inst or "").strip()).rstrip(".") or UNDETERMINED_LAB_INSTITUTION
-    return f"{inst}, {pi} Lab"
-
-
-def _institution_for_geocoding(org: str) -> str | None:
-    """The parent institution behind a PI-named lab (see
-    _normalize_lab_name) — e.g. "Stanford" out of "Shenoy Lab at
-    Stanford" — for geocoding to use INSTEAD of the full lab name. A
-    specific PI's lab is essentially never itself in Wikidata/Wikipedia
-    (only the university is), so looking up the lab string directly
-    routinely fails and falls through to the slower/less reliable web-
-    search-plus-LLM tier for something that has one well-known, easy-to-
-    find physical location. None if `org` isn't a normalizable lab name,
-    or normalizes to one with no real (established) institution part —
-    "Undetermined, ... Lab" included, since geocoding the literal word
-    "Undetermined" would be worse than not trying at all."""
-    canonical = _normalize_lab_name(org)
-    match = re.match(r"^(.+), .+ Lab$", canonical)
-    if not match or match.group(1) == UNDETERMINED_LAB_INSTITUTION:
-        return None
-    return match.group(1).strip()
+def _normalize_org_name(org: str) -> str:
+    """Collapses whitespace and a trailing period — org identity is just
+    the institution/company name now (see module docstring: naming a
+    specific PI-led lab within it turned out to be too error-prone, and
+    was removed), so there's no lab-shape phrasing left to parse here
+    the way there used to be; this just tidies up formatting noise
+    ("Ability  NeuroTech" double-space, a trailing ".") so the same
+    institution mentioned slightly differently doesn't fork into
+    separate Orgs-table rows."""
+    return re.sub(r"\s+", " ", org.strip()).rstrip(".")
 
 
 def _canonicalize_new_org(org: str, db: DB) -> str:
-    """Normalizes lab-name phrasing first (see _normalize_lab_name), then:
-    if an org that's letters/digits-equivalent to the result (ignoring
+    """Normalizes formatting first (see _normalize_org_name), then: if
+    an org that's letters/digits-equivalent to the result (ignoring
     case, spacing, punctuation) is already stored under different
     casing/spacing, reuses that exact existing spelling instead of
     adding a near-duplicate ("Ability Neurotech" vs "Ability NeuroTech"
     from two separate LLM calls, which otherwise show up as two
     different Orgs-table rows). Whichever spelling was seen first wins
-    and stays canonical going forward; a genuinely new lab is stored
+    and stays canonical going forward; a genuinely new org is stored
     already in its normalized form rather than however this one mention
     happened to phrase it."""
-    org = _normalize_lab_name(org)
+    org = _normalize_org_name(org)
     target = _squash(org)
     if not target:
         return org
@@ -799,16 +673,14 @@ def _self_referential_org_ids(db: DB) -> list[str]:
 
 def _canonicalize_existing_orgs(db: DB) -> int:
     """Retroactive sweep: clusters every currently-stored org by the same
-    normalize-then-squash equivalence as _canonicalize_new_org() — so
-    "the Shenoy Lab at Stanford" and "Shenoy's lab at Stanford" land in
-    the same cluster even though they're not letters/digits-equivalent —
-    and renames every variant in a cluster to the normalized form of
+    normalize-then-squash equivalence as _canonicalize_new_org(), and
+    renames every variant in a cluster to the normalized form of
     whichever spelling has the most items (a tiebreak that's stable and
     doesn't need any judgment call). Returns how many rows were renamed."""
     counts = db.org_item_counts()
     clusters: dict[str, list[str]] = {}
     for org in counts:
-        clusters.setdefault(_squash(_normalize_lab_name(org)), []).append(org)
+        clusters.setdefault(_squash(_normalize_org_name(org)), []).append(org)
 
     renamed = 0
     for variants in clusters.values():
@@ -817,12 +689,9 @@ def _canonicalize_existing_orgs(db: DB) -> int:
         # Prefer the most-used spelling, but always collapse its own
         # whitespace to single spaces — a tie between "Ability Neurotech"
         # and "Ability  NeuroTech" (double space) shouldn't crown the
-        # double-space one just because it happened to sort higher — then
-        # normalize it, so the cluster settles on a clean "<PI> Lab at
-        # <institution>" form regardless of which raw phrasing had the
-        # most items.
+        # double-space one just because it happened to sort higher.
         winner = re.sub(r"\s+", " ", max(variants, key=lambda o: counts[o])).strip()
-        canonical = _normalize_lab_name(winner)
+        canonical = _normalize_org_name(winner)
         for variant in variants:
             if variant != canonical:
                 renamed += db.rename_org(variant, canonical)
@@ -961,10 +830,10 @@ def _reextract_org_via_llm(row, config: Config, db: DB) -> str | None:
         f"Item title: {row['title']}\n"
         f"Item summary: {row['summary'] or '(none)'}\n"
         + (f"\nReal author affiliation data (from OpenAlex — factual, not a guess):\n{author_affiliations}\n" if author_affiliations else "")
-        + '\nWhat SPECIFIC organization, company, lab, or institution is this item actually ABOUT (never who '
-        'merely reported/published it)? Prefer the most specific named entity — a PI-named lab or a specific '
-        'company/institute, never a bare university/generic group description ("Chinese scientists", "the '
-        'researchers"). Respond with ONLY the name, or exactly "unknown" if none is clearly named — never guess.'
+        + '\nWhat SPECIFIC organization, company, university, or institution is this item actually ABOUT (never '
+        'who merely reported/published it)? Just the institution/company itself — do NOT try to name a specific '
+        'lab, PI, or research group within it. Never a generic group description ("Chinese scientists", "the '
+        'researchers") either. Respond with ONLY the name, or exactly "unknown" if none is clearly named — never guess.'
     )
     result = summarizer_mod._llm_generate(
         prompt, config.summarizer, timeout=60, num_thread=config.summarizer.get("num_thread")
@@ -1012,14 +881,13 @@ def reextract_paper_orgs(
     # Free, no-LLM normalization pass first: runs every stored org back
     # through paper_org.normalize_stored_paper_org — the exact same
     # parsing/validation real LLM output goes through. A value that only
-    # needs COSMETIC cleanup (a leading "- \"" artifact, an empty
-    # university salvaged into "Unknown Institution", inconsistent "Lab"
-    # capitalization) gets fixed here for free, no LLM call, since the
-    # real answer was already sitting right there in the stored text.
-    # Deliberately does NOT clear anything to null by itself — a value
-    # normalize_stored_paper_org can't recover anything from (a
-    # placeholder echo, a title-hallucinated lab name, a bare hedge)
-    # just stays as-is here and falls through to the budgeted loop
+    # needs COSMETIC cleanup (a leading "- \"" artifact) gets fixed here
+    # for free, no LLM call, since the real answer was already sitting
+    # right there in the stored text. Deliberately does NOT clear
+    # anything to null by itself — a value normalize_stored_paper_org
+    # can't recover anything from (a placeholder echo, a title-
+    # hallucinated name, a bare hedge) just stays as-is here and falls
+    # through to the budgeted loop
     # below, which makes an ACTUAL fresh resolution attempt (real
     # institution data, then the web-search fallback) before ever
     # giving up on it — null is the last resort after really trying,
@@ -1074,11 +942,11 @@ def reextract_paper_orgs(
             # A real resolution attempt — the same institution data plus
             # DuckDuckGo fallback a fresh fetch would use — just came up
             # with nothing better, and what's stored (a title-
-            # hallucinated lab name, a leftover placeholder, a bare
-            # hedge) is something normalize_stored_paper_org couldn't
-            # recover a real answer from either. Only NOW, after
-            # actually trying, does clearing it to null become the
-            # right move — an honest "we don't know" beats confidently
+            # hallucinated name, a leftover placeholder, a bare hedge)
+            # is something normalize_stored_paper_org couldn't recover
+            # a real answer from either. Only NOW, after actually
+            # trying, does clearing it to null become the right move —
+            # an honest "we don't know" beats confidently
             # showing something wrong, but it's the last resort, not
             # the first response to an invalid value.
             db.log_change(row["id"], row["title"], "papers", "org", row["org"], None, "cleared unrecoverable org (re-resolution found nothing better)", item_url=row["url"])
@@ -1462,14 +1330,10 @@ def _backfill_org_locations(
         attempted += 1
         if progress_cb:
             progress_cb(f"Looking up location for {org}...", None, None)
-        # A PI-named lab is essentially never itself in Wikidata — its
-        # parent institution always is, and that's a perfectly good,
-        # well-established physical location to plot a lab at (see
-        # _institution_for_geocoding's docstring). Try that first; fall
-        # back to the org's own name (then the web-search+LLM tier) if
-        # `org` doesn't parse as a lab name at all.
-        geocode_query = _institution_for_geocoding(org) or org
-        result = web_lookup.lookup_org_location(geocode_query) or _search_org_location(org, config.summarizer)
+        # org IS the institution now (see module docstring) — no more
+        # PI-named-lab string to strip down to its parent institution
+        # first, unlike before this was simplified.
+        result = web_lookup.lookup_org_location(org) or _search_org_location(org, config.summarizer)
         if result:
             label, lat, lon = result
             label = reverse_geocode(lat, lon) or label  # standardize regardless of which tier found it
@@ -1526,8 +1390,7 @@ def reextract_org_locations(
         old_cached = db.get_org_location_cache(org)
         old_label = old_cached["location_text"] if old_cached and old_cached["found"] else None
 
-        geocode_query = _institution_for_geocoding(org) or org
-        result = web_lookup.lookup_org_location(geocode_query) or _search_org_location(org, config.summarizer)
+        result = web_lookup.lookup_org_location(org) or _search_org_location(org, config.summarizer)
         if result:
             label, lat, lon = result
             label = reverse_geocode(lat, lon) or label
@@ -1583,8 +1446,7 @@ def _backfill_contact_locations(
         attempted += 1
         if progress_cb:
             progress_cb(f"Looking up location for {org}...", None, None)
-        geocode_query = _institution_for_geocoding(org) or org
-        result = web_lookup.lookup_org_location(geocode_query) or _search_org_location(org, config.summarizer)
+        result = web_lookup.lookup_org_location(org) or _search_org_location(org, config.summarizer)
         if result:
             label, lat, lon = result
             label = reverse_geocode(lat, lon) or label

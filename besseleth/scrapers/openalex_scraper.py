@@ -17,8 +17,8 @@ and, when found here, uses THIS module's (richer, real-affiliation)
 version instead of storing a second, thinner arXiv-sourced row for the
 same paper — see arxiv_scraper.fetch()'s docstring.
 
-Org identity (which specific lab/company produced a paper) is resolved
-HERE, at fetch time, not in the later general enrichment pass — see
+Org identity (which specific institution/company produced a paper) is
+resolved HERE, at fetch time, not in the later general enrichment pass — see
 paper_org.py's module docstring for why (the real author-institution
 data this needs only exists in the API response right now, at fetch
 time; it's gone by the time general enrichment runs). This replaced an
