@@ -177,38 +177,54 @@ def _build_prompt(
     )
 
 
-def is_valid_stored_paper_org(org: str | None, title: str = "", authors: list[str] | None = None) -> bool:
-    """True if `org`, exactly as currently stored, is something a fresh
-    resolution could produce right now — checked by literally running it
-    back through the same validation real LLM output goes through
-    (_parse_response), rather than a separately hand-maintained "does
-    this look malformed" checklist. This used to be
-    looks_like_malformed_paper_org(), which re-implemented its own
-    subset of the real rules and had no way to even check the title-
-    hallucination case (a lab name lifted straight from the title, e.g.
-    "UC Berkeley?, Mamba Lab" on an unrelated paper) since that check
-    needs the title and the old function only ever took `org` — one
-    validator drifting out of sync with the other is exactly how a
-    value the live resolver would now reject could still sit there
-    forever, "cleaned up" only on paper. There is now exactly one set of
-    rules for what a valid paper org looks like, applied identically
-    whether the value was just generated or has been sitting in the
-    database for months.
+def normalize_stored_paper_org(
+    org: str | None, title: str = "", authors: list[str] | None = None
+) -> tuple[str | None, str | None]:
+    """Runs an already-stored org value back through the exact same
+    parsing/validation real LLM output goes through (_parse_response),
+    plus the same title-hallucination check resolve_paper_org()/
+    resolve_paper_org_via_search() apply to fresh output — there is one
+    set of rules for what a valid paper org looks like, applied
+    identically whether the value was just generated or has been
+    sitting in the database for months, rather than a separately
+    hand-maintained "does this look malformed" checklist that can (and
+    did) drift out of sync with the real rules.
+
+    Returns (org, org_type) — possibly the same value back unchanged
+    (already valid), possibly a FREE cosmetic fix recovered from the
+    stored text itself (a leading "- \"" artifact stripped, an empty
+    university salvaged into "Unknown Institution" — no LLM call
+    needed, since the real answer was already sitting right there), or
+    (None, None) when nothing in the stored text is recoverable at all
+    (a placeholder echo, a title-hallucinated lab name, a bare hedge) —
+    the caller's signal that only a genuine fresh resolution attempt
+    (real institution data, then a web search) could possibly do
+    better, not that the row should be cleared outright without trying.
 
     `authors` (the same raw author-name list resolve_paper_org_with_fallback
     would have had) is optional — pass it so a lab name that
     legitimately IS an author's own name isn't flagged just because it
     also happens to appear in the title."""
     if not org:
-        return True
+        return None, None
     parsed_org, parsed_type = _parse_response(org)
-    if parsed_org != org:
-        return False
-    if parsed_type == "academic" and "," in org:
+    if parsed_org and parsed_type == "academic" and "," in parsed_org:
         authors_institutions = [(name, [], False) for name in (authors or [])]
-        if _lab_name_is_title_word(org.rpartition(",")[2], title, authors_institutions):
-            return False
-    return True
+        if _lab_name_is_title_word(parsed_org.rpartition(",")[2], title, authors_institutions):
+            return None, None
+    return parsed_org, parsed_type
+
+
+def is_valid_stored_paper_org(org: str | None, title: str = "", authors: list[str] | None = None) -> bool:
+    """True if `org`, exactly as currently stored, needs no fix at all —
+    see normalize_stored_paper_org. False covers both "needs a free
+    cosmetic fix" and "needs a real re-resolution attempt"; callers that
+    care about the difference should call normalize_stored_paper_org
+    directly instead."""
+    if not org:
+        return True
+    parsed_org, _ = normalize_stored_paper_org(org, title, authors)
+    return parsed_org == org
 
 
 def _parse_response(raw: str) -> tuple[str | None, str | None]:
@@ -236,6 +252,17 @@ def _parse_response(raw: str) -> tuple[str | None, str | None]:
     text = text.rstrip(".")
     if not text or text.lower() in _NON_ANSWERS:
         return None, None
+    # An empty or punctuation-only university slot before the comma
+    # ("- , Zhu Lab" — already collapsed by the bullet-strip above into
+    # ", Zhu Lab" — or a bare ", Ortiz-Juza lab") still has a real
+    # lab/PI name sitting right there. Salvage it into the ONE canonical
+    # way this tool represents "we know the lab, not the university"
+    # (the prompt's own explicit "Unknown Institution, <PI/Lab> Lab"
+    # shape) instead of discarding a real, useful answer just because
+    # the university half came back blank — losing the lab name too
+    # over that is strictly worse than keeping it with an honest
+    # "don't know the university" marker.
+    text = re.sub(r"^[\s\-–—.]*,\s*", "Unknown Institution, ", text)
     # A "?" anywhere is the model hedging despite the prompt never
     # offering a hedge shape — it's told to use "Undetermined Lab"/
     # "unknown" instead, so a "?" surviving means the rest of the
@@ -247,6 +274,12 @@ def _parse_response(raw: str) -> tuple[str | None, str | None]:
     if match:
         university = match.group("university").strip()
         lab = match.group("lab").strip()
+        # The regex matches "lab"/"Lab"/"LAB" case-insensitively but
+        # captures whatever casing the model actually wrote — standardize
+        # the trailing word to "Lab" every time so this doesn't become
+        # one more thing that's inconsistent from one stored org to the
+        # next depending on how a given model call happened to write it.
+        lab = re.sub(r"\blab$", "Lab", lab, flags=re.IGNORECASE)
         # A bare "-"/"—"/"." etc. passes a plain truthiness check (it's a
         # non-empty string) but isn't a real university name — this is
         # exactly what produced stored garbage like "- , Zhu Lab" before

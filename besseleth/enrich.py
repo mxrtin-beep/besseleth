@@ -1009,39 +1009,50 @@ def reextract_paper_orgs(
     instead of re-picking the same handful.
 
     Returns {"checked": int, "changed": int}."""
-    # Free, no-LLM cleanup pass first: re-validates every stored org
-    # against paper_org.is_valid_stored_paper_org — literally the same
-    # validation a fresh resolution's output goes through, run back over
-    # what's already in the database, so nothing can be "valid when
-    # generated" but "invalid when stored" or vice versa. Clears
-    # anything that fails outright rather than leaving it to sit forever
-    # — the loop below only overwrites a stored value when it finds
-    # something NEW to replace it with, so without this a re-check run
-    # that can't do any better than before (no institution data, no LLM
-    # available) would silently leave known-garbage in place.
-    cleaned = 0
+    # Free, no-LLM normalization pass first: runs every stored org back
+    # through paper_org.normalize_stored_paper_org — the exact same
+    # parsing/validation real LLM output goes through. A value that only
+    # needs COSMETIC cleanup (a leading "- \"" artifact, an empty
+    # university salvaged into "Unknown Institution", inconsistent "Lab"
+    # capitalization) gets fixed here for free, no LLM call, since the
+    # real answer was already sitting right there in the stored text.
+    # Deliberately does NOT clear anything to null by itself — a value
+    # normalize_stored_paper_org can't recover anything from (a
+    # placeholder echo, a title-hallucinated lab name, a bare hedge)
+    # just stays as-is here and falls through to the budgeted loop
+    # below, which makes an ACTUAL fresh resolution attempt (real
+    # institution data, then the web-search fallback) before ever
+    # giving up on it — null is the last resort after really trying,
+    # never the first move on merely-invalid stored text.
+    normalized = 0
     for row in db.papers_for_org_recheck():
+        if not row["org"]:
+            continue
         authors = [name.strip() for name in (row["authors"] or "").split(",") if name.strip()]
-        if not paper_org.is_valid_stored_paper_org(row["org"], row["title"], authors):
-            db.log_change(row["id"], row["title"], "papers", "org", row["org"], None, "cleared malformed org", item_url=row["url"])
-            db.sync_org(row["id"], None, None, None)
-            cleaned += 1
+        fixed_org, fixed_type = paper_org.normalize_stored_paper_org(row["org"], row["title"], authors)
+        if fixed_org and fixed_org != row["org"]:
+            db.log_change(row["id"], row["title"], "papers", "org", row["org"], fixed_org, "normalized paper org", item_url=row["url"])
+            db.sync_org(row["id"], fixed_org, fixed_type, row["org_description"])
+            normalized += 1
 
     if config.summarizer.get("backend", "groq") not in summarizer_mod.LLM_BACKENDS:
-        return {"checked": 0, "changed": cleaned}
+        return {"checked": 0, "changed": normalized}
 
     rows = db.papers_for_org_recheck()
     cfg = config.raw.get("enrichment", {}) or {}
     budget = max_llm_calls if max_llm_calls is not None else cfg.get("max_items_per_run", 50)
 
     checked = 0
-    changed = cleaned
+    changed = normalized
     for i, row in enumerate(rows):
         if budget <= 0:
             break
         check_cancelled(cancel_event)
         budget -= 1
         checked += 1
+
+        authors = [name.strip() for name in (row["authors"] or "").split(",") if name.strip()]
+        org_is_valid = paper_org.is_valid_stored_paper_org(row["org"], row["title"], authors)
 
         work = None
         if row["openalex_id"]:
@@ -1052,12 +1063,26 @@ def reextract_paper_orgs(
         if work:
             authors_institutions = web_lookup.authorships_from_work(work)
         else:
-            authors_institutions = [(name.strip(), [], False) for name in (row["authors"] or "").split(",") if name.strip()]
+            authors_institutions = [(name, [], False) for name in authors]
 
         new_org, new_org_type = paper_org.resolve_paper_org_with_fallback(row["title"], authors_institutions, config)
         if new_org and (new_org, new_org_type) != (row["org"], row["org_type"]):
             db.log_change(row["id"], row["title"], "papers", "org", row["org"], new_org, "paper org resolution (re-check)", item_url=row["url"])
             db.sync_org(row["id"], new_org, new_org_type, row["org_description"])
+            changed += 1
+        elif not new_org and not org_is_valid and row["org"] is not None:
+            # A real resolution attempt — the same institution data plus
+            # DuckDuckGo fallback a fresh fetch would use — just came up
+            # with nothing better, and what's stored (a title-
+            # hallucinated lab name, a leftover placeholder, a bare
+            # hedge) is something normalize_stored_paper_org couldn't
+            # recover a real answer from either. Only NOW, after
+            # actually trying, does clearing it to null become the
+            # right move — an honest "we don't know" beats confidently
+            # showing something wrong, but it's the last resort, not
+            # the first response to an invalid value.
+            db.log_change(row["id"], row["title"], "papers", "org", row["org"], None, "cleared unrecoverable org (re-resolution found nothing better)", item_url=row["url"])
+            db.sync_org(row["id"], None, None, None)
             changed += 1
         # Only mark this row "checked" when resolution actually produced
         # an answer (whether it matched what was already there or
