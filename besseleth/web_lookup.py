@@ -174,8 +174,8 @@ def authorships_from_work(work: dict) -> list[tuple[str, list[str], bool]]:
     return out
 
 
-_DDG_COOLDOWN_SECONDS = 300  # 5 min
-_ddg_unreachable_until = 0.0  # monotonic() timestamp; 0 = not currently tripped
+_DDG_MIN_REQUEST_INTERVAL = 5.0  # seconds — see duckduckgo_search's docstring
+_last_ddg_request_at = 0.0
 
 
 def duckduckgo_search(query: str, max_results: int = 4) -> list[str]:
@@ -183,53 +183,37 @@ def duckduckgo_search(query: str, max_results: int = 4) -> list[str]:
     results page (meant for browsers without JavaScript, not an
     official API — best-effort). Returns up to `max_results` short text
     snippets pulled from the result blurbs, or [] on any failure
-    (network error, or DuckDuckGo's markup no longer matching what this
-    parses — it's a regex over their result__snippet links, not a real
-    HTML parser, to avoid pulling in a new dependency for one scraper).
+    (network error, an HTTP error, or DuckDuckGo's markup no longer
+    matching what this parses — it's a regex over their result__snippet
+    links, not a real HTML parser, to avoid pulling in a new dependency
+    for one scraper).
 
-    Circuit breaker: trips for _DDG_COOLDOWN_SECONDS (every call in that
-    window returns [] immediately, no request attempted) on either of
-    two distinct signals that further calls right now are futile, not
-    just one:
-      - a connect/timeout failure (DuckDuckGo genuinely unreachable — a
-        firewall, a blocked network, an outage);
-      - a 403 or 429 response (DuckDuckGo IS reachable, but is actively
-        blocking or rate-limiting this client — bot detection, usually
-        triggered by exactly the kind of sustained automated traffic a
-        big backlog run generates). This used to be excluded on the
-        theory that an HTTP error "isn't evidence the network is the
-        problem" — true for a one-off odd response, but a 403 that
-        recurs on every single call is unambiguous evidence THIS client
-        is blocked, not that one query was malformed, and retrying it
-        per-item both wastes the run and likely prolongs the block.
-    Any other HTTP error (a genuine one-off, or a status that doesn't
-    signal blocking) does not trip it. Without tripping on either
-    signal, a large backlog (e.g. "Re-resolve paper orgs" over thousands
-    of papers) would burn a full request — successful connection,
-    unsuccessful result — on every single item that reaches this
-    fallback tier, for a lookup that was never going to succeed."""
-    global _last_request_at, _ddg_unreachable_until
-    now = time.monotonic()
-    if _ddg_unreachable_until and now < _ddg_unreachable_until:
-        return []
-    _throttle()
+    Rate limit: at most one request every _DDG_MIN_REQUEST_INTERVAL
+    seconds, success or failure — deliberately its own, much slower
+    pace than the shared _throttle()'s 0.5s (used for Wikidata/
+    Wikipedia/OpenAlex, none of which have shown this problem), since
+    DuckDuckGo's no-JS HTML endpoint isn't an official API and reacts
+    to a burst of automated requests with active blocking (403) or
+    rate-limiting (429), not just slowness. This used to be a circuit
+    breaker instead — wide open until a failure, then a flat 5-MINUTE
+    blackout where every call returned [] outright — which is worse on
+    both ends: fast enough between requests to help trigger exactly the
+    block it was trying to avoid, then a single long freeze rather than
+    a steady, self-correcting trickle. A flat per-request floor is
+    simpler (one number, no separate tripped/not-tripped state to
+    reason about) and keeps making forward progress at a deliberately
+    gentle pace instead of going fully dark and then bursting again
+    once the window reopens."""
+    global _last_request_at, _last_ddg_request_at
+    elapsed = time.monotonic() - _last_ddg_request_at
+    if elapsed < _DDG_MIN_REQUEST_INTERVAL:
+        time.sleep(_DDG_MIN_REQUEST_INTERVAL - elapsed)
     try:
         resp = requests.post(DUCKDUCKGO_HTML_URL, data={"q": query}, headers={"User-Agent": USER_AGENT}, timeout=10)
-        _last_request_at = time.monotonic()
+        _last_request_at = _last_ddg_request_at = time.monotonic()
         resp.raise_for_status()
-        _ddg_unreachable_until = 0.0  # a success clears any earlier trip
-    except (requests.ConnectionError, requests.Timeout) as e:
-        _ddg_unreachable_until = time.monotonic() + _DDG_COOLDOWN_SECONDS
-        print(f"[web_lookup] DuckDuckGo unreachable ({e}) — skipping it for the next {_DDG_COOLDOWN_SECONDS}s.")
-        return []
-    except requests.HTTPError as e:
-        if e.response is not None and e.response.status_code in (403, 429):
-            _ddg_unreachable_until = time.monotonic() + _DDG_COOLDOWN_SECONDS
-            print(f"[web_lookup] DuckDuckGo blocking/rate-limiting this client ({e}) — skipping it for the next {_DDG_COOLDOWN_SECONDS}s.")
-        else:
-            print(f"[web_lookup] DuckDuckGo search failed: {e}")
-        return []
     except requests.RequestException as e:
+        _last_ddg_request_at = time.monotonic()
         print(f"[web_lookup] DuckDuckGo search failed: {e}")
         return []
 
