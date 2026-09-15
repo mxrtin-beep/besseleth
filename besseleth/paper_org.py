@@ -134,16 +134,28 @@ def _snippets_mention_title(snippets: list[str], title: str) -> bool:
     hit) can still return snippets about something else in the same
     field entirely, and the LLM reading them doesn't answer "I don't
     know" — it answers confidently about whatever the snippets DO
-    discuss. Requires a several-word run of the actual title to appear
-    in at least one snippet; a title too short to build a reliable
-    phrase from is let through rather than blocked on this check
-    alone."""
+    discuss.
+
+    A short contiguous match isn't strong enough evidence of that —
+    real case that slipped through with a 4-6 word requirement: title
+    "...advancing nutritional neuroscience through chemogenetics and
+    fibre photometry" (a paper from Istanbul Beykent/Medipol/Iowa) got
+    resolved to UCLA, because some UNRELATED chemogenetics/fiber-
+    photometry paper's snippet happened to reuse that same generic
+    methodology phrasing — a run of common technique jargon many
+    different papers in the same subfield legitimately share, not
+    evidence of matching THIS one. Requires nearly the WHOLE title
+    (90%, or all of it for a short one) to appear as one contiguous run
+    in a snippet instead — a coincidental near-full-title match between
+    two unrelated papers is vanishingly unlikely, unlike a coincidental
+    partial phrase; a title too short to build a reliable long phrase
+    from is let through rather than blocked on this check alone."""
     title_words = re.findall(r"[a-z0-9]+", title.lower())
     if len(title_words) < 4:
         return True
     normalized_snippets = [re.sub(r"[^a-z0-9]+", " ", s.lower()) for s in snippets]
-    phrase_len = min(6, len(title_words))
-    for n in range(phrase_len, 3, -1):
+    min_len = max(4, round(len(title_words) * 0.9))
+    for n in range(len(title_words), min_len - 1, -1):
         for i in range(len(title_words) - n + 1):
             phrase = " ".join(title_words[i : i + n])
             if any(phrase in s for s in normalized_snippets):
