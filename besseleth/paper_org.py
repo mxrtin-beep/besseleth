@@ -182,24 +182,24 @@ def _parse_response(raw: str) -> tuple[str | None, str | None]:
         return None, None
     # Backward-compat: this module used to also identify a specific
     # PI-led lab within the institution ("<University>, <PI> Lab" —
-    # dropped, see module docstring for why). A value stored under that
-    # old format still has a real, valid institution name in it, up to
-    # the last comma — strip the now-dead "..., X Lab" tail so the
-    # institution alone survives, rather than leaving the whole
-    # old-format string to coincidentally pass every CURRENT check
-    # unchanged (a short, alnum-leading phrase with no red flags —
-    # exactly what let every old-format value look "already valid" and
-    # get silently skipped by the maintenance sweep instead of ever
-    # being cleaned up: "checked 500, changed 0" because there was
-    # nothing here recognizing them as needing a change at all).
-    lab_suffix_match = re.match(r"^(?P<university>.+?),\s*.+?\bLab(?:oratory)?\.?$", text, re.IGNORECASE)
-    if lab_suffix_match:
-        university = lab_suffix_match.group("university").strip()
-        # The old format's own "we don't know the university" fillers —
-        # nothing real to salvage, needs a genuine fresh resolution.
-        if not re.search(r"[A-Za-z0-9]", university) or university.lower() in ("undetermined", "unknown institution"):
-            return None, None
-        text = university
+    # dropped, see module docstring for why: the "Stanford, Shenoy Lab"
+    # bug that originally motivated this whole module — a paper
+    # actually from a Shenzhen group, mislabeled Stanford — is exactly
+    # a case where BOTH halves of that old shape could be wrong, the
+    # university included, not just the lab). A value in this old shape
+    # is ALWAYS treated as needing a genuine fresh resolution — never
+    # salvaged by keeping the university half and discarding the lab
+    # half, since there's no way to tell from the string alone whether
+    # the university part was ever actually correct. An earlier version
+    # of this function DID salvage it, on the theory that the
+    # institution "was probably fine" — that produced exactly this bug
+    # again, just with the tell (", Shenoy Lab") stripped off and the
+    # wrong "Stanford" left standing alone, now looking perfectly valid
+    # and never up for re-resolution again. Detecting the old shape and
+    # rejecting it outright forces a real re-check against actual
+    # OpenAlex author-institution data instead.
+    if re.match(r"^.+?,\s*.+?\bLab(?:oratory)?\.?$", text, re.IGNORECASE):
+        return None, None
     # A real institution/company name is a short phrase, never a
     # sentence the model wrote instead of following the format, and
     # never leading punctuation left over from a malformed attempt.
