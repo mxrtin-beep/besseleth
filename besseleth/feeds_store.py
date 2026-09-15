@@ -24,13 +24,13 @@ def load_feeds(path: str | Path = "feeds.yaml") -> dict[str, list[dict]]:
     p = Path(path)
     if not p.exists():
         return {c: [] for c in CATEGORIES}
-    with open(p) as f:
+    with open(p, encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
     return {c: list(raw.get(c, []) or []) for c in CATEGORIES}
 
 
 def _save(path: str | Path, feeds: dict[str, list[dict]]) -> None:
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(feeds, f, sort_keys=False)
 
 

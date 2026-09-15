@@ -89,7 +89,7 @@ def _migrate_legacy_yaml(db, legacy_yaml_path: str | Path | None) -> None:
         return
     import yaml
 
-    with open(p) as f:
+    with open(p, encoding="utf-8") as f:
         raw = yaml.safe_load(f) or []
     for c in raw:
         db.add_company(
@@ -173,6 +173,29 @@ def auto_mark_ipo(path: str | Path, name: str, ipo_date: str, stock_exchange: st
         db.close()
 
 
+def record_company_event(
+    path: str | Path, org: str, event_type: str, event_date: str | None, title: str,
+    description: str = "", source_url: str = "", auto_extracted: bool = True,
+) -> bool:
+    """Adds one row to the org events timeline (see db.py's
+    `company_events` table) — the funding/regulatory-approval/merger/
+    leadership-change/notable-paper feed the Trends tab's Events
+    Timeline chart draws from. Skips a repeat of the same (org,
+    event_type, event_date, title) instead of piling up duplicates
+    across enrich runs. Returns True if it actually added a row."""
+    if not org or not title:
+        return False
+    from ..db import DB
+
+    db = DB(Path(path))
+    try:
+        return db.add_company_event_if_new(
+            org, event_type, event_date, title, description, source_url, auto_extracted,
+        )
+    finally:
+        db.close()
+
+
 def find_possible_duplicate_companies(path: str | Path) -> list[tuple[str, str, float]]:
     """Flags pairs of stored companies whose names are close enough to be
     a typo of each other (e.g. "Axfot"/"Axoft") — for a human to look at
@@ -234,10 +257,48 @@ def backfill_missing_funding_dates(path: str | Path) -> int:
         db.close()
 
 
+def backfill_stock_history(db, org: str, ticker: str) -> int:
+    """One-time pull of a ticker's full free daily-close history from
+    Stooq (same free, keyless source as the live quote above) — the live
+    quote endpoint only ever gives "today", which is enough to show the
+    current price but nothing to plot a chart from. Safe to call
+    repeatedly (INSERT OR REPLACE); callers should still gate on
+    `db.has_stock_history(org)` so a normal refresh doesn't re-fetch a
+    whole history file on every run. Returns how many points were
+    written, 0 on any failure (network, unknown ticker, empty response)."""
+    import csv
+    import io
+
+    import requests
+
+    try:
+        resp = requests.get(
+            "https://stooq.com/q/d/l/", params={"s": ticker, "i": "d"}, timeout=20,
+        )
+        resp.raise_for_status()
+        reader = csv.DictReader(io.StringIO(resp.text))
+        points = []
+        for row in reader:
+            date, close = row.get("Date"), row.get("Close")
+            if not date or not close or close in ("N/D", ""):
+                continue
+            try:
+                points.append((date, float(close)))
+            except ValueError:
+                continue
+        return db.add_stock_history_points(org, points)
+    except Exception:
+        return 0
+
+
 def refresh_stock_prices(path: str | Path) -> list[str]:
     """Fetches current stock prices (free, no API key) for every company
-    with a `stock_ticker` set, via Stooq's public CSV quote endpoint.
-    Returns a list of log lines describing what happened."""
+    with a `stock_ticker` set, via Stooq's public CSV quote endpoint —
+    and, the first time a ticker is seen, backfills its whole free daily
+    history into `stock_price_history` too (see backfill_stock_history),
+    then appends today's close to that same history on every run so the
+    Trends tab's stock-comparison chart keeps growing. Returns a list of
+    log lines describing what happened."""
     from datetime import datetime, timezone
 
     import requests
@@ -249,8 +310,13 @@ def refresh_stock_prices(path: str | Path) -> list[str]:
     try:
         for c in db.companies():
             ticker = c["stock_ticker"]
+            org = c["name"]
             if not ticker:
                 continue
+            if not db.has_stock_history(org):
+                n = backfill_stock_history(db, org, ticker)
+                if n:
+                    log.append(f"{ticker}: backfilled {n} days of history")
             try:
                 resp = requests.get(
                     "https://stooq.com/q/l/",
@@ -264,13 +330,15 @@ def refresh_stock_prices(path: str | Path) -> list[str]:
                     continue
                 row = lines[1].split(",")
                 # Columns: Symbol,Date,Time,Open,High,Low,Close,Volume
-                close = row[6] if len(row) > 6 else None
+                quote_date, close = (row[1] if len(row) > 1 else None), (row[6] if len(row) > 6 else None)
                 if not close or close == "N/D":
                     log.append(f"{ticker}: ticker not found or market data unavailable")
                     continue
                 price = float(close)
                 updated_at = datetime.now(timezone.utc).isoformat()
-                db.update_company(c["name"], stock_price=price, stock_price_updated_at=updated_at)
+                db.update_company(org, stock_price=price, stock_price_updated_at=updated_at)
+                if quote_date and quote_date != "N/D":
+                    db.add_stock_history_points(org, [(quote_date, price)])
                 log.append(f"{ticker}: ${price}")
             except Exception as e:
                 log.append(f"{ticker}: failed ({e})")

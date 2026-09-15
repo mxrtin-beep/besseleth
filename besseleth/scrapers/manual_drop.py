@@ -75,7 +75,7 @@ def fetch_drops(config, dropbox_dir: str, source: str) -> list[Item]:
     for path in sorted(dropbox.glob("*")):
         if path.is_dir() or path.suffix not in (".txt", ".md", ""):
             continue
-        raw = path.read_text(errors="ignore")
+        raw = path.read_text(encoding="utf-8", errors="ignore")
         for snippet in _SNIPPET_SEP.split(raw):
             if not snippet.strip():
                 continue

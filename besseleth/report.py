@@ -1,6 +1,7 @@
 """Renders the weekly report as Markdown (or HTML) and optionally emails it."""
 from __future__ import annotations
 
+import re
 import smtplib
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
@@ -10,6 +11,27 @@ from pathlib import Path
 from .config import env
 from .db import Item
 from . import summarizer
+
+_REPORT_FILENAME_RE = re.compile(r"^report-(\d{4}-\d{2}-\d{2})(?:-(\d+))?\.md$")
+
+
+def report_sort_key(path: Path) -> tuple[str, int]:
+    """Chronological sort key for a report-*.md filename — (date,
+    same-day sequence number, the plain "report-YYYY-MM-DD.md" first
+    report of a day counting as 0). A plain reverse filename sort
+    breaks once same-day reports get a "-1"/"-2" suffix instead of a
+    full timestamp (see save_report's docstring for the naming scheme):
+    "-" sorts before "." in ASCII, so "report-2026-09-15-1.md" is
+    LESS than "report-2026-09-15.md" as a plain string, putting the
+    day's actual first report ahead of its later same-day ones in a
+    reverse-chronological listing — backwards from when they were
+    created. Anything that doesn't match the expected shape sorts last
+    (empty date) rather than raising, so a stray/hand-placed file in
+    the reports directory doesn't break the whole listing."""
+    match = _REPORT_FILENAME_RE.match(path.name)
+    if not match:
+        return ("", 0)
+    return (match.group(1), int(match.group(2) or 0))
 
 MD_TEMPLATE = """# {{ industry }} — Weekly Briefing
 _{{ date_range }}_
@@ -24,7 +46,7 @@ _{{ date_range }}_
 {{ personalized_lines }}
 
 {% endif %}
-## 📚 Papers (arXiv + published, ranked by citations)
+## 📚 Papers (arXiv + published, newest first)
 {{ paper_lines }}
 
 ## 📰 News
@@ -77,22 +99,13 @@ def _paper_lines(items: list[Item]) -> str:
     published papers alike (see pipeline.py: both scrapers feed the same
     "papers" source now, since to a reader they're the same thing:
     research papers, just via two complementary feeds with different
-    tradeoffs — arXiv is same-day fresh but never has a citation count;
-    OpenAlex has real citation counts but indexes with a lag). Already
-    sorted by citation_count (highest first) by the caller. Shows the
-    count and authors directly rather than running these through an LLM
-    summary: a citation count and author list are already-final facts,
-    not something to paraphrase, and an abstract is the paper's own text
-    (nothing left to extract beyond what the link+citation count already
-    convey at a glance). An arXiv item's citation_count/authors are
-    usually None/empty — shown as "citations unknown" rather than 0, so
-    it doesn't read as "confirmed no citations" for a paper OpenAlex just
-    doesn't index."""
+    tradeoffs). Already sorted newest-first by the caller. Title + link
+    only — no author list, to keep this section scannable; the full
+    author list is still shown in the dashboard's Papers table for
+    anyone who wants it."""
     lines = []
     for i in items:
-        cite = f"{i.citation_count} citation{'s' if i.citation_count != 1 else ''}" if i.citation_count is not None else "citations unknown"
-        authors = f" — {i.authors}" if i.authors else ""
-        lines.append(f"- **{i.title}** ({cite}){authors}" + (f" ([link]({i.url}))" if i.url else ""))
+        lines.append(f"- **{i.title}**" + (f" ([link]({i.url}))" if i.url else ""))
     return "\n".join(lines) or "_None this week._"
 
 
@@ -113,15 +126,14 @@ def _top_findings_lines(all_items: list[Item], min_score: int, max_count: int) -
     stood out, and forcing a middling item into a "most important"
     section just because it's the least-unremarkable thing available
     would be worse than admitting a quiet week. Ties broken by
-    citation_count then published_at so a stronger paper/more recent item
-    wins among equally-scored ones."""
+    published_at so the more recent item wins among equally-scored ones."""
     candidates = [i for i in all_items if (i.novelty_score or 0) >= min_score]
     if not candidates:
         return (
             f"_Nothing this week scored {min_score}+ on novelty (out of 5) — a quiet week for genuinely surprising "
             "findings, not a gap in coverage. See the full sections below for everything that came in._"
         )
-    candidates.sort(key=lambda i: (i.novelty_score or 0, i.citation_count or 0, i.published_at or ""), reverse=True)
+    candidates.sort(key=lambda i: (i.novelty_score or 0, i.published_at or ""), reverse=True)
     lines = []
     for i in candidates[:max_count]:
         label = _SOURCE_LABELS.get(i.source, i.source)
@@ -171,14 +183,14 @@ def build_report(
     picture' section, so a fresh, independent report doesn't need any
     other item from a previous report to render correctly.
 
-    report_id includes the time (not just the date) so two runs on the
-    same day — someone hits "Run now" twice, or pastes something new
-    right after a scheduled run — each get their own report file instead
-    of the second one silently overwriting the first."""
+    report_id is just today's date — save_report() is what turns this
+    into an actually-unique id/filename (appending -1, -2, ... when more
+    than one report is saved on the same day), since that's the only
+    place that knows what's already on disk."""
     clip_items = clip_items or []
     history = history or {}
     now = datetime.now(timezone.utc)
-    report_id = now.strftime("%Y-%m-%d-%H%M%S")
+    report_id = now.strftime("%Y-%m-%d")
     date_range = f"{(now).strftime('%b %d, %Y')} (last {days_back} days)"
 
     # Bulleted, one sentence + a numbered citation per item — assigned in
@@ -245,12 +257,30 @@ def build_report(
     return report_id, _render_markdown(context)
 
 
-def save_report(markdown: str, report_id: str, output_dir: str) -> Path:
+def save_report(markdown: str, report_id: str, output_dir: str) -> tuple[Path, str]:
+    """Writes the report and returns (path, final_report_id) — `report_id`
+    coming in is just a date (see build_report's docstring); this is
+    where it actually becomes a unique filename. The first report saved
+    on a given day keeps the plain date ("report-2026-09-15.md"); a
+    second one the same day — "Run now" hit twice, or a scheduled run
+    followed by a manual one — gets "-1" appended, a third "-2", and so
+    on, rather than every same-day report needing a suffix (which read
+    like report N of some unstated total) or the old timestamp-down-to-
+    the-second scheme (which made even the ordinary, only-one-that-day
+    case carry a name nobody would ever need to read out loud).
+    Callers that also need the id elsewhere (email subject, dashboard
+    lookup) must use the returned final_report_id, not the one passed
+    in — that one is provisional."""
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    path = out / f"report-{report_id}.md"
-    path.write_text(markdown)
-    return path
+    final_id = report_id
+    suffix = 0
+    while (out / f"report-{final_id}.md").exists():
+        suffix += 1
+        final_id = f"{report_id}-{suffix}"
+    path = out / f"report-{final_id}.md"
+    path.write_text(markdown, encoding="utf-8")
+    return path, final_id
 
 
 def email_report(markdown: str, report_id: str, industry_name: str, email_cfg: dict):

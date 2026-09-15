@@ -306,11 +306,27 @@ enrichment:
   run_until_done_location_lookup_cap: 50
 
 summarizer:
-  # Uses a local LLM via Ollama (https://ollama.ai) — free, runs offline.
-  # `ollama pull llama3.1` (or any model you like) before running.
-  backend: "ollama"          # "ollama" or "none" (extractive fallback)
+  # "groq" (default): free, hosted (https://console.groq.com — create an
+  #   API key, no credit card needed) — fast, nothing to install, doesn't
+  #   tie up your own machine. Falls back to Ollama automatically (if
+  #   configured below) when Groq is rate-limited/unreachable.
+  # "ollama": a fully local/offline LLM (https://ollama.ai) — no data
+  #   ever leaves your machine, no usage caps, but needs Ollama running
+  #   and will compete with whatever else you're doing for CPU (see
+  #   num_thread/pause_seconds below).
+  # "none": no LLM at all — a plain extractive fallback.
+  backend: "groq"
+  groq_api_key: ""           # or set the GROQ_API_KEY env var instead (keeps this out of a tracked config.yaml)
+  groq_model: "llama-3.3-70b-versatile"
+  groq_fallback_to_ollama: true  # if Groq is rate-limited/unreachable and Ollama below is running, use it for that call instead of giving up
   ollama_url: "http://localhost:11434"
-  model: "llama3.1"
+  # llama3.1 (8B) is heavy for a CPU-only/lower-RAM machine — a "hi" prompt
+  # taking ~a minute means every real enrichment call will time out (see
+  # summarizer.py's 60s timeout). llama3.2:1b is far lighter and still
+  # fine for this structured-extraction prompt; step up to llama3.2:3b if
+  # your machine handles 1b easily and you want better extraction quality.
+  # `ollama pull llama3.2:1b` first, then this just has to match.
+  model: "llama3.2:1b"
   max_items_per_summary_call: 8
   num_thread: 4              # cap CPU threads Ollama uses per call — unset means its default (usually ALL
                               # cores), which is the actual cause of "the whole computer slows to a crawl"

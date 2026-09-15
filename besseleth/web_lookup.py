@@ -102,7 +102,32 @@ def _claim_entity_id(qid: str, prop: str) -> str | None:
         return None
 
 
-def lookup_arxiv_authorships(arxiv_id: str) -> list[tuple[str, list[str]]]:
+def lookup_openalex_work_by_doi(doi: str) -> dict | None:
+    """The full OpenAlex "work" record for `doi`, or None if it isn't
+    indexed there (or on any request failure) — a clean miss, not an
+    error. Used to (a) pull real author-institution data for an arXiv
+    preprint (arXiv's own DOI scheme since Feb 2022 is
+    "10.48550/arxiv.<id>") and (b) at fetch time, to check whether an
+    arXiv preprint is ALSO already indexed by OpenAlex directly — when
+    it is, the OpenAlex record (richer: real affiliations, citation
+    count, often the published version's own metadata) is used instead
+    of storing a second, thinner arXiv-sourced row for the same paper."""
+    return _get(f"{OPENALEX_WORKS_API}/doi:{doi}", {})
+
+
+def lookup_openalex_work_by_id(openalex_id: str) -> dict | None:
+    """Same as lookup_openalex_work_by_doi, keyed by OpenAlex's own work
+    id instead — for re-resolving an already-stored papers item (its
+    openalex_id column, from when it was first fetched) without needing
+    its DOI. Accepts either the short form ("W123...") or the full URL
+    OpenAlex returns ("https://openalex.org/W123...")."""
+    short_id = (openalex_id or "").rsplit("/", 1)[-1]
+    if not short_id:
+        return None
+    return _get(f"{OPENALEX_WORKS_API}/{short_id}", {})
+
+
+def lookup_arxiv_authorships(arxiv_id: str) -> list[tuple[str, list[str], bool]]:
     """Real author-institution data for an arXiv paper, from OpenAlex
     (https://openalex.org — free, keyless, aggregates affiliations from
     ORCID/Crossref/publisher metadata). This is a genuine lookup, not
@@ -110,23 +135,49 @@ def lookup_arxiv_authorships(arxiv_id: str) -> list[tuple[str, list[str]]]:
     affiliation filled in, and asking the LLM to recall an author's
     institution from its training data would be a guess with no way to
     verify it — exactly the kind of thing enrich.py otherwise refuses to
-    do. Returns [(author_name, [institution_name, ...]), ...] — [] if
-    the paper isn't in OpenAlex (arXiv has only assigned every preprint
-    its own DOI since Feb 2022, so older papers often aren't findable
-    this way) or on any request failure."""
-    doi = f"10.48550/arxiv.{arxiv_id.lower()}"
-    data = _get(f"{OPENALEX_WORKS_API}/doi:{doi}", {})
+    do. Returns [(author_name, [institution_name, ...], is_corresponding),
+    ...] — same 3-tuple shape as authorships_from_work (this just calls
+    straight through to it) — [] if the paper isn't in OpenAlex (arXiv
+    has only assigned every preprint its own DOI since Feb 2022, so
+    older papers often aren't findable this way) or on any request
+    failure."""
+    data = lookup_openalex_work_by_doi(f"10.48550/arxiv.{arxiv_id.lower()}")
     if not data:
         return []
+    return authorships_from_work(data)
+
+
+def authorships_from_work(work: dict) -> list[tuple[str, list[str], bool]]:
+    """[(author_name, [institution_name, ...], is_corresponding), ...]
+    out of a raw OpenAlex "work" record's `authorships` list — shared by
+    lookup_arxiv_authorships above and openalex_scraper.py's own fetch
+    (which already has the work record in hand from its own search, no
+    second request needed).
+
+    is_corresponding comes straight from OpenAlex's own
+    `is_corresponding` flag per authorship — real metadata (from the
+    paper's own front matter, not a guess), and a much better signal for
+    "who actually leads this work" than author-list position alone: a
+    first-listed author is very often the student/RA who did the hands-
+    on work, not the PI, while the corresponding author is the
+    convention's actual answer to "who do you contact about this paper"
+    — normally the lab head. See paper_org.py's prompt for how this gets
+    used (a real case this fixed: a paper's first author being a
+    research assistant, not the PI, was resolving to "<RA's name> Lab"
+    until the corresponding-author signal was added)."""
     out = []
-    for authorship in data.get("authorships", []) or []:
+    for authorship in work.get("authorships", []) or []:
         name = (authorship.get("author") or {}).get("display_name")
         institutions = [
             inst.get("display_name") for inst in (authorship.get("institutions") or []) if inst.get("display_name")
         ]
         if name:
-            out.append((name, institutions))
+            out.append((name, institutions, bool(authorship.get("is_corresponding"))))
     return out
+
+
+_DDG_MIN_REQUEST_INTERVAL = 5.0  # seconds — see duckduckgo_search's docstring
+_last_ddg_request_at = 0.0
 
 
 def duckduckgo_search(query: str, max_results: int = 4) -> list[str]:
@@ -134,16 +185,37 @@ def duckduckgo_search(query: str, max_results: int = 4) -> list[str]:
     results page (meant for browsers without JavaScript, not an
     official API — best-effort). Returns up to `max_results` short text
     snippets pulled from the result blurbs, or [] on any failure
-    (network error, or DuckDuckGo's markup no longer matching what this
-    parses — it's a regex over their result__snippet links, not a real
-    HTML parser, to avoid pulling in a new dependency for one scraper)."""
-    global _last_request_at
-    _throttle()
+    (network error, an HTTP error, or DuckDuckGo's markup no longer
+    matching what this parses — it's a regex over their result__snippet
+    links, not a real HTML parser, to avoid pulling in a new dependency
+    for one scraper).
+
+    Rate limit: at most one request every _DDG_MIN_REQUEST_INTERVAL
+    seconds, success or failure — deliberately its own, much slower
+    pace than the shared _throttle()'s 0.5s (used for Wikidata/
+    Wikipedia/OpenAlex, none of which have shown this problem), since
+    DuckDuckGo's no-JS HTML endpoint isn't an official API and reacts
+    to a burst of automated requests with active blocking (403) or
+    rate-limiting (429), not just slowness. This used to be a circuit
+    breaker instead — wide open until a failure, then a flat 5-MINUTE
+    blackout where every call returned [] outright — which is worse on
+    both ends: fast enough between requests to help trigger exactly the
+    block it was trying to avoid, then a single long freeze rather than
+    a steady, self-correcting trickle. A flat per-request floor is
+    simpler (one number, no separate tripped/not-tripped state to
+    reason about) and keeps making forward progress at a deliberately
+    gentle pace instead of going fully dark and then bursting again
+    once the window reopens."""
+    global _last_request_at, _last_ddg_request_at
+    elapsed = time.monotonic() - _last_ddg_request_at
+    if elapsed < _DDG_MIN_REQUEST_INTERVAL:
+        time.sleep(_DDG_MIN_REQUEST_INTERVAL - elapsed)
     try:
         resp = requests.post(DUCKDUCKGO_HTML_URL, data={"q": query}, headers={"User-Agent": USER_AGENT}, timeout=10)
-        _last_request_at = time.monotonic()
+        _last_request_at = _last_ddg_request_at = time.monotonic()
         resp.raise_for_status()
     except requests.RequestException as e:
+        _last_ddg_request_at = time.monotonic()
         print(f"[web_lookup] DuckDuckGo search failed: {e}")
         return []
 
@@ -157,16 +229,35 @@ def duckduckgo_search(query: str, max_results: int = 4) -> list[str]:
     return snippets
 
 
+def _squash(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
 def _wikidata_location(org_name: str) -> tuple[str, float, float] | None:
     """Finds `org_name`'s Wikidata entity, then tries — in order — its
     headquarters location (P159), a plain location claim (P276), and
     finally coordinates on the entity itself (P625, for an org that IS
     a place, e.g. many universities). Returns (label, lat, lon), or None
-    if nothing resolved — a clean miss, not an error."""
-    search = _wikidata_get({"action": "wbsearchentities", "search": org_name, "language": "en", "type": "item", "limit": 1})
-    try:
-        qid = search["search"][0]["id"]
-    except (TypeError, KeyError, IndexError):
+    if nothing resolved — a clean miss, not an error.
+
+    wbsearchentities is a fuzzy text search, not an exact lookup — for an
+    org it doesn't actually know, the top "hit" can be some unrelated
+    entity that just shares a token or sounds similar (this is how
+    "Neuralink" once resolved to a French Polynesian atoll: the fuzzy
+    match landed on the wrong entity, and its P276 was blindly trusted).
+    So the candidate's own label/aliases must actually match org_name
+    (ignoring case/punctuation) before any of its location claims are
+    trusted — a clean miss here just falls through to the next tier
+    instead of confidently reporting a wrong location."""
+    search = _wikidata_get({"action": "wbsearchentities", "search": org_name, "language": "en", "type": "item", "limit": 5})
+    qid = None
+    target = _squash(org_name)
+    for candidate in (search or {}).get("search", []):
+        names = [candidate.get("label", "")] + [a for a in candidate.get("aliases", []) or []]
+        if any(_squash(n) == target for n in names if n):
+            qid = candidate.get("id")
+            break
+    if not qid:
         return None
 
     for location_prop in ("P159", "P276"):
@@ -198,6 +289,25 @@ def _wikipedia_location(org_name: str) -> tuple[str, float, float] | None:
     try:
         title = search["query"]["search"][0]["title"]
     except (TypeError, KeyError, IndexError):
+        return None
+
+    # Same entity-match requirement _wikidata_location applies to its own
+    # fuzzy search, and for the same reason: srsearch is full-text
+    # search, not an exact lookup, so its top hit for an org that has no
+    # matching Wikipedia article can be some unrelated page that merely
+    # ranked highest for those search terms. Trusting whatever
+    # coordinates that page happens to have is exactly how orgs with no
+    # dedicated, well-matched article (Neuralink, Synchron, Blackrock
+    # Neurotech, ...) kept landing on the same wrong place (a small
+    # article's infobox coordinates, unrelated to the org) — this tier
+    # had no equivalent check while _wikidata_location's already did, so
+    # the bug kept happening here even after that fix. Require the found
+    # title to actually match org_name (squashed, and with a trailing
+    # Wikipedia disambiguator like "(company)" ignored) before trusting
+    # its coordinates; anything else is a clean miss that falls through
+    # to the next tier instead.
+    found = re.sub(r"\s*\([^)]*\)\s*$", "", title)
+    if _squash(found) != _squash(org_name):
         return None
 
     global _last_request_at
