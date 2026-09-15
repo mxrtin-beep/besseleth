@@ -559,6 +559,19 @@ class DB:
             params.append(limit)
         return list(self.conn.execute(q, params).fetchall())
 
+    def count_unenriched_items(self, sources: list[str]) -> int:
+        """How many items in the given sources still have no enriched_at
+        at all, regardless of age — a cheap COUNT(*) counterpart to
+        unenriched_items(sources, limit=None, days_back=None), for
+        telling the user how much backlog is left after a single capped
+        batch (run_until_done=False) rather than fetching every row's
+        full data just to len() it."""
+        self.conn.row_factory = sqlite3.Row
+        placeholders = ",".join("?" for _ in sources)
+        return self.conn.execute(
+            f"SELECT COUNT(*) AS n FROM items WHERE source IN ({placeholders}) AND enriched_at IS NULL", sources,
+        ).fetchone()["n"]
+
     def count_items(self, sources: list[str]) -> int:
         """How many items exist in the given sources, period — used to
         bound a force re-check "run until done" to one full pass over

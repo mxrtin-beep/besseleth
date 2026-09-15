@@ -1996,6 +1996,7 @@ def enrich_items_detailed(
     total_attempted = 0
     work_seconds = 0.0  # excludes the deliberate pause_seconds sleeps — this is actual enrich time, not throttling
     cancelled = False
+    stopped_no_progress = False
     try:
         locations_filled = _backfill_org_locations(
             config, db, max_lookups_override=location_lookup_cap, cancel_event=cancel_event, progress_cb=progress_cb
@@ -2074,13 +2075,27 @@ def enrich_items_detailed(
     pause_seconds = cfg.get("pause_seconds", 0)
 
     rows = first_rows
-    # A very basic total estimate — exact for force+run_until_done (a
-    # snapshot count taken above) and for the plain interactive/background
-    # cases (the whole queue is already in `first_rows`); for plain
-    # run_until_done (no force) it's just this first batch, since the real
-    # backlog size isn't known until it runs dry — so the bar undershoots a
-    # bit there rather than promising a total it can't back up.
-    progress_total = force_pool_size if force_pool_size is not None else len(first_rows)
+    # A real total up front, not just the first batch's size — plain
+    # run_until_done (no force) used to seed this with len(first_rows),
+    # i.e. exactly max_items_per_run (10, 20, whatever's configured),
+    # then grow it by roughly one more batch's worth each time a batch
+    # finished (see the "extend the estimate" line below) — since
+    # unenriched_items() itself never returns more than one batch at a
+    # time, that crawl could never actually catch up to the real
+    # backlog size; the bar just kept saying "almost done" (X of X+10)
+    # forever while thousands of items sat unprocessed behind it. That's
+    # a real, misleading bug, not a deliberate "the bar undershoots a
+    # bit" tradeoff — a couple of items enriching against "10" when
+    # there are actually ~2000 left reads as "this is basically done,
+    # something's wrong that it stopped," not "there's a lot more
+    # coming." force+run_until_done already had this right (a real
+    # snapshot count, force_pool_size); plain run_until_done and the
+    # unattended background case get the same real count now.
+    progress_total = (
+        force_pool_size if force_pool_size is not None
+        else db.count_unenriched_items(sources) if (run_until_done or background)
+        else len(first_rows)
+    )
     try:
         while rows:
             total_attempted += len(rows)
@@ -2111,16 +2126,21 @@ def enrich_items_detailed(
                 # every item errored/timed out) — the next batch would just
                 # hand back this same stuck item(s), so stop instead of
                 # spinning. Whatever succeeded elsewhere is still kept.
+                stopped_no_progress = True
                 print(f"[enrich] Stopping: {len(rows)} item(s) in the last batch made no progress (see errors above).")
                 break
             if force_pool_size is not None and total_attempted >= force_pool_size:
                 print(f"[enrich] Stopping: completed one full pass over all {force_pool_size} item(s) in scope.")
                 break
             rows = db.items_to_reenrich(sources, max_items) if force else db.unenriched_items(sources, max_items)
-            if rows and force_pool_size is None:
-                # Growing backlog (plain run_until_done) — extend the estimate
-                # rather than let progress "overshoot" past a too-small total.
-                progress_total = total_attempted + len(rows)
+            if rows and force_pool_size is None and not force:
+                # Re-count rather than grow the estimate by one batch's
+                # worth each time (the old approach — see progress_total's
+                # comment above for why that undercounted badly). A fresh
+                # real count also correctly reflects new items landing
+                # mid-run (a background fetch adding more while this is
+                # still going), which growing-by-batch never could either.
+                progress_total = total_attempted + db.count_unenriched_items(sources)
             if rows:
                 print(f"[enrich] Batch done ({total_processed} so far) — {len(rows)}+ item(s) left, continuing...")
                 ok, status_msg = llm_status(summarizer_cfg)
@@ -2144,6 +2164,26 @@ def enrich_items_detailed(
     if total_processed:
         message += f" ({work_seconds:.1f}s, {work_seconds / total_processed:.1f}s/item)"
     message += location_note
+    if stopped_no_progress:
+        # This used to only be printed server-side — invisible on the
+        # dashboard, where a run stopping early just looked like it
+        # quietly finished. Whatever made every item in that batch fail
+        # is still in the server log (each one's own exception is
+        # printed when it happens), but the STOPPED-EARLY fact itself
+        # belongs in the message too.
+        message += " Stopped early — a whole batch made no progress (see server log for what failed)."
+    # Only run_until_done/force/background empty out (or hit) the whole
+    # backlog on their own — the plain interactive case deliberately
+    # stops after ONE capped batch (max_items_per_run) even when there's
+    # a much bigger backlog behind it, which otherwise reads as "done"
+    # with no hint thousands of items are still sitting there untouched.
+    # Only worth a live count when that's actually what happened — not
+    # on force/run_until_done/background, which already worked through
+    # everything in scope.
+    if not cancelled and not force and not run_until_done and not background:
+        remaining = db.count_unenriched_items(sources)
+        if remaining:
+            message += f" {remaining} more item(s) still unenriched — check \"Enrich everything\" to process the whole backlog in one run."
     print(f"[enrich] {message}")
     return {
         "processed": total_processed,
