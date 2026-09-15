@@ -180,6 +180,26 @@ def _parse_response(raw: str) -> tuple[str | None, str | None]:
         return None, None
     if _is_unsubstituted_placeholder(text):
         return None, None
+    # Backward-compat: this module used to also identify a specific
+    # PI-led lab within the institution ("<University>, <PI> Lab" —
+    # dropped, see module docstring for why). A value stored under that
+    # old format still has a real, valid institution name in it, up to
+    # the last comma — strip the now-dead "..., X Lab" tail so the
+    # institution alone survives, rather than leaving the whole
+    # old-format string to coincidentally pass every CURRENT check
+    # unchanged (a short, alnum-leading phrase with no red flags —
+    # exactly what let every old-format value look "already valid" and
+    # get silently skipped by the maintenance sweep instead of ever
+    # being cleaned up: "checked 500, changed 0" because there was
+    # nothing here recognizing them as needing a change at all).
+    lab_suffix_match = re.match(r"^(?P<university>.+?),\s*.+?\bLab(?:oratory)?\.?$", text, re.IGNORECASE)
+    if lab_suffix_match:
+        university = lab_suffix_match.group("university").strip()
+        # The old format's own "we don't know the university" fillers —
+        # nothing real to salvage, needs a genuine fresh resolution.
+        if not re.search(r"[A-Za-z0-9]", university) or university.lower() in ("undetermined", "unknown institution"):
+            return None, None
+        text = university
     # A real institution/company name is a short phrase, never a
     # sentence the model wrote instead of following the format, and
     # never leading punctuation left over from a malformed attempt.
