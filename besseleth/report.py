@@ -1,6 +1,7 @@
 """Renders the weekly report as Markdown (or HTML) and optionally emails it."""
 from __future__ import annotations
 
+import re
 import smtplib
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
@@ -10,6 +11,27 @@ from pathlib import Path
 from .config import env
 from .db import Item
 from . import summarizer
+
+_REPORT_FILENAME_RE = re.compile(r"^report-(\d{4}-\d{2}-\d{2})(?:-(\d+))?\.md$")
+
+
+def report_sort_key(path: Path) -> tuple[str, int]:
+    """Chronological sort key for a report-*.md filename — (date,
+    same-day sequence number, the plain "report-YYYY-MM-DD.md" first
+    report of a day counting as 0). A plain reverse filename sort
+    breaks once same-day reports get a "-1"/"-2" suffix instead of a
+    full timestamp (see save_report's docstring for the naming scheme):
+    "-" sorts before "." in ASCII, so "report-2026-09-15-1.md" is
+    LESS than "report-2026-09-15.md" as a plain string, putting the
+    day's actual first report ahead of its later same-day ones in a
+    reverse-chronological listing — backwards from when they were
+    created. Anything that doesn't match the expected shape sorts last
+    (empty date) rather than raising, so a stray/hand-placed file in
+    the reports directory doesn't break the whole listing."""
+    match = _REPORT_FILENAME_RE.match(path.name)
+    if not match:
+        return ("", 0)
+    return (match.group(1), int(match.group(2) or 0))
 
 MD_TEMPLATE = """# {{ industry }} — Weekly Briefing
 _{{ date_range }}_
@@ -161,14 +183,14 @@ def build_report(
     picture' section, so a fresh, independent report doesn't need any
     other item from a previous report to render correctly.
 
-    report_id includes the time (not just the date) so two runs on the
-    same day — someone hits "Run now" twice, or pastes something new
-    right after a scheduled run — each get their own report file instead
-    of the second one silently overwriting the first."""
+    report_id is just today's date — save_report() is what turns this
+    into an actually-unique id/filename (appending -1, -2, ... when more
+    than one report is saved on the same day), since that's the only
+    place that knows what's already on disk."""
     clip_items = clip_items or []
     history = history or {}
     now = datetime.now(timezone.utc)
-    report_id = now.strftime("%Y-%m-%d-%H%M%S")
+    report_id = now.strftime("%Y-%m-%d")
     date_range = f"{(now).strftime('%b %d, %Y')} (last {days_back} days)"
 
     # Bulleted, one sentence + a numbered citation per item — assigned in
@@ -235,12 +257,30 @@ def build_report(
     return report_id, _render_markdown(context)
 
 
-def save_report(markdown: str, report_id: str, output_dir: str) -> Path:
+def save_report(markdown: str, report_id: str, output_dir: str) -> tuple[Path, str]:
+    """Writes the report and returns (path, final_report_id) — `report_id`
+    coming in is just a date (see build_report's docstring); this is
+    where it actually becomes a unique filename. The first report saved
+    on a given day keeps the plain date ("report-2026-09-15.md"); a
+    second one the same day — "Run now" hit twice, or a scheduled run
+    followed by a manual one — gets "-1" appended, a third "-2", and so
+    on, rather than every same-day report needing a suffix (which read
+    like report N of some unstated total) or the old timestamp-down-to-
+    the-second scheme (which made even the ordinary, only-one-that-day
+    case carry a name nobody would ever need to read out loud).
+    Callers that also need the id elsewhere (email subject, dashboard
+    lookup) must use the returned final_report_id, not the one passed
+    in — that one is provisional."""
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    path = out / f"report-{report_id}.md"
+    final_id = report_id
+    suffix = 0
+    while (out / f"report-{final_id}.md").exists():
+        suffix += 1
+        final_id = f"{report_id}-{suffix}"
+    path = out / f"report-{final_id}.md"
     path.write_text(markdown, encoding="utf-8")
-    return path
+    return path, final_id
 
 
 def email_report(markdown: str, report_id: str, industry_name: str, email_cfg: dict):

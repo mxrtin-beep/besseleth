@@ -38,6 +38,7 @@ from ..interests_store import load_interests, save_interests
 from ..cancel import FetchCancelled
 from ..pipeline import SOURCES as ALL_ITEM_SOURCES
 from ..pipeline import fetch_all
+from .. import report as report_mod
 from ..scheduler import SchedulerStatus, reschedule, run_now, start_scheduler
 from ..scrapers.manual_drop import add_smart_item
 from ..trends.company_store import find_possible_duplicate_companies, load_companies, merge_company_pair
@@ -99,7 +100,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
     @app.get("/")
     def index():
-        reports = sorted(reports_dir.glob("report-*.md"), reverse=True)
+        reports = sorted(reports_dir.glob("report-*.md"), key=report_mod.report_sort_key, reverse=True)
         report_ids = [p.stem.removeprefix("report-") for p in reports]
         return render_template(
             "dashboard.html",
