@@ -187,17 +187,27 @@ def duckduckgo_search(query: str, max_results: int = 4) -> list[str]:
     parses — it's a regex over their result__snippet links, not a real
     HTML parser, to avoid pulling in a new dependency for one scraper).
 
-    Circuit breaker: a connect/timeout failure (DuckDuckGo genuinely
-    unreachable — a firewall, a blocked network, an outage) means every
-    call for the next _DDG_COOLDOWN_SECONDS returns [] immediately
-    instead of eating another full `timeout` — without this, a large
-    backlog (e.g. "Re-resolve paper orgs" over thousands of papers) on a
-    network that can't reach DuckDuckGo at all would burn its connect
-    timeout on every single item that reaches this fallback tier, which
-    adds up to hours of dead time for a lookup that was never going to
-    succeed. A real HTTP error (4xx/5xx — DuckDuckGo IS reachable, just
-    unhappy with this particular request) does NOT trip the breaker,
-    since that's not evidence the network itself is the problem."""
+    Circuit breaker: trips for _DDG_COOLDOWN_SECONDS (every call in that
+    window returns [] immediately, no request attempted) on either of
+    two distinct signals that further calls right now are futile, not
+    just one:
+      - a connect/timeout failure (DuckDuckGo genuinely unreachable — a
+        firewall, a blocked network, an outage);
+      - a 403 or 429 response (DuckDuckGo IS reachable, but is actively
+        blocking or rate-limiting this client — bot detection, usually
+        triggered by exactly the kind of sustained automated traffic a
+        big backlog run generates). This used to be excluded on the
+        theory that an HTTP error "isn't evidence the network is the
+        problem" — true for a one-off odd response, but a 403 that
+        recurs on every single call is unambiguous evidence THIS client
+        is blocked, not that one query was malformed, and retrying it
+        per-item both wastes the run and likely prolongs the block.
+    Any other HTTP error (a genuine one-off, or a status that doesn't
+    signal blocking) does not trip it. Without tripping on either
+    signal, a large backlog (e.g. "Re-resolve paper orgs" over thousands
+    of papers) would burn a full request — successful connection,
+    unsuccessful result — on every single item that reaches this
+    fallback tier, for a lookup that was never going to succeed."""
     global _last_request_at, _ddg_unreachable_until
     now = time.monotonic()
     if _ddg_unreachable_until and now < _ddg_unreachable_until:
@@ -211,6 +221,13 @@ def duckduckgo_search(query: str, max_results: int = 4) -> list[str]:
     except (requests.ConnectionError, requests.Timeout) as e:
         _ddg_unreachable_until = time.monotonic() + _DDG_COOLDOWN_SECONDS
         print(f"[web_lookup] DuckDuckGo unreachable ({e}) — skipping it for the next {_DDG_COOLDOWN_SECONDS}s.")
+        return []
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code in (403, 429):
+            _ddg_unreachable_until = time.monotonic() + _DDG_COOLDOWN_SECONDS
+            print(f"[web_lookup] DuckDuckGo blocking/rate-limiting this client ({e}) — skipping it for the next {_DDG_COOLDOWN_SECONDS}s.")
+        else:
+            print(f"[web_lookup] DuckDuckGo search failed: {e}")
         return []
     except requests.RequestException as e:
         print(f"[web_lookup] DuckDuckGo search failed: {e}")
