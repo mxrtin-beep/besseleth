@@ -728,9 +728,14 @@ def _self_referential_org_ids(db: DB) -> list[str]:
     item from 36kr.com, say. Unlike the industry-name/domain-shape checks
     in _looks_like_a_named_org, this can't be swept by org name alone
     (the same org string could be legitimate on a different item), so it
-    has to look at each item's own url."""
+    has to look at each item's own url. Excludes papers — a paper's own
+    url is a DOI/arXiv link, and this check exists for the news/blog
+    "who published it, not who it's about" failure mode, which doesn't
+    apply there."""
     ids = []
     for row in db.items_with_org():
+        if row["source"] == "papers":
+            continue
         host_base = _hostname(row["url"] or "").split(".")[0]
         if host_base and _squash(row["org"]) == _squash(host_base):
             ids.append(row["id"])
@@ -746,11 +751,51 @@ def _title_suffix_org_ids(db: DB) -> list[str]:
     the title's own formatting instead of the item's url. Same reason
     this can't be a plain org-name-list sweep: the same org string
     could be legitimate on a different item whose title just doesn't
-    happen to end that way."""
+    happen to end that way. Excludes papers — same reasoning as
+    _self_referential_org_ids, this failure mode doesn't apply there."""
     ids = []
     for row in db.items_with_org():
+        if row["source"] == "papers":
+            continue
         _, suffix = _strip_title_source_suffix(row["title"] or "")
         if suffix and _squash(row["org"]) == _squash(suffix):
+            ids.append(row["id"])
+    return ids
+
+
+def _ungrounded_org_ids(db: DB) -> list[str]:
+    """Retroactive counterpart to the textual-grounding check in
+    _enrich_one/_reextract_org_via_llm: item ids whose stored `org`
+    doesn't even appear anywhere in that item's OWN title+summary — a
+    real, shape-valid, plausible-looking company name (e.g. "Kernel")
+    that's simply the WRONG one for this specific item (an article
+    actually about "Synchron", say) isn't caught by any other check
+    here: it's not vague, not a publisher, not self-referential. Only
+    comparing it against what this item's own text actually says can
+    catch it. Without this, a value like that — being shape-valid —
+    would sit there wrong forever: the free sweeps above never touch
+    it, and the budgeted LLM re-check tier would have to happen to
+    both reach this exact row AND land on a different answer to ever
+    correct it, which (a) costs an LLM call it doesn't need to and
+    (b) can easily reproduce the SAME wrong answer from the SAME text
+    with the SAME model, reporting "checked" with nothing actually
+    fixed. Same reason this can't be a plain org-name-list sweep as
+    the other two above: the same org string is perfectly legitimate
+    on a different item whose text actually is about it.
+
+    Papers are deliberately excluded — see items_with_org()'s
+    docstring: a paper's org is grounded in real OpenAlex author-
+    institution data, not the item's own title/abstract text, so it
+    routinely and correctly doesn't appear there verbatim at all (an
+    author's affiliation is metadata, not necessarily prose in the
+    abstract). Applying this check there would wrongly clear a large
+    fraction of perfectly correct paper orgs."""
+    ids = []
+    for row in db.items_with_org():
+        if row["source"] == "papers":
+            continue
+        item_text = _squash(f"{row['title'] or ''} {row['summary'] or ''}")
+        if _squash(row["org"]) not in item_text:
             ids.append(row["id"])
     return ids
 
@@ -876,6 +921,7 @@ def reextract_org_names(
     swept = sweep_invalid_orgs(config, db)
     swept += db.clear_org_matches_by_id(_self_referential_org_ids(db))
     swept += db.clear_org_matches_by_id(_title_suffix_org_ids(db))
+    swept += db.clear_org_matches_by_id(_ungrounded_org_ids(db))
     free_changed = swept + _reapply_known_lab_matches(config, db)
 
     rows = db.enriched_items_for_org_recheck()
@@ -1874,6 +1920,11 @@ def enrich_items_detailed(
     cleared_title_suffix = db.clear_org_matches_by_id(title_suffix_matches)
     if cleared_title_suffix:
         print(f"[enrich] Cleared {cleared_title_suffix} item(s) whose 'org' was actually the publisher named at the end of its own title.")
+
+    ungrounded = _ungrounded_org_ids(db)
+    cleared_ungrounded = db.clear_org_matches_by_id(ungrounded)
+    if cleared_ungrounded:
+        print(f"[enrich] Cleared {cleared_ungrounded} item(s) whose 'org' didn't even appear anywhere in the item's own text.")
 
     renamed = _canonicalize_existing_orgs(db)
     if renamed:

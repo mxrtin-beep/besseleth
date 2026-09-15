@@ -992,13 +992,20 @@ class DB:
         self.conn.commit()
 
     def items_with_org(self) -> list[sqlite3.Row]:
-        """(id, org, url, title) for every item with an org set — for a
-        per-item cleanup check that can't be expressed as a plain
-        org-name-list match (e.g. comparing an item's own org against
-        its own url's hostname, or its own title's trailing publisher-
-        suffix), unlike clear_org_matches()/clear_org_matches_by_id()."""
+        """(id, org, url, title, summary, source) for every item with an
+        org set — for a per-item cleanup check that can't be expressed
+        as a plain org-name-list match (e.g. comparing an item's own org
+        against its own url's hostname, its own title's trailing
+        publisher-suffix, or whether the org even appears anywhere in
+        its own text), unlike clear_org_matches()/clear_org_matches_by_id().
+        Includes papers too — callers whose check doesn't make sense for
+        papers (its org is deliberately resolved from real author-
+        institution data via paper_org.py, not from grepping the
+        item's own title/summary text, so a text-presence check would
+        be wrong there) need to filter row["source"] == "papers" out
+        themselves."""
         self.conn.row_factory = sqlite3.Row
-        return list(self.conn.execute("SELECT id, org, url, title FROM items WHERE org IS NOT NULL").fetchall())
+        return list(self.conn.execute("SELECT id, org, url, title, summary, source FROM items WHERE org IS NOT NULL").fetchall())
 
     def clear_org_matches_by_id(self, ids: list[str]) -> int:
         """Like clear_org_matches(), but for specific item ids rather
