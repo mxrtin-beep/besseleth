@@ -1158,7 +1158,7 @@ def _author_affiliations_block(row) -> str:
         return ""
     lines = [
         f"- {name}: {', '.join(institutions)}" if institutions else f"- {name}: (institution not on record)"
-        for name, institutions in authorships
+        for name, institutions, _ in authorships
     ]
     return "\n".join(lines)
 

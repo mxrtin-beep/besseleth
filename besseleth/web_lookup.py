@@ -127,7 +127,7 @@ def lookup_openalex_work_by_id(openalex_id: str) -> dict | None:
     return _get(f"{OPENALEX_WORKS_API}/{short_id}", {})
 
 
-def lookup_arxiv_authorships(arxiv_id: str) -> list[tuple[str, list[str]]]:
+def lookup_arxiv_authorships(arxiv_id: str) -> list[tuple[str, list[str], bool]]:
     """Real author-institution data for an arXiv paper, from OpenAlex
     (https://openalex.org — free, keyless, aggregates affiliations from
     ORCID/Crossref/publisher metadata). This is a genuine lookup, not
@@ -135,10 +135,12 @@ def lookup_arxiv_authorships(arxiv_id: str) -> list[tuple[str, list[str]]]:
     affiliation filled in, and asking the LLM to recall an author's
     institution from its training data would be a guess with no way to
     verify it — exactly the kind of thing enrich.py otherwise refuses to
-    do. Returns [(author_name, [institution_name, ...]), ...] — [] if
-    the paper isn't in OpenAlex (arXiv has only assigned every preprint
-    its own DOI since Feb 2022, so older papers often aren't findable
-    this way) or on any request failure."""
+    do. Returns [(author_name, [institution_name, ...], is_corresponding),
+    ...] — same 3-tuple shape as authorships_from_work (this just calls
+    straight through to it) — [] if the paper isn't in OpenAlex (arXiv
+    has only assigned every preprint its own DOI since Feb 2022, so
+    older papers often aren't findable this way) or on any request
+    failure."""
     data = lookup_openalex_work_by_doi(f"10.48550/arxiv.{arxiv_id.lower()}")
     if not data:
         return []
