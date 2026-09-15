@@ -1025,40 +1025,33 @@ def reextract_paper_orgs(
     instead of re-picking the same handful.
 
     Returns {"checked": int, "changed": int}."""
-    # Free, no-LLM normalization pass first: runs every stored org back
-    # through paper_org.normalize_stored_paper_org — the exact same
-    # parsing/validation real LLM output goes through. A value that only
-    # needs COSMETIC cleanup (a leading "- \"" artifact) gets fixed here
-    # for free, no LLM call, since the real answer was already sitting
-    # right there in the stored text. Deliberately does NOT clear
-    # anything to null by itself — a value normalize_stored_paper_org
-    # can't recover anything from (a placeholder echo, a title-
-    # hallucinated name, a bare hedge) just stays as-is here and falls
-    # through to the budgeted loop
-    # below, which makes an ACTUAL fresh resolution attempt (real
-    # institution data, then the web-search fallback) before ever
-    # giving up on it — null is the last resort after really trying,
-    # never the first move on merely-invalid stored text.
-    normalized = 0
-    for row in db.papers_for_org_recheck():
-        if not row["org"]:
-            continue
-        authors = [name.strip() for name in (row["authors"] or "").split(",") if name.strip()]
-        fixed_org, fixed_type = paper_org.normalize_stored_paper_org(row["org"], row["title"], authors)
-        if fixed_org and fixed_org != row["org"]:
-            db.log_change(row["id"], row["title"], "papers", "org", row["org"], fixed_org, "normalized paper org", item_url=row["url"])
-            db.sync_org(row["id"], fixed_org, fixed_type, row["org_description"])
-            normalized += 1
-
+    # No free/cosmetic pre-pass anymore — there used to be one here that
+    # ran a string-only cleanup (paper_org.normalize_stored_paper_org)
+    # before the loop below ever got to a row, on the theory that some
+    # values only need cheap formatting fixes and don't need a live
+    # re-check. That was a real bug, not just a missed case: it once
+    # rewrote "Stanford, Shenoy Lab" straight to "Stanford" by string
+    # manipulation alone (a paper actually from an unrelated Shenzhen
+    # group) — no live data involved — and that now-clean-LOOKING
+    # value then sailed past the real check below without ever being
+    # verified, because by the time the real check saw it, it already
+    # looked like a normal, valid, current-format org. Any such
+    # shortcut has the same failure mode: it can hide a wrong value
+    # behind a coat of cosmetic paint before the one check that
+    # actually knows anything real (live OpenAlex author-institution
+    # data, or a grounded search) ever gets to look at it. So now
+    # EVERY row, in every shape, goes straight to a genuine live
+    # resolution attempt below — no exceptions, no pre-filtering by
+    # what the stored text merely looks like.
     if config.summarizer.get("backend", "groq") not in summarizer_mod.LLM_BACKENDS:
-        return {"checked": 0, "changed": normalized}
+        return {"checked": 0, "changed": 0}
 
     rows = db.papers_for_org_recheck()
     cfg = config.raw.get("enrichment", {}) or {}
     budget = max_llm_calls if max_llm_calls is not None else cfg.get("max_items_per_run", 50)
 
     checked = 0
-    changed = normalized
+    changed = 0
     for i, row in enumerate(rows):
         if budget <= 0:
             break
