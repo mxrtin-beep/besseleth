@@ -72,13 +72,13 @@
     max-height: 150px; overflow-y: auto; border: 1px solid #8886; border-radius: 6px;
     padding: .2rem; background: transparent;
   }
-  .chipfilter-option {
+  .controls.filterbar .chipfilter-option {
     display: flex; align-items: center; gap: .4rem; padding: .2rem .35rem;
     font-size: .82rem; cursor: pointer; border-radius: 4px; white-space: nowrap;
-    overflow: hidden; text-overflow: ellipsis;
+    overflow: hidden; text-overflow: ellipsis; opacity: 1; margin-bottom: 0;
   }
   .chipfilter-option:hover { background: #4a90d922; }
-  .chipfilter-option input { width: auto; flex-shrink: 0; }
+  .controls.filterbar .chipfilter-option input { width: auto; flex-shrink: 0; }
   .chipfilter-option .hint { margin-left: auto; flex-shrink: 0; }
   select, input[type=text], input[type=date], textarea {
     padding: .4rem .6rem; border-radius: 6px; border: 1px solid #8886; font-size: .9rem;
