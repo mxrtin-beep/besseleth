@@ -10,6 +10,7 @@ Usage:
     python -m besseleth.cli social-add     [--url URL] [--text "..."]  # force-tag as social
     python -m besseleth.cli device-suggest --item-id <id>  # draft a devices.yaml entry from a scraped item
     python -m besseleth.cli company-refresh-stock          # update stock_price for companies.yaml's tickers (free)
+    python -m besseleth.cli standardize-locations            # reformat every stored location to "Country[, State], City" (free)
     python -m besseleth.cli report-delete <report-id>       # e.g. report-delete 2026-09-01
     python -m besseleth.cli item-delete --item-id <id>       # remove a pasted (or any) item outright
     python -m besseleth.cli source-clear --source news       # delete EVERY item for a source (e.g. after a stale
@@ -17,6 +18,15 @@ Usage:
     python -m besseleth.cli enrich [--all]                   # tag arXiv/news/blog items for the Papers table
                                                               # --all: work through the whole backlog, not just one
                                                               # max_items_per_run batch — leave it running
+    python -m besseleth.cli reextract-orgs [--all]           # NEWS/BLOG ONLY — re-derive just their org names
+                                                              # (papers use reextract-paper-orgs below instead) — --all: uncapped
+    python -m besseleth.cli reextract-paper-orgs [--all]     # re-resolve org for already-stored PAPERS via real
+                                                              # OpenAlex author-institution data (paper_org.py) —
+                                                              # fixes an existing backlog; fresh fetches resolve
+                                                              # this automatically already — --all: uncapped
+    python -m besseleth.cli reextract-org-locations [--all]  # force-recheck EVERY org's location (not just
+                                                              # orgs missing one) — fixes a location written
+                                                              # wrong before a lookup fix; --all: uncapped
     python -m besseleth.cli serve          [--config config.yaml]   # run continuously per `schedule` in config.yaml
 
 `serve` is the "regularly updating" mode — start it once (e.g. as a
@@ -68,10 +78,14 @@ COMMANDS = [
     "social-add",
     "device-suggest",
     "company-refresh-stock",
+    "reextract-paper-orgs",
+    "reextract-org-locations",
+    "standardize-locations",
     "report-delete",
     "item-delete",
     "source-clear",
     "enrich",
+    "reextract-orgs",
     "serve",
 ]
 
@@ -138,6 +152,17 @@ def main(argv=None):
             print(f"[cli] {line}")
         return
 
+    if args.command == "standardize-locations":
+        from .enrich import standardize_location_labels
+
+        db = DB(config.db_path)
+        try:
+            result = standardize_location_labels(db)
+        finally:
+            db.close()
+        print(f"[cli] Checked {result['checked']} distinct location(s): {result['updated']} item(s)/org(s) reformatted.")
+        return
+
     if args.command == "enrich":
         from .enrich import enrich_items_detailed
 
@@ -147,6 +172,51 @@ def main(argv=None):
             print(f"[cli] {result['message']}")
         finally:
             db.close()
+        return
+
+    if args.command == "reextract-orgs":
+        # News/blog only now — papers/labs org is resolved at fetch time
+        # (paper_org.py); use reextract-paper-orgs below to fix an
+        # already-stored papers backlog instead.
+        from .enrich import reextract_org_names
+
+        db = DB(config.db_path)
+        try:
+            result = reextract_org_names(config, db, max_llm_calls=10**9 if args.all else None)
+        finally:
+            db.close()
+        print(
+            f"[cli] Re-checked {result['checked']} news/blog item(s): {result['changed']} org(s) changed "
+            f"({result['llm_checked']} needed an LLM call; the rest were free labs.yaml matches or already correct)."
+        )
+        if not args.all and result["llm_checked"] >= config.raw.get("enrichment", {}).get("max_items_per_run", 50):
+            print("[cli]   Hit this run's cap — run again (or with --all, uncapped) to keep working through the backlog.")
+        return
+
+    if args.command == "reextract-paper-orgs":
+        from .enrich import reextract_paper_orgs
+
+        db = DB(config.db_path)
+        try:
+            result = reextract_paper_orgs(config, db, max_llm_calls=10**9 if args.all else None)
+        finally:
+            db.close()
+        print(f"[cli] Re-resolved {result['checked']} paper(s): {result['changed']} org(s) changed.")
+        if not args.all:
+            print("[cli]   Run again (or with --all, uncapped) to keep working through the backlog.")
+        return
+
+    if args.command == "reextract-org-locations":
+        from .enrich import reextract_org_locations
+
+        db = DB(config.db_path)
+        try:
+            result = reextract_org_locations(config, db, max_lookups=10**9 if args.all else None)
+        finally:
+            db.close()
+        print(f"[cli] Re-checked {result['checked']} org(s): {result['changed']} location(s) changed.")
+        if not args.all:
+            print("[cli]   Run again (or with --all, uncapped) to keep working through the backlog.")
         return
 
     if args.command == "item-delete":

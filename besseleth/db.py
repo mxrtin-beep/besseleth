@@ -3,7 +3,9 @@ structured "paper" fields (org, modality, therapeutic target, novelty)
 that besseleth/enrich.py fills in for the papers table."""
 from __future__ import annotations
 
+import difflib
 import json
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -64,6 +66,22 @@ CREATE TABLE IF NOT EXISTS job_board_cache (
     checked_at TEXT NOT NULL
 );
 
+-- Which OpenAlex author id a labs.yaml entry resolves to (see
+-- scrapers/openalex_scraper.py's fetch_known_lab_papers) — so pulling a
+-- listed PI's own papers directly (not just whatever happens to match
+-- your keyword list) doesn't re-search OpenAlex's Authors endpoint for
+-- the same PI+university on every single fetch. NULL author_id means
+-- "searched, found nobody confident enough to trust" (still cached, so
+-- a bad/rare-name PI isn't re-queried every run either) — recheck logic
+-- lives in the scraper, same idea as job_board_cache/org_location_cache.
+CREATE TABLE IF NOT EXISTS lab_author_cache (
+    pi TEXT NOT NULL,
+    university TEXT NOT NULL,
+    author_id TEXT,
+    checked_at TEXT NOT NULL,
+    PRIMARY KEY (pi, university)
+);
+
 -- Whether a web lookup (see web_lookup.py) already tried to find an
 -- org's location, so a miss isn't re-queried every enrich run — same
 -- idea as job_board_cache. The location itself is cached too (not just
@@ -77,6 +95,22 @@ CREATE TABLE IF NOT EXISTS org_location_cache (
     lat REAL,
     lon REAL,
     checked_at TEXT NOT NULL
+);
+
+-- Remembers a "Not duplicates" decision from the Orgs/Companies tabs'
+-- possible-duplicate flags (see find_possible_duplicate_orgs and
+-- company_store.find_possible_duplicate_companies) — without this,
+-- both are recomputed fresh from current names on every page load with
+-- no memory of what a human already looked at and dismissed, so a
+-- dismissed pair just comes right back on the next visit/restart. kind
+-- is "org" or "company"; a and b are stored with the alphabetically
+-- smaller name first so a lookup doesn't care which order a pair was
+-- computed in this time.
+CREATE TABLE IF NOT EXISTS dismissed_duplicate_pairs (
+    kind TEXT NOT NULL,
+    a TEXT NOT NULL,
+    b TEXT NOT NULL,
+    PRIMARY KEY (kind, a, b)
 );
 
 -- Devices/systems tracked over time (trends/store.py) — e.g. for
@@ -123,6 +157,80 @@ CREATE TABLE IF NOT EXISTS companies (
     notes TEXT,
     auto_extracted INTEGER DEFAULT 0
 );
+
+-- A research PDF someone uploaded via the dashboard's Papers tab. The
+-- item itself lives in `items` (source = 'upload') like everything
+-- else scraped/pasted in, so it flows through the same enrichment/
+-- report pipeline as an arXiv/OpenAlex paper; this table holds the
+-- upload-specific extras: the original filename and the "how this fits
+-- into current research" write-up generated at upload time (comparing
+-- it against the closest-matching papers already on file — worth doing
+-- right away rather than waiting on the next scheduled enrich pass).
+CREATE TABLE IF NOT EXISTS paper_uploads (
+    item_id TEXT PRIMARY KEY REFERENCES items(id),
+    filename TEXT NOT NULL,
+    comparison_note TEXT,
+    related_item_ids TEXT,          -- comma-separated ids of the papers it was compared against
+    created_at TEXT NOT NULL
+);
+
+-- Org-level timeline events — funding rounds, IPOs/regulatory
+-- approvals, mergers/acquisitions, leadership changes, and notable
+-- papers, one row per event, sortable by org+date. Separate from
+-- `companies` (one current snapshot per org) and `devices` (per-device
+-- metric readings) since an org can have events with no device involved
+-- at all (a CEO change, a merger). Auto-extracted rows (funding/IPO
+-- mirrored from the `companies` table, a merger/leadership change the
+-- LLM picks up during enrichment, a paper crossing the novelty
+-- threshold) are tagged the same way devices/companies rows are, so a
+-- hand-added correction is never at risk of being treated as one.
+CREATE TABLE IF NOT EXISTS company_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    org TEXT NOT NULL,
+    event_type TEXT NOT NULL,       -- funding | ipo | regulatory_approval | merger_acquisition | leadership_change | notable_paper | other
+    event_date TEXT,                -- ISO8601 date, best-effort
+    title TEXT NOT NULL,            -- short human-readable label, e.g. "$40M Series B"
+    description TEXT,
+    source_url TEXT,
+    auto_extracted INTEGER DEFAULT 0,
+    recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_company_events_org ON company_events(org);
+
+-- Daily closing-price history per company, for the Trends tab's stock
+-- comparison chart — `companies.stock_price` is only ever the latest
+-- quote (a single number), which is fine for a snapshot but not enough
+-- to plot. Backfilled once from Stooq's free daily-history endpoint the
+-- first time a ticker is set, then appended to on every
+-- `company-refresh-stock` run (see trends/company_store.py).
+CREATE TABLE IF NOT EXISTS stock_price_history (
+    org TEXT NOT NULL,
+    date TEXT NOT NULL,             -- ISO8601 date (YYYY-MM-DD)
+    close REAL NOT NULL,
+    PRIMARY KEY (org, date)
+);
+
+-- A real change log, not a snapshot: one row per actual field mutation
+-- (a value going from nothing/old to something new), across whatever
+-- wrote it — a plain fetch's own enrichment, "Re-check org names", "Re-
+-- resolve paper orgs", a duplicate-org sync, location standardization.
+-- This is what the Log tab's "what changed and when" view reads —
+-- unlike db.recently_enriched() (a snapshot of each item's CURRENT
+-- values), this only ever grows by an actual mutation, so it reads as a
+-- log of events, not a re-rendering of present state.
+CREATE TABLE IF NOT EXISTS change_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    item_id TEXT,
+    item_title TEXT,
+    item_url TEXT,
+    source TEXT,
+    field TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT,
+    reason TEXT NOT NULL          -- e.g. "enrichment", "paper org resolution", "org re-check", "location standardize"
+);
+CREATE INDEX IF NOT EXISTS idx_change_log_at ON change_log(at DESC);
 """
 
 # Columns added after the initial release to `devices`/`companies` —
@@ -158,7 +266,20 @@ ENRICHMENT_COLUMNS = {
     "enriched_at": "TEXT",             # ISO8601 once enrichment has run for this item (even if it found nothing)
     "matched_reason": "TEXT",          # "company" | "school" — why matched_contact matched (see personalize.py)
     "authors": "TEXT",                 # comma-separated author names, scraped directly (papers.py/openalex_scraper.py) — not LLM-derived
-    "citation_count": "INTEGER",       # from OpenAlex, for ranking non-arXiv papers by impact — NULL for sources OpenAlex doesn't cover
+    "citation_count": "INTEGER",       # from OpenAlex at scrape time — not surfaced/refreshed anywhere; OpenAlex/arXiv
+                                        # coverage of it was unreliable enough that it isn't used for ranking or display
+    "openalex_id": "TEXT",             # OpenAlex's own work id (e.g. "https://openalex.org/W123...") — NULL for
+                                        # arXiv items and for anything scraped before this column existed
+    # Set on every item enrich.reextract_org_names()'s LLM tier actually
+    # spends a call on (whether or not it changed anything) — without
+    # this there's no way to tell "already tried, genuinely fine" from
+    # "never got to it yet", so a capped run (enrichment.max_items_per_run)
+    # kept re-picking the same handful of items (SQLite's default row
+    # order) every time it was clicked, forever reporting "0 changed" for
+    # items that already happened to be correct while the real backlog
+    # past them was never reached. NULL sorts first, so ordering by this
+    # ascending always sends never-yet-checked items to the front.
+    "org_rechecked_at": "TEXT",
 }
 
 
@@ -186,6 +307,33 @@ class Item:
     lon: Optional[float] = None
     authors: Optional[str] = None
     citation_count: Optional[int] = None
+    openalex_id: Optional[str] = None
+
+
+def _typo_comparison_core(a: str, b: str) -> tuple[str, str]:
+    """Strips the longest word-aligned prefix AND suffix `a`/`b` have in
+    common (case-insensitive), leaving just the part that actually
+    differs — used by find_possible_duplicate_orgs's typo pass so a
+    shared institution ("... Lab at Stanford") doesn't inflate two
+    genuinely different labs' similarity ratio just because most of the
+    string happens to match. Falls back to the original strings if
+    stripping would consume one of them entirely (nothing left to
+    meaningfully compare — safer to fall back to the full-string ratio,
+    which for two truly identical strings never happens here since
+    callers only ever call this on distinct org names)."""
+    aw, bw = a.split(), b.split()
+    suffix_len = 0
+    while suffix_len < min(len(aw), len(bw)) and aw[-1 - suffix_len].lower() == bw[-1 - suffix_len].lower():
+        suffix_len += 1
+    aw2 = aw[: len(aw) - suffix_len]
+    bw2 = bw[: len(bw) - suffix_len]
+    prefix_len = 0
+    while prefix_len < min(len(aw2), len(bw2)) and aw2[prefix_len].lower() == bw2[prefix_len].lower():
+        prefix_len += 1
+    aw2, bw2 = aw2[prefix_len:], bw2[prefix_len:]
+    core_a = " ".join(aw2)
+    core_b = " ".join(bw2)
+    return (core_a, core_b) if core_a and core_b else (a, b)
 
 
 class DB:
@@ -210,6 +358,14 @@ class DB:
         for col, sqltype in COMPANY_COLUMNS.items():
             if col not in existing:
                 self.conn.execute(f"ALTER TABLE companies ADD COLUMN {col} {sqltype}")
+        # change_log itself is new (this session), but so is item_url on
+        # it — added after change_log had already gone out once, so an
+        # existing DB can have the table without that column. CREATE
+        # TABLE IF NOT EXISTS is a no-op on an existing table, hence this
+        # explicit ALTER (same idiom as the three column dicts above).
+        existing = {row[1] for row in self.conn.execute("PRAGMA table_info(change_log)")}
+        if "item_url" not in existing:
+            self.conn.execute("ALTER TABLE change_log ADD COLUMN item_url TEXT")
 
         # arXiv preprints and OpenAlex-indexed published papers used to be
         # two separate sources ("arxiv" vs "papers") — now one, since to a
@@ -298,8 +454,8 @@ class DB:
             """INSERT INTO items
                (id, source, title, url, summary, published_at, fetched_at,
                 matched_keywords, matched_contact, matched_company, included_in_report,
-                authors, citation_count)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)""",
+                authors, citation_count, openalex_id, org, org_type)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)""",
             (
                 item.id,
                 item.source,
@@ -313,6 +469,9 @@ class DB:
                 item.matched_company,
                 item.authors,
                 item.citation_count,
+                item.openalex_id,
+                item.org,
+                item.org_type,
             ),
         )
         self.conn.commit()
@@ -400,6 +559,19 @@ class DB:
             params.append(limit)
         return list(self.conn.execute(q, params).fetchall())
 
+    def count_unenriched_items(self, sources: list[str]) -> int:
+        """How many items in the given sources still have no enriched_at
+        at all, regardless of age — a cheap COUNT(*) counterpart to
+        unenriched_items(sources, limit=None, days_back=None), for
+        telling the user how much backlog is left after a single capped
+        batch (run_until_done=False) rather than fetching every row's
+        full data just to len() it."""
+        self.conn.row_factory = sqlite3.Row
+        placeholders = ",".join("?" for _ in sources)
+        return self.conn.execute(
+            f"SELECT COUNT(*) AS n FROM items WHERE source IN ({placeholders}) AND enriched_at IS NULL", sources,
+        ).fetchone()["n"]
+
     def count_items(self, sources: list[str]) -> int:
         """How many items exist in the given sources, period — used to
         bound a force re-check "run until done" to one full pass over
@@ -409,6 +581,17 @@ class DB:
         placeholders = ",".join("?" for _ in sources)
         row = self.conn.execute(f"SELECT COUNT(*) FROM items WHERE source IN ({placeholders})", sources).fetchone()
         return row[0] if row else 0
+
+    def enrichment_counts(self, sources: list[str]) -> dict:
+        """{"total": n, "enriched": m} across `sources` — the Log tab's
+        "Program state" section uses this for "X/Y items enriched",
+        alongside get_enrich_stats()'s timing info."""
+        placeholders = ",".join("?" for _ in sources)
+        total = self.conn.execute(f"SELECT COUNT(*) FROM items WHERE source IN ({placeholders})", sources).fetchone()[0]
+        enriched = self.conn.execute(
+            f"SELECT COUNT(*) FROM items WHERE source IN ({placeholders}) AND enriched_at IS NOT NULL", sources
+        ).fetchone()[0]
+        return {"total": total, "enriched": enriched}
 
     def items_to_reenrich(self, sources: list[str], limit: int) -> list[sqlite3.Row]:
         """Every item in the given sources, oldest-enriched (or never
@@ -456,6 +639,31 @@ class DB:
             (novelty_score, novelty_rationale, item_id),
         )
         self.conn.commit()
+
+    def log_change(
+        self, item_id: Optional[str], item_title: Optional[str], source: Optional[str],
+        field: str, old_value, new_value, reason: str, item_url: Optional[str] = None,
+    ) -> None:
+        """Appends one row to change_log — see its schema comment. Call
+        sites decide FOR THEMSELVES whether old_value != new_value is
+        worth logging (this never compares or dedupes); a plain string
+        conversion is applied to both so a caller can pass a raw int/
+        None straight through."""
+        self.conn.execute(
+            "INSERT INTO change_log (at, item_id, item_title, item_url, source, field, old_value, new_value, reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                datetime.now(timezone.utc).isoformat(), item_id, item_title, item_url, source, field,
+                None if old_value is None else str(old_value),
+                None if new_value is None else str(new_value),
+                reason,
+            ),
+        )
+        self.conn.commit()
+
+    def recent_changes(self, limit: int = 100) -> list[sqlite3.Row]:
+        self.conn.row_factory = sqlite3.Row
+        return list(self.conn.execute("SELECT * FROM change_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall())
 
     def sync_org(self, item_id: str, org: Optional[str], org_type: Optional[str], org_description: Optional[str]) -> None:
         self.conn.execute(
@@ -533,24 +741,102 @@ class DB:
         rows = self.conn.execute("SELECT DISTINCT org FROM items WHERE org IS NOT NULL AND org != ''").fetchall()
         return [r[0] for r in rows]
 
-    def accumulated_knowledge_stats(self) -> dict:
+    def papers_for_org_recheck(self) -> list[sqlite3.Row]:
+        """(id, title, url, authors, openalex_id, org, org_type,
+        org_description) for every papers-source item, regardless of
+        enrichment status — the input to enrich.reextract_paper_orgs(),
+        which re-resolves org via paper_org.py's institution-grounded
+        method for the existing backlog (fetch-time resolution — see
+        paper_org.py — only ever helps items fetched from here on).
+        Ordered never-rechecked-first, same idea and same column
+        (org_rechecked_at) as enriched_items_for_org_recheck()."""
+        self.conn.row_factory = sqlite3.Row
+        return list(self.conn.execute(
+            "SELECT id, title, url, authors, openalex_id, org, org_type, org_description FROM items "
+            "WHERE source = 'papers' ORDER BY org_rechecked_at IS NOT NULL, org_rechecked_at ASC"
+        ).fetchall())
+
+    def enriched_items_for_org_recheck(self) -> list[sqlite3.Row]:
+        """(id, title, summary, org, org_type, org_description, url,
+        matched_keywords) for every already-enriched item — the input to
+        enrich.py's org-only re-extraction pass (both its free labs.yaml
+        tier and its LLM tier), which re-derives just `org`/`org_type`/
+        `org_description` for an item, leaving everything else already
+        stored (modality, target, novelty, location) untouched. Includes
+        items with no org too, not just ones that have one — a plain
+        "Poon Lab" mention with no institution in that item's own text
+        can currently be sitting at org=NULL just as easily as at a wrong
+        value, and a labs.yaml improvement should catch both."""
+        # papers excluded: their org is resolved at FETCH time now (see
+        # paper_org.py), grounded in real OpenAlex author-institution
+        # data — this news/blog-oriented LLM-guess-from-summary path
+        # would be a step backward for them, not a fix.
+        self.conn.row_factory = sqlite3.Row
+        return list(self.conn.execute(
+            "SELECT id, title, summary, source, org, org_type, org_description, url, matched_keywords FROM items "
+            "WHERE enriched_at IS NOT NULL AND source != 'papers' "
+            "ORDER BY org_rechecked_at IS NOT NULL, org_rechecked_at ASC"
+        ).fetchall())
+
+    def mark_org_rechecked(self, item_id: str) -> None:
+        """Records that a re-check pass actually resolved something for
+        this item (see org_rechecked_at's schema comment), so a bounded
+        run keeps advancing through the backlog instead of re-picking the
+        same not-yet-marked items every time. Callers should call this
+        only when resolution produced a real answer — reextract_org_names()
+        still calls it unconditionally (spending an LLM call either way),
+        but reextract_paper_orgs() only calls it when resolution actually
+        found an org, since a genuine miss (no data to resolve from) means
+        nothing was learned and the row must stay at the front of the
+        never-checked-first queue rather than being falsely marked as
+        verified."""
+        self.conn.execute("UPDATE items SET org_rechecked_at = ? WHERE id = ?", (datetime.now(timezone.utc).isoformat(), item_id))
+        self.conn.commit()
+
+    def accumulated_knowledge_stats(self, window_days_back: int | None = None) -> dict:
         """A snapshot of everything besseleth has accumulated across all
         runs, ever — not just this week's items. Used to give the report's
         closing 'big picture' section something to place new items
-        against (an org that's been quiet suddenly active again, a trend
-        that's been building for months, etc.)."""
+        against: an org that's been quiet suddenly active again, a trend
+        that's been building for months, AND (when `window_days_back` is
+        given, matching the report's own window) actual past claims —
+        see top_findings_before() — for it to say whether today's items
+        agree or disagree with, not just aggregate activity counts."""
         total_items = self.conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
         earliest = self.conn.execute(
             "SELECT MIN(published_at) FROM items WHERE published_at IS NOT NULL AND published_at != ''"
         ).fetchone()[0]
         org_counts = self.org_item_counts()
         top_orgs = sorted(org_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        past_findings = (
+            [dict(row) for row in self.top_findings_before(window_days_back)] if window_days_back else []
+        )
         return {
             "total_items": total_items,
             "total_orgs": len(org_counts),
             "top_orgs": top_orgs,
             "earliest_date": (earliest or "")[:10],
+            "past_findings": past_findings,
         }
+
+    def top_findings_before(self, cutoff_days_back: int, min_score: int = 4, limit: int = 5) -> list[sqlite3.Row]:
+        """Past high-novelty findings from BEFORE the current report's
+        window (same cutoff math as items_in_window, so this and the
+        window never overlap — otherwise "past" findings would just be
+        today's own items talking to themselves). Used to give the
+        report's closing 'Big picture' section actual prior claims to
+        agree or disagree with, not just aggregate org-activity stats —
+        (title, novelty_rationale, published_at), highest novelty then
+        most recent first."""
+        self.conn.row_factory = sqlite3.Row
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=cutoff_days_back)).isoformat()
+        return list(self.conn.execute(
+            "SELECT title, novelty_rationale, published_at FROM items "
+            "WHERE COALESCE(NULLIF(published_at, ''), fetched_at) < ? AND novelty_score >= ? "
+            "AND novelty_rationale IS NOT NULL AND novelty_rationale != '' "
+            "ORDER BY novelty_score DESC, published_at DESC LIMIT ?",
+            (cutoff, min_score, limit),
+        ).fetchall())
 
     def org_item_counts(self) -> dict[str, int]:
         """{org: item count} for every distinct org — used to pick which
@@ -572,13 +858,167 @@ class DB:
         self.conn.commit()
         return cur.rowcount
 
+    def merge_org(self, keep_org: str, drop_org: str) -> int:
+        """Full cross-table merge for two org strings that are the same
+        real organization spelled/formatted differently ("Valve" vs
+        "Valve Corporation") — unlike rename_org (items only), this folds
+        `drop_org` into `keep_org` everywhere an org name is stored:
+        items, devices, job_postings, company_events, stock_price_history,
+        org_location_cache, and the companies table (via the existing
+        merge_company, if `drop_org` has a companies row — a plain rename
+        would fail on companies.name's primary key if `keep_org` already
+        has one too). Returns how many items rows were repointed (the
+        same "how much changed" signal rename_org already returns; the
+        other tables are supporting data, not the main count callers
+        care about). Explicit, human-confirmed only (see
+        find_possible_duplicate_orgs) — never automatic, same reasoning
+        as merge_company's docstring."""
+        cur = self.conn.execute("UPDATE items SET org = ? WHERE org = ?", (keep_org, drop_org))
+        changed = cur.rowcount
+        self.conn.execute("UPDATE devices SET org = ? WHERE org = ?", (keep_org, drop_org))
+        self.conn.execute("UPDATE job_postings SET org = ? WHERE org = ?", (keep_org, drop_org))
+        self.conn.execute("UPDATE company_events SET org = ? WHERE org = ?", (keep_org, drop_org))
+        # stock_price_history/org_location_cache have (org, ...) primary
+        # keys, so a plain UPDATE can collide if `keep_org` already has a
+        # row for the same date/at all — OR IGNORE keeps whichever
+        # (keep_org's own) row already exists instead of erroring, then
+        # the DELETE clears out whatever's left under drop_org.
+        self.conn.execute("UPDATE OR IGNORE stock_price_history SET org = ? WHERE org = ?", (keep_org, drop_org))
+        self.conn.execute("DELETE FROM stock_price_history WHERE org = ?", (drop_org,))
+        self.conn.execute(
+            "INSERT OR IGNORE INTO org_location_cache (org, found, location_text, lat, lon, checked_at) "
+            "SELECT ?, found, location_text, lat, lon, checked_at FROM org_location_cache WHERE org = ?",
+            (keep_org, drop_org),
+        )
+        self.conn.execute("DELETE FROM org_location_cache WHERE org = ?", (drop_org,))
+        self.conn.commit()
+        # companies.name is that table's primary key — merge_company()
+        # already knows how to fold one company row into another without
+        # hitting that constraint; a plain rename only works when
+        # `keep_org` has no companies row of its own yet.
+        if self.get_company(drop_org):
+            if self.get_company(keep_org):
+                self.merge_company(keep_name=keep_org, drop_name=drop_org)
+            else:
+                self.conn.execute("UPDATE companies SET name = ? WHERE name = ?", (keep_org, drop_org))
+                self.conn.commit()
+        return changed
+
+    def find_possible_duplicate_orgs(self) -> list[tuple[str, str, str]]:
+        """Flags pairs of stored orgs that look like the same real org
+        under two different spellings/formattings — for a human to
+        review and merge_org(), never automatic (same reasoning as
+        trends/company_store.py's find_possible_duplicate_companies for
+        the narrower companies-table case this generalizes). Two
+        different, deliberately separate heuristics, since they catch two
+        different failure shapes:
+
+          - a likely TYPO (e.g. "Axfot" for "Axoft") — near-identical
+            length AND a high character-similarity ratio. Conservative on
+            purpose: a coincidental similarity between two genuinely
+            different orgs is far more likely the shorter/further apart
+            two strings are, so this only fires when both length and
+            ratio agree.
+          - the same org with/without a common corporate suffix (e.g.
+            "Valve" vs "Valve Corporation", "OpenAI" vs "OpenAI Inc.") —
+            an entirely different shape a pure similarity ratio misses
+            completely (wildly different lengths, so the typo check above
+            never even looks at these), caught instead by stripping a
+            known suffix word and comparing what's left.
+
+        Returns (org_a, org_b, reason) tuples, "reason" being "typo" or
+        "suffix" so the UI can label which kind of match this is."""
+        names = self.distinct_orgs()
+        pairs: list[tuple[str, str, str]] = []
+        seen: set[frozenset] = set()
+
+        def _add(a: str, b: str, reason: str) -> None:
+            key = frozenset((a, b))
+            if key not in seen:
+                seen.add(key)
+                pairs.append((a, b, reason))
+
+        # Typo pass — same conservative length+ratio gate as companies',
+        # but on each pair's shared-affix-STRIPPED "core" rather than the
+        # full string. Without this, two DIFFERENT labs that happen to
+        # share an institution ("Babapoor Lab at Stanford" vs "Povliko
+        # Lab at Stanford") get flagged on the strength of that shared
+        # "Lab at Stanford" tail alone — the ratio is computed over the
+        # WHOLE string, so a long identical suffix inflates it past the
+        # threshold even though the one part that actually identifies
+        # which lab this is (the PI name) is nothing alike. Stripping the
+        # longest common word-aligned prefix/suffix first means the ratio
+        # only ever measures the part that's actually distinguishing.
+        for i, name in enumerate(names):
+            for other in names[i + 1 :]:
+                core_a, core_b = _typo_comparison_core(name, other)
+                if abs(len(core_a) - len(core_b)) > 2:
+                    continue
+                if difflib.SequenceMatcher(None, core_a.lower(), core_b.lower()).ratio() >= 0.78:
+                    _add(name, other, "typo")
+
+        # Corporate-suffix pass — squash to alnum-only and strip a known
+        # trailing suffix word, then compare what's left.
+        suffix_re = re.compile(
+            r"\b(corporation|corp|incorporated|inc|llc|ltd|limited|co|company|labs?|laborator(?:y|ies)|"
+            r"technolog(?:y|ies)|tech|group|holdings|gmbh|ag|plc)\.?\s*$",
+            re.IGNORECASE,
+        )
+
+        def _stripped(name: str) -> str:
+            prev = None
+            n = name.strip()
+            while prev != n:  # strip repeatedly — "X Labs Inc" needs two passes
+                prev = n
+                n = suffix_re.sub("", n).strip().rstrip(",").strip()
+            return re.sub(r"[^a-z0-9]", "", n.lower())
+
+        by_stripped: dict[str, list[str]] = {}
+        for name in names:
+            key = _stripped(name)
+            if key:  # never group two orgs on an EMPTY stripped result (e.g. both just "Labs")
+                by_stripped.setdefault(key, []).append(name)
+        for group in by_stripped.values():
+            if len(group) < 2:
+                continue
+            for i, name in enumerate(group):
+                for other in group[i + 1 :]:
+                    if name.lower() != other.lower():  # pure case/spacing dupes are _canonicalize_existing_orgs's job
+                        _add(name, other, "suffix")
+
+        return pairs
+
+    def dismissed_duplicate_pairs(self, kind: str) -> set[frozenset]:
+        """{frozenset({a, b}), ...} of pairs a human already looked at and
+        said "not duplicates" for (see dismissed_duplicate_pairs table's
+        comment in the schema) — the caller filters a freshly-computed
+        possible-duplicates list against this so a dismissed pair stops
+        being flagged instead of coming back on every reload."""
+        rows = self.conn.execute("SELECT a, b FROM dismissed_duplicate_pairs WHERE kind = ?", (kind,)).fetchall()
+        return {frozenset((a, b)) for a, b in rows}
+
+    def dismiss_duplicate_pair(self, kind: str, a: str, b: str) -> None:
+        lo, hi = sorted((a, b))
+        self.conn.execute(
+            "INSERT OR IGNORE INTO dismissed_duplicate_pairs (kind, a, b) VALUES (?, ?, ?)", (kind, lo, hi)
+        )
+        self.conn.commit()
+
     def items_with_org(self) -> list[sqlite3.Row]:
-        """(id, org, url) for every item with an org set — for a per-item
-        cleanup check that can't be expressed as a plain org-name-list
-        match (e.g. comparing an item's own org against its own url's
-        hostname), unlike clear_org_matches()/clear_org_matches_by_id()."""
+        """(id, org, url, title, summary, source) for every item with an
+        org set — for a per-item cleanup check that can't be expressed
+        as a plain org-name-list match (e.g. comparing an item's own org
+        against its own url's hostname, its own title's trailing
+        publisher-suffix, or whether the org even appears anywhere in
+        its own text), unlike clear_org_matches()/clear_org_matches_by_id().
+        Includes papers too — callers whose check doesn't make sense for
+        papers (its org is deliberately resolved from real author-
+        institution data via paper_org.py, not from grepping the
+        item's own title/summary text, so a text-presence check would
+        be wrong there) need to filter row["source"] == "papers" out
+        themselves."""
         self.conn.row_factory = sqlite3.Row
-        return list(self.conn.execute("SELECT id, org, url FROM items WHERE org IS NOT NULL").fetchall())
+        return list(self.conn.execute("SELECT id, org, url, title, summary, source FROM items WHERE org IS NOT NULL").fetchall())
 
     def clear_org_matches_by_id(self, ids: list[str]) -> int:
         """Like clear_org_matches(), but for specific item ids rather
@@ -645,6 +1085,27 @@ class DB:
         ).fetchall()
         return [r[0] for r in rows]
 
+    def orgs_for_location_recheck(self) -> list[str]:
+        """Every distinct org with at least one item — unlike
+        orgs_missing_location(), this includes orgs that already HAVE a
+        location, since enrich.reextract_org_locations() needs to force-
+        recheck already-resolved-but-possibly-wrong ones too (the normal
+        backfill pass in _backfill_org_locations only ever looks at orgs
+        with no location at all, so a wrong one written before a lookup-
+        logic fix stays wrong forever without this). Ordered never-
+        cache-checked-first (org_location_cache.checked_at, NULLs first)
+        so a capped run advances through fresh orgs each time instead of
+        re-picking the same handful."""
+        self.conn.row_factory = sqlite3.Row
+        rows = self.conn.execute(
+            """SELECT i.org AS org, olc.checked_at AS checked_at FROM items i
+               LEFT JOIN org_location_cache olc ON olc.org = i.org
+               WHERE i.org IS NOT NULL AND i.org != ''
+               GROUP BY i.org
+               ORDER BY olc.checked_at IS NOT NULL, olc.checked_at ASC"""
+        ).fetchall()
+        return [r["org"] for r in rows]
+
     def clear_negative_location_cache(self) -> int:
         """Deletes every 'checked, nothing found' org_location_cache row
         (a real hit, found=1, is untouched) — used once to recover from
@@ -670,6 +1131,16 @@ class DB:
             (org, int(found), location_text, lat, lon, datetime.now(timezone.utc).isoformat()),
         )
         self.conn.commit()
+
+    def org_location_cache_rows(self) -> list[sqlite3.Row]:
+        """Every cached org location that actually resolved to somewhere
+        (found=1) — for the Settings tab's "Standardize location names"
+        action to reformat, same idea as location_text_variants() for
+        the items table."""
+        self.conn.row_factory = sqlite3.Row
+        return list(self.conn.execute(
+            "SELECT org, location_text, lat, lon FROM org_location_cache WHERE found = 1 AND location_text IS NOT NULL"
+        ).fetchall())
 
     def set_org_location(self, org: str, location_text: str, lat: float, lon: float) -> int:
         """Backfills location_text/lat/lon on every item for `org` that
@@ -801,6 +1272,21 @@ class DB:
                ON CONFLICT(org) DO UPDATE SET platform = excluded.platform, slug = excluded.slug,
                checked_at = excluded.checked_at""",
             (org, platform, slug, datetime.now(timezone.utc).isoformat()),
+        )
+        self.conn.commit()
+
+    def get_lab_author_cache(self, pi: str, university: str) -> sqlite3.Row | None:
+        self.conn.row_factory = sqlite3.Row
+        return self.conn.execute(
+            "SELECT * FROM lab_author_cache WHERE lower(pi) = lower(?) AND lower(university) = lower(?)",
+            (pi, university),
+        ).fetchone()
+
+    def set_lab_author_cache(self, pi: str, university: str, author_id: str | None) -> None:
+        self.conn.execute(
+            """INSERT INTO lab_author_cache (pi, university, author_id, checked_at) VALUES (?, ?, ?, ?)
+               ON CONFLICT(pi, university) DO UPDATE SET author_id = excluded.author_id, checked_at = excluded.checked_at""",
+            (pi, university, author_id, datetime.now(timezone.utc).isoformat()),
         )
         self.conn.commit()
 
@@ -1176,3 +1662,105 @@ class DB:
             [fields[c] for c in cols] + [name],
         )
         self.conn.commit()
+
+    # --- paper uploads -----------------------------------------------
+
+    def add_paper_upload(self, item_id: str, filename: str, comparison_note: str, related_item_ids: list[str]) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO paper_uploads (item_id, filename, comparison_note, related_item_ids, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (item_id, filename, comparison_note, ",".join(related_item_ids), datetime.now(timezone.utc).isoformat()),
+        )
+        self.conn.commit()
+
+    def get_paper_upload(self, item_id: str) -> sqlite3.Row | None:
+        self.conn.row_factory = sqlite3.Row
+        return self.conn.execute("SELECT * FROM paper_uploads WHERE item_id = ?", (item_id,)).fetchone()
+
+    def paper_uploads(self) -> list[sqlite3.Row]:
+        self.conn.row_factory = sqlite3.Row
+        return list(self.conn.execute("SELECT * FROM paper_uploads ORDER BY created_at DESC").fetchall())
+
+    # --- company/org timeline events ----------------------------------
+
+    def add_company_event(
+        self, org: str, event_type: str, event_date: str | None, title: str,
+        description: str = "", source_url: str = "", auto_extracted: bool = False,
+    ) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO company_events (org, event_type, event_date, title, description, source_url, "
+            "auto_extracted, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                org, event_type, event_date or None, title, description, source_url,
+                1 if auto_extracted else 0, datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def add_company_event_if_new(
+        self, org: str, event_type: str, event_date: str | None, title: str,
+        description: str = "", source_url: str = "", auto_extracted: bool = False,
+    ) -> bool:
+        """Same as add_company_event, but skips inserting if an event with
+        the same (org, event_type, event_date, title) already exists —
+        auto-extraction runs repeatedly over the same items (re-enrich,
+        overlapping fetches), and without this an unchanged funding round
+        or IPO would otherwise get a fresh duplicate row every pass."""
+        existing = self.conn.execute(
+            "SELECT 1 FROM company_events WHERE lower(org) = lower(?) AND event_type = ? "
+            "AND IFNULL(event_date, '') = IFNULL(?, '') AND lower(title) = lower(?)",
+            (org, event_type, event_date, title),
+        ).fetchone()
+        if existing:
+            return False
+        self.add_company_event(org, event_type, event_date, title, description, source_url, auto_extracted)
+        return True
+
+    def company_events(self, org: str | None = None) -> list[sqlite3.Row]:
+        self.conn.row_factory = sqlite3.Row
+        if org:
+            return list(self.conn.execute(
+                "SELECT * FROM company_events WHERE lower(org) = lower(?) ORDER BY IFNULL(event_date, '9999') DESC",
+                (org,),
+            ).fetchall())
+        return list(self.conn.execute(
+            "SELECT * FROM company_events ORDER BY IFNULL(event_date, '9999') DESC"
+        ).fetchall())
+
+    def delete_company_event(self, event_id: int) -> bool:
+        cur = self.conn.execute("DELETE FROM company_events WHERE id = ?", (event_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    # --- stock price history -------------------------------------------
+
+    def add_stock_history_points(self, org: str, points: list[tuple[str, float]]) -> int:
+        """Bulk upsert of (date, close) points for `org`. Returns how many
+        were written (INSERT OR REPLACE, so re-backfilling is harmless)."""
+        if not points:
+            return 0
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO stock_price_history (org, date, close) VALUES (?, ?, ?)",
+            [(org, d, c) for d, c in points],
+        )
+        self.conn.commit()
+        return len(points)
+
+    def stock_history_for_orgs(self, orgs: list[str]) -> dict[str, list[dict]]:
+        if not orgs:
+            return {}
+        self.conn.row_factory = sqlite3.Row
+        placeholders = ",".join("?" for _ in orgs)
+        rows = self.conn.execute(
+            f"SELECT * FROM stock_price_history WHERE org IN ({placeholders}) ORDER BY org, date",
+            orgs,
+        ).fetchall()
+        by_org: dict[str, list[dict]] = {org: [] for org in orgs}
+        for r in rows:
+            by_org.setdefault(r["org"], []).append({"date": r["date"], "close": r["close"]})
+        return by_org
+
+    def has_stock_history(self, org: str) -> bool:
+        row = self.conn.execute("SELECT 1 FROM stock_price_history WHERE org = ? LIMIT 1", (org,)).fetchone()
+        return row is not None
