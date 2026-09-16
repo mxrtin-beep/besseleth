@@ -210,7 +210,18 @@ def _parse_response(raw: str) -> tuple[str | None, str | None]:
     # and never up for re-resolution again. Detecting the old shape and
     # rejecting it outright forces a real re-check against actual
     # OpenAlex author-institution data instead.
-    if re.match(r"^.+?,\s*.+?\bLab(?:oratory)?\.?$", text, re.IGNORECASE):
+    # The comma-separated shape above ("<University>, <PI> Lab") was the
+    # original tell, but the same PI-led-lab leakage also shows up as
+    # "<University> (<PI> Lab)" and "<University> <PI> Lab" with no
+    # comma at all (real cases: "UC Berkeley (Mamba Lab)", "UC Berkeley
+    # Poon Lab", "UCSF (Poon Lab)") — same underlying bug, just without
+    # the specific punctuation the first regex keyed on. A real
+    # institution name essentially never legitimately contains the bare
+    # word "Lab"/"Laboratory" itself (as opposed to being one), so any
+    # occurrence anywhere in the text is treated the same as the
+    # comma-form: reject outright rather than trying to salvage the
+    # institution half, for the same reason given above.
+    if re.search(r"\blab(?:oratory)?\b", text, re.IGNORECASE):
         return None, None
     # A real institution/company name is a short phrase, never a
     # sentence the model wrote instead of following the format, and

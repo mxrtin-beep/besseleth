@@ -49,6 +49,7 @@
     padding: .9rem 1rem; border: 1px solid #8883; border-radius: 8px;
   }
   .controls.filterbar > div { display: flex; flex-direction: column; gap: .3rem; min-width: 0; }
+  .controls.filterbar .chipfilter-wrap { grid-column: span 2; min-width: 220px; }
   .controls.filterbar select, .controls.filterbar input { width: 100%; box-sizing: border-box; }
   .controls.filterbar .btn { align-self: stretch; white-space: nowrap; }
   /* Multi-select, cross-filtering "chip" filter (Org/Modality/Author on
@@ -200,21 +201,6 @@
       <div><label for="pfTo">To</label><input type="date" id="pfTo"></div>
       <div><label for="pfSource">Source</label><select id="pfSource"><option value="">All</option></select></div>
       <div><label for="pfOrgType">Org type</label><select id="pfOrgType"><option value="">All</option></select></div>
-      <div><label for="pfOrgInput" title="Pick any number — matches items in ANY checked org. The list below narrows to what's still reachable given every other filter you've set, the same way Modality/Author do for this one.">Org</label>
-        <input type="text" id="pfOrgInput" placeholder="Search orgs…" autocomplete="off">
-        <div class="chipfilter-chips" id="pfOrgChips"></div>
-        <div class="chipfilter-options" id="pfOrgOptions"></div>
-      </div>
-      <div><label for="pfModalityInput" title="Pick any number — matches items tagged with ANY checked modality">Modality</label>
-        <input type="text" id="pfModalityInput" placeholder="Search modalities…" autocomplete="off">
-        <div class="chipfilter-chips" id="pfModalityChips"></div>
-        <div class="chipfilter-options" id="pfModalityOptions"></div>
-      </div>
-      <div><label for="pfAuthorInput" title="Pick any number — matches items by ANY checked author. Exact-string match, so &quot;J. Smith&quot; and &quot;John Smith&quot; count separately.">Author</label>
-        <input type="text" id="pfAuthorInput" placeholder="Search authors…" autocomplete="off">
-        <div class="chipfilter-chips" id="pfAuthorChips"></div>
-        <div class="chipfilter-options" id="pfAuthorOptions"></div>
-      </div>
       <div><label for="pfTarget">Therapeutic target</label><select id="pfTarget"><option value="">All</option></select></div>
       <div><label for="pfNovelty">Min novelty</label><select id="pfNovelty">
         <option value="0">Any</option><option value="1">1+</option><option value="2">2+</option>
@@ -224,6 +210,21 @@
         <option value="date">Date (newest)</option><option value="date_oldest">Date (oldest)</option>
         <option value="novelty">Novelty (highest)</option>
       </select></div>
+      <div class="chipfilter-wrap"><label for="pfOrgInput" title="Pick any number — matches items in ANY checked org. The list below narrows to what's still reachable given every other filter you've set, the same way Modality/Author do for this one.">Org</label>
+        <input type="text" id="pfOrgInput" placeholder="Search orgs…" autocomplete="off">
+        <div class="chipfilter-chips" id="pfOrgChips"></div>
+        <div class="chipfilter-options" id="pfOrgOptions"></div>
+      </div>
+      <div class="chipfilter-wrap"><label for="pfModalityInput" title="Pick any number — matches items tagged with ANY checked modality">Modality</label>
+        <input type="text" id="pfModalityInput" placeholder="Search modalities…" autocomplete="off">
+        <div class="chipfilter-chips" id="pfModalityChips"></div>
+        <div class="chipfilter-options" id="pfModalityOptions"></div>
+      </div>
+      <div class="chipfilter-wrap"><label for="pfAuthorInput" title="Pick any number — matches items by ANY checked author. Exact-string match, so &quot;J. Smith&quot; and &quot;John Smith&quot; count separately.">Author</label>
+        <input type="text" id="pfAuthorInput" placeholder="Search authors…" autocomplete="off">
+        <div class="chipfilter-chips" id="pfAuthorChips"></div>
+        <div class="chipfilter-options" id="pfAuthorOptions"></div>
+      </div>
       <div><label>&nbsp;</label><button class="btn" id="clearSourceBtn" title="Delete EVERY item currently stored for the selected source (e.g. after a stale keyword polluted it) — irreversible; a re-fetch only brings back what's still inside the normal fetch window">Clear source…</button></div>
     </div>
     <p class="hint" id="papersCount"></p>
