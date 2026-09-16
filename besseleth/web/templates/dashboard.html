@@ -51,6 +51,35 @@
   .controls.filterbar > div { display: flex; flex-direction: column; gap: .3rem; min-width: 0; }
   .controls.filterbar select, .controls.filterbar input { width: 100%; box-sizing: border-box; }
   .controls.filterbar .btn { align-self: stretch; white-space: nowrap; }
+  /* Multi-select, cross-filtering "chip" filter (Org/Modality/Author on
+     the Papers tab) — a search box, selected values as removable chips,
+     and a small always-visible checklist of the values still reachable
+     given every OTHER active filter (never hidden behind a click, since
+     the whole point is seeing what's still selectable at a glance). */
+  .chipfilter-chips:empty { display: none; }
+  .chipfilter-chips { display: flex; flex-wrap: wrap; gap: .25rem; }
+  .chip {
+    display: inline-flex; align-items: center; gap: .3rem;
+    background: #4a90d922; border: 1px solid #4a90d955; border-radius: 999px;
+    padding: .1rem .3rem .1rem .6rem; font-size: .78rem; line-height: 1.6;
+  }
+  .chip-remove {
+    background: none; border: none; cursor: pointer; color: inherit;
+    font-size: .9rem; line-height: 1; padding: .1rem .3rem; opacity: .7; border-radius: 999px;
+  }
+  .chip-remove:hover { opacity: 1; background: #4a90d933; }
+  .chipfilter-options {
+    max-height: 150px; overflow-y: auto; border: 1px solid #8886; border-radius: 6px;
+    padding: .2rem; background: transparent;
+  }
+  .chipfilter-option {
+    display: flex; align-items: center; gap: .4rem; padding: .2rem .35rem;
+    font-size: .82rem; cursor: pointer; border-radius: 4px; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .chipfilter-option:hover { background: #4a90d922; }
+  .chipfilter-option input { width: auto; flex-shrink: 0; }
+  .chipfilter-option .hint { margin-left: auto; flex-shrink: 0; }
   select, input[type=text], input[type=date], textarea {
     padding: .4rem .6rem; border-radius: 6px; border: 1px solid #8886; font-size: .9rem;
     background: transparent; color: inherit; font-family: inherit;
@@ -171,9 +200,21 @@
       <div><label for="pfTo">To</label><input type="date" id="pfTo"></div>
       <div><label for="pfSource">Source</label><select id="pfSource"><option value="">All</option></select></div>
       <div><label for="pfOrgType">Org type</label><select id="pfOrgType"><option value="">All</option></select></div>
-      <div><label for="pfOrg">Org</label><input id="pfOrg" list="pfOrgList" placeholder="All" autocomplete="off"><datalist id="pfOrgList"></datalist></div>
-      <div><label for="pfModality" title="Type to search; exact-string match against one of the item's tags">Modality</label><input id="pfModality" list="pfModalityList" placeholder="All" autocomplete="off"><datalist id="pfModalityList"></datalist></div>
-      <div><label for="pfAuthor" title="Type to search — most prolific first; exact-string match, so &quot;J. Smith&quot; and &quot;John Smith&quot; count separately">Author</label><input id="pfAuthor" list="pfAuthorList" placeholder="All" autocomplete="off"><datalist id="pfAuthorList"></datalist></div>
+      <div><label for="pfOrgInput" title="Pick any number — matches items in ANY checked org. The list below narrows to what's still reachable given every other filter you've set, the same way Modality/Author do for this one.">Org</label>
+        <input type="text" id="pfOrgInput" placeholder="Search orgs…" autocomplete="off">
+        <div class="chipfilter-chips" id="pfOrgChips"></div>
+        <div class="chipfilter-options" id="pfOrgOptions"></div>
+      </div>
+      <div><label for="pfModalityInput" title="Pick any number — matches items tagged with ANY checked modality">Modality</label>
+        <input type="text" id="pfModalityInput" placeholder="Search modalities…" autocomplete="off">
+        <div class="chipfilter-chips" id="pfModalityChips"></div>
+        <div class="chipfilter-options" id="pfModalityOptions"></div>
+      </div>
+      <div><label for="pfAuthorInput" title="Pick any number — matches items by ANY checked author. Exact-string match, so &quot;J. Smith&quot; and &quot;John Smith&quot; count separately.">Author</label>
+        <input type="text" id="pfAuthorInput" placeholder="Search authors…" autocomplete="off">
+        <div class="chipfilter-chips" id="pfAuthorChips"></div>
+        <div class="chipfilter-options" id="pfAuthorOptions"></div>
+      </div>
       <div><label for="pfTarget">Therapeutic target</label><select id="pfTarget"><option value="">All</option></select></div>
       <div><label for="pfNovelty">Min novelty</label><select id="pfNovelty">
         <option value="0">Any</option><option value="1">1+</option><option value="2">2+</option>
@@ -1419,7 +1460,7 @@ function renderMap() {
         const org = filteredLocations[point.pointNumber].org;
         showTab('papers');
         loadPapers().then(() => {
-          document.getElementById('pfOrg').value = org;
+          setChipFilterToOne('org', org);
           renderPapers();
         });
       } else {
@@ -1450,20 +1491,127 @@ function authorList(p) {
   return (p.authors || '').split(',').map(s => s.trim()).filter(s => s);
 }
 
-// A prolific-author dropdown, most-frequent first — deliberately exact-
-// string counting, not name standardization: "J. Smith" and "John Smith"
-// count as different people, since reliably merging author name variants
-// (shared surnames especially) isn't something worth guessing at here.
-function populateAuthorSelect(rows) {
+// --- Org/Modality/Author "chip" filters ---------------------------------
+// Multi-select (check any number, no ctrl/cmd-click needed) AND cross-
+// filtering (Spotfire-style): each filter's own checklist only ever shows
+// values still reachable given every OTHER active filter — pick Stanford
+// University in Org and the Author list narrows to Stanford's own authors,
+// the same way it would in a Spotfire filter panel. Within one filter,
+// checking several values is OR ("Stanford" or "MIT"); across the three
+// filters it's AND, same as the plain dropdowns beside them.
+const chipFilterFields = {
+  org: p => [p.org].filter(Boolean),
+  modality: p => modalityTags(p),
+  author: p => authorList(p),
+};
+const chipFilterState = { org: new Set(), modality: new Set(), author: new Set() };
+const chipFilterLabel = { org: 'Org', modality: 'Modality', author: 'Author' };
+
+function _paperMatchesBaseFilters(p, from, to, source, orgType, target, minNovelty) {
+  const d = (p.published_at || '').slice(0, 10);
+  if (from && d < from) return false;
+  if (to && d > to) return false;
+  if (source && p.source !== source) return false;
+  if (orgType && p.org_type !== orgType) return false;
+  if (target && p.therapeutic_target !== target) return false;
+  if (minNovelty === 5 && p.novelty_score !== 5) return false;
+  if (minNovelty > 0 && minNovelty < 5 && (p.novelty_score || 0) < minNovelty) return false;
+  return true;
+}
+
+// Papers matching every active filter EXCEPT the chip-filter named
+// `excludeKey` (pass null/undefined to apply all three) — this is the
+// cross-filtering engine: computing a chip-filter's OWN available options
+// off the set every OTHER filter already narrowed to, not off all papers.
+function papersFilteredExcept(excludeKey) {
+  const from = document.getElementById('pfFrom').value;
+  const to = document.getElementById('pfTo').value;
+  const source = document.getElementById('pfSource').value;
+  const orgType = document.getElementById('pfOrgType').value;
+  const target = document.getElementById('pfTarget').value;
+  const minNovelty = parseInt(document.getElementById('pfNovelty').value, 10);
+  return papers.filter(p => {
+    if (!_paperMatchesBaseFilters(p, from, to, source, orgType, target, minNovelty)) return false;
+    for (const key of Object.keys(chipFilterFields)) {
+      if (key === excludeKey) continue;
+      const selected = chipFilterState[key];
+      if (selected.size && !chipFilterFields[key](p).some(v => selected.has(v))) return false;
+    }
+    return true;
+  });
+}
+
+function renderChipFilterOptions(key) {
+  const scoped = papersFilteredExcept(key);
   const counts = new Map();
-  for (const p of rows) for (const a of authorList(p)) counts.set(a, (counts.get(a) || 0) + 1);
-  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-  // `label` (not visible text) carries the count — Chrome/Firefox both
-  // show it as secondary text next to the suggestion, but `value` (what
-  // actually lands in the input on pick) stays the plain name so the
-  // exact-string-match filter below still works unchanged.
-  document.getElementById('pfAuthorList').innerHTML =
-    sorted.map(([name, n]) => `<option value="${name}" label="(${n})">`).join('');
+  for (const p of scoped) for (const v of chipFilterFields[key](p)) counts.set(v, (counts.get(v) || 0) + 1);
+  const selected = chipFilterState[key];
+  // Selected values stay listed (checked) even if the current cross-
+  // filter would otherwise hide them (0 matches left) — unchecking
+  // should always be possible from the same list a value was checked in.
+  for (const v of selected) if (!counts.has(v)) counts.set(v, 0);
+  const query = (document.getElementById(`pf${key[0].toUpperCase()}${key.slice(1)}Input`).value || '').trim().toLowerCase();
+  const entries = [...counts.entries()]
+    .filter(([v]) => !query || v.toLowerCase().includes(query))
+    .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
+    .slice(0, 300); // a render-cost cap, not a filter — every value stays selectable by typing to narrow the list
+  const panel = document.getElementById(`pf${key[0].toUpperCase()}${key.slice(1)}Options`);
+  panel.innerHTML = entries.length
+    ? entries.map(([v, n]) => `
+        <label class="chipfilter-option">
+          <input type="checkbox" data-chip-key="${key}" data-chip-value="${esc(v)}" ${selected.has(v) ? 'checked' : ''}>
+          <span>${esc(v)}</span><span class="hint">${n}</span>
+        </label>`).join('')
+    : `<div class="hint" style="padding:.3rem .4rem;">No ${esc(chipFilterLabel[key].toLowerCase())} values match the other filters.</div>`;
+}
+
+function renderChipFilterChips(key) {
+  const wrap = document.getElementById(`pf${key[0].toUpperCase()}${key.slice(1)}Chips`);
+  wrap.innerHTML = [...chipFilterState[key]].sort().map(v => `
+    <span class="chip">${esc(v)}<button type="button" class="chip-remove" data-chip-key="${key}" data-chip-value="${esc(v)}" title="Remove">×</button></span>
+  `).join('');
+}
+
+// Every filter's available options depend on every OTHER filter's current
+// selection, so all three checklists (not just the one just clicked) need
+// to be recomputed on every change — that's the whole cross-filtering
+// mechanism, not an optimization to skip.
+function refreshChipFilters() {
+  for (const key of Object.keys(chipFilterFields)) {
+    renderChipFilterOptions(key);
+    renderChipFilterChips(key);
+  }
+}
+
+function toggleChipFilterValue(key, value) {
+  const set = chipFilterState[key];
+  if (set.has(value)) set.delete(value); else set.add(value);
+  refreshChipFilters();
+  renderPapers();
+}
+
+function initChipFilters() {
+  for (const key of Object.keys(chipFilterFields)) {
+    const cap = key[0].toUpperCase() + key.slice(1);
+    document.getElementById(`pf${cap}Input`).oninput = () => renderChipFilterOptions(key);
+    document.getElementById(`pf${cap}Options`).onchange = (ev) => {
+      const cb = ev.target.closest('[data-chip-key]');
+      if (cb) toggleChipFilterValue(cb.dataset.chipKey, cb.dataset.chipValue);
+    };
+    document.getElementById(`pf${cap}Chips`).onclick = (ev) => {
+      const btn = ev.target.closest('.chip-remove');
+      if (btn) toggleChipFilterValue(btn.dataset.chipKey, btn.dataset.chipValue);
+    };
+  }
+}
+
+// Sets a chip filter to exactly one value (replacing whatever was
+// selected) — for the Map tab's "click an org" and the Author-cell
+// shortcut, which jump to a single specific value rather than adding
+// to an existing multi-select.
+function setChipFilterToOne(key, value) {
+  chipFilterState[key] = new Set([value]);
+  refreshChipFilters();
 }
 
 function populateSelect(id, values) {
@@ -1489,30 +1637,17 @@ async function loadPapers() {
   papers = await res.json();
   populateSelect('pfSource', uniqueSorted(papers.map(p => p.source)));
   populateSelect('pfOrgType', uniqueSorted(papers.map(p => p.org_type)));
-  populateDatalist('pfOrg', uniqueSorted(papers.map(p => p.org)));
-  populateDatalist('pfModality', uniqueSorted(papers.flatMap(modalityTags)));
-  populateAuthorSelect(papers);
   populateSelect('pfTarget', uniqueSorted(papers.map(p => p.therapeutic_target)));
   ['pfFrom', 'pfTo', 'pfSource', 'pfOrgType', 'pfTarget', 'pfNovelty', 'pfSort']
     .forEach(id => document.getElementById(id).onchange = renderPapers);
-  // 'input' (not 'change') for the datalist-backed text fields — fires as
-  // soon as a suggestion is picked (or typing clears/matches), not only
-  // on blur, so the table updates immediately the way the selects do.
-  ['pfOrg', 'pfModality', 'pfAuthor'].forEach(id => document.getElementById(id).oninput = renderPapers);
+  initChipFilters();
+  refreshChipFilters();
   renderPapers();
 }
 
 // --- Orgs table --------------------------------------------------------
 let orgsLoaded = false;
 let orgs = [];
-
-function fmtUsd(n) {
-  if (n === null || n === undefined) return '';
-  if (n >= 1e9) return `$${(n / 1e9).toFixed(1)}B`;
-  if (n >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
-  if (n >= 1e3) return `$${(n / 1e3).toFixed(0)}K`;
-  return `$${n}`;
-}
 
 let possibleDupeOrgs = [];
 
@@ -1580,7 +1715,7 @@ function renderOrgs() {
   const table = document.getElementById('orgsTable');
   table.className = 'datatable resizable';
   table.innerHTML = `
-    <thead><tr><th>Org</th><th>Category</th><th>Type</th><th>Location</th><th>Items</th><th>Sources</th><th>Ticker</th><th>Funding</th><th>Source</th></tr></thead>
+    <thead><tr><th>Org</th><th>Category</th><th>Type</th><th>Location</th><th>Items</th><th>Sources</th><th>Source</th></tr></thead>
     <tbody>${rows.map(o => `
       <tr>
         <td>${esc(o.org)}</td>
@@ -1589,8 +1724,6 @@ function renderOrgs() {
         <td>${o.location_text ? esc(o.location_text) : (o.lat ? '' : '<span class="hint">not located</span>')}</td>
         <td>${o.item_count}</td>
         <td>${o.sources.map(esc).join(', ')}</td>
-        <td>${esc(o.stock_ticker)}</td>
-        <td>${fmtUsd(o.funding_total_usd)}${o.last_funding_round ? ` (${esc(o.last_funding_round)})` : ''}</td>
         <td>${o.source_url ? `<a href="${esc(o.source_url)}" target="_blank" rel="noopener">link</a>` : '<span class="hint">—</span>'}</td>
       </tr>`).join('')}</tbody>`;
   makeTableResizable(table, 'orgsTable', { 0: 200 });
@@ -1780,31 +1913,12 @@ let papersPageSize = 50; // how many filtered rows are actually rendered into th
 
 function renderPapers(resetPage = true) {
   if (resetPage) papersPageSize = 50; // any filter/sort change starts back at the top, not wherever "Show more" left off
-  const from = document.getElementById('pfFrom').value;
-  const to = document.getElementById('pfTo').value;
-  const source = document.getElementById('pfSource').value;
-  const orgType = document.getElementById('pfOrgType').value;
-  const org = document.getElementById('pfOrg').value;
-  const modality = document.getElementById('pfModality').value;
-  const author = document.getElementById('pfAuthor').value;
-  const target = document.getElementById('pfTarget').value;
-  const minNovelty = parseInt(document.getElementById('pfNovelty').value, 10);
   const sortBy = document.getElementById('pfSort').value;
 
-  let rows = papers.filter(p => {
-    const d = (p.published_at || '').slice(0, 10);
-    if (from && d < from) return false;
-    if (to && d > to) return false;
-    if (source && p.source !== source) return false;
-    if (orgType && p.org_type !== orgType) return false;
-    if (org && p.org !== org) return false;
-    if (modality && !modalityTags(p).includes(modality)) return false;
-    if (author && !authorList(p).includes(author)) return false;
-    if (target && p.therapeutic_target !== target) return false;
-    if (minNovelty === 5 && p.novelty_score !== 5) return false;
-    if (minNovelty > 0 && minNovelty < 5 && (p.novelty_score || 0) < minNovelty) return false;
-    return true;
-  });
+  // Same predicate the chip filters use to cross-filter their own option
+  // lists (papersFilteredExcept with nothing excluded = every active
+  // filter applied) — one filtering rule, not two copies that could drift.
+  let rows = papersFilteredExcept(null);
 
   rows = rows.slice().sort((a, b) => {
     if (sortBy === 'novelty') return (b.novelty_score || 0) - (a.novelty_score || 0);
@@ -1867,7 +1981,7 @@ function renderPapers(resetPage = true) {
 
   table.querySelectorAll('[data-author]').forEach(el => {
     el.onclick = () => {
-      document.getElementById('pfAuthor').value = el.dataset.author;
+      setChipFilterToOne('author', el.dataset.author);
       renderPapers();
     };
   });
