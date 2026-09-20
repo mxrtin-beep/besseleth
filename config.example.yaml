@@ -116,13 +116,21 @@ sources:
     enabled: true
     max_results_per_keyword: 15
     days_back: 8
-    # Optional, but recommended especially for a deep backfill: your
-    # email, sent as OpenAlex's documented `mailto` param. Joins their
-    # "polite pool" — a meaningfully higher, more reliable rate limit
-    # than anonymous requests get. A backfill pages through a lot of
+    # Required for a real rate limit as of OpenAlex's Feb 2026 API
+    # change: free anonymous calls are now capped low enough (100/day)
+    # to be unusable for real fetching, and the old mailto-based
+    # "polite pool" was retired. Get a free key at
+    # https://openalex.org/settings/api and set it here, or via the
+    # OPENALEX_API_KEY env var instead (same reasoning as
+    # summarizer.groq_api_key — either works, env var if you'd rather
+    # not put it in a file). A deep backfill pages through a lot of
     # requests (page 14+ for one keyword alone isn't unusual), so this
     # is the difference between that finishing cleanly and hitting
-    # sustained 429s partway through. Never sent anywhere else.
+    # sustained 429s partway through.
+    # openalex_api_key: "your-key-here"
+    #
+    # Still sent alongside the key if set (harmless, identifies the
+    # client), but no longer does anything for rate limits on its own.
     # mailto: "you@example.com"
 
   news:
