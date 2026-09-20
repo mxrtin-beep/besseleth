@@ -30,7 +30,15 @@ from pathlib import Path
 import markdown as md
 from flask import Flask, Response, abort, jsonify, render_template, request, send_from_directory
 
-from ..config import Config, load_config, update_industry_settings, update_schedule_settings, update_summarizer_settings
+from ..config import (
+    DEFAULT_INDUSTRY_SLUG,
+    Config,
+    discover_industries,
+    load_config,
+    update_industry_settings,
+    update_schedule_settings,
+    update_summarizer_settings,
+)
 from ..contacts_store import Contact, add_contact, import_linkedin_csv, load_contacts, remove_contact, update_contact
 from ..db import DB
 from ..feeds_store import add_feed, load_feeds, remove_feed
@@ -77,7 +85,25 @@ def _require_auth() -> "Response | None":
     return Response("Authentication required.", 401, {"WWW-Authenticate": 'Basic realm="besseleth"'})
 
 
-def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=None) -> Flask:
+def _industry_config(app: Flask) -> Config:
+    """Which industry's config/data this request means — `?industry=
+    <slug>` (a slug from discover_industries, e.g. a folder name under
+    industries/) if given and known, else the app's primary config
+    (DEFAULT_INDUSTRY_SLUG — today's single-industry behavior). An
+    unknown slug falls back to the primary too rather than 404ing, so a
+    stale/mistyped `?industry=` in a bookmarked URL degrades instead of
+    breaking."""
+    industries: dict[str, Config] = app.config["BESSELETH_INDUSTRIES"]
+    slug = request.args.get("industry")
+    return industries.get(slug, app.config["BESSELETH_CONFIG"]) if slug else app.config["BESSELETH_CONFIG"]
+
+
+def create_app(
+    config: Config,
+    status: SchedulerStatus | None = None,
+    scheduler=None,
+    industries: dict[str, Config] | None = None,
+) -> Flask:
     app = Flask(__name__)
     app.config["BESSELETH_CONFIG"] = config
     app.config["BESSELETH_STATUS"] = status or SchedulerStatus(enabled=False)
@@ -86,7 +112,26 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
     # with a new interval/cron immediately (see reschedule() in
     # scheduler.py) instead of only taking effect after a restart.
     app.config["BESSELETH_SCHEDULER"] = scheduler
+    # First step toward several industries in one running app (see
+    # config.discover_industries) — defaults to just `config` under
+    # DEFAULT_INDUSTRY_SLUG when no industries/ directory exists, which
+    # is every install so far, so nothing here changes today's behavior.
+    # Only /api/papers, /api/companies, and /api/orgs read this so far
+    # (via _industry_config below); every other route still always
+    # means `config`, same as before this existed.
+    app.config["BESSELETH_INDUSTRIES"] = industries or {DEFAULT_INDUSTRY_SLUG: config}
     app.before_request(_require_auth)
+
+    @app.get("/api/industries")
+    def api_industries():
+        # Lists what ?industry=<slug> (see _industry_config) accepts —
+        # for a future in-app industry switcher; nothing in the
+        # dashboard reads this yet. Always at least one entry (today's
+        # single-industry setup), even with no industries/ directory.
+        industries: dict[str, Config] = app.config["BESSELETH_INDUSTRIES"]
+        return jsonify(
+            [{"slug": slug, "name": cfg.industry_name} for slug, cfg in industries.items()]
+        )
 
     reports_dir = Path(config.report.get("output_dir", "reports"))
 
@@ -169,8 +214,11 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
     @app.get("/api/companies")
     def api_companies():
-        companies = load_companies(config.companies_path, config.legacy_companies_yaml_path)
-        db = DB(config.db_path)
+        # ?industry=<slug> selects which industry's data this means —
+        # see _industry_config's docstring.
+        industry_config = _industry_config(app)
+        companies = load_companies(industry_config.companies_path, industry_config.legacy_companies_yaml_path)
+        db = DB(industry_config.db_path)
         try:
             active_job_counts = db.active_job_counts_by_org()
             added_job_counts = db.job_postings_added_by_org()
@@ -345,7 +393,9 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # data, which looked exactly like "nothing ever gets fetched for
         # those sources" from the dashboard alone.) The source filter
         # dropdown narrows it down to just one if that's all you want.
-        db = DB(config.db_path)
+        # ?industry=<slug> selects which industry's data this means —
+        # see _industry_config's docstring.
+        db = DB(_industry_config(app).db_path)
         try:
             rows = db.papers(ALL_ITEM_SOURCES)
         finally:
@@ -380,12 +430,18 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # with funding/stock data from the companies table where the
         # names match, so this one table covers labs, academic/gov orgs,
         # and funded companies alike.
-        db = DB(config.db_path)
+        # ?industry=<slug> selects which industry's data this means —
+        # see _industry_config's docstring.
+        industry_config = _industry_config(app)
+        db = DB(industry_config.db_path)
         try:
             rows = db.orgs()
         finally:
             db.close()
-        companies_by_name = {c.name.lower(): c for c in load_companies(config.companies_path, config.legacy_companies_yaml_path)}
+        companies_by_name = {
+            c.name.lower(): c
+            for c in load_companies(industry_config.companies_path, industry_config.legacy_companies_yaml_path)
+        }
         result = []
         for r in rows:
             company = companies_by_name.get((r["org"] or "").lower())
@@ -1377,8 +1433,9 @@ def main(argv=None):
     if args.no_schedule:
         config.raw.setdefault("schedule", {})["enabled"] = False
     _scheduler, status = start_scheduler(config)
+    industries = discover_industries(config)
 
-    app = create_app(config, status, _scheduler)
+    app = create_app(config, status, _scheduler, industries=industries)
     print(f"[web] Serving {config.industry_name} dashboard at http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)
 
