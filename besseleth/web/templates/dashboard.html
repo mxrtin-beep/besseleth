@@ -258,9 +258,22 @@
 
   <div id="jobsPane" style="display:none">
     <div class="controls filterbar">
-      <div><label for="jfOrg">Org</label><input id="jfOrg" list="jfOrgList" placeholder="All" autocomplete="off"><datalist id="jfOrgList"></datalist></div>
+      <div class="chipfilter-wrap"><label for="jfOrgInput" title="Pick any number — matches postings from ANY checked org.">Org</label>
+        <input type="text" id="jfOrgInput" placeholder="Search orgs…" autocomplete="off">
+        <div class="chipfilter-chips" id="jfOrgChips"></div>
+        <div class="chipfilter-options" id="jfOrgOptions"></div>
+      </div>
+      <div><label for="jfKeyword">Title contains</label><input id="jfKeyword" placeholder="e.g. engineer, intern" autocomplete="off"></div>
+      <div><label for="jfLocation">Location</label><input id="jfLocation" list="jfLocationList" placeholder="All" autocomplete="off"><datalist id="jfLocationList"></datalist></div>
+      <div><label for="jfPlatform">Platform</label><select id="jfPlatform"><option value="">All</option></select></div>
       <div><label for="jfStatus">Status</label><select id="jfStatus">
         <option value="active">Active only</option><option value="">All (incl. removed)</option>
+      </select></div>
+      <div><label for="jfSort">Sort by</label><select id="jfSort">
+        <option value="first_seen_desc">First seen (newest)</option>
+        <option value="first_seen_asc">First seen (oldest)</option>
+        <option value="org">Org (A-Z)</option>
+        <option value="title">Title (A-Z)</option>
       </select></div>
     </div>
     <p class="hint" id="jobsCount"></p>
@@ -1379,13 +1392,17 @@ const MAP_LAYER_TYPES = {
 };
 
 function renderMap() {
-  document.getElementById('mapCount').textContent = `${mapLocations.length} located org(s).`;
+  // Orgs sourced from only a single item are usually noise (a one-off
+  // mention that isn't really "activity" worth plotting) — excluded
+  // from the whole tab (chart and table alike), not just the chart.
+  const sourcedLocations = mapLocations.filter(m => m.total > 1);
+  document.getElementById('mapCount').textContent = `${sourcedLocations.length} located org(s) with more than one source (${mapLocations.length} total).`;
 
   const table = document.getElementById('mapTable');
   table.className = 'datatable resizable';
   table.innerHTML = `
     <thead><tr><th>Org</th><th>Location</th><th>Org type</th><th>Items</th></tr></thead>
-    <tbody>${mapLocations.slice().sort((a, b) => b.total - a.total).map(m => `
+    <tbody>${sourcedLocations.slice().sort((a, b) => b.total - a.total).map(m => `
       <tr>
         <td>${esc(m.org)}</td>
         <td>${esc(m.location_text)}</td>
@@ -1402,12 +1419,12 @@ function renderMap() {
   const activeOrgTypes = new Set(
     Object.entries(MAP_LAYER_TYPES).flatMap(([id, types]) => document.getElementById(id).checked ? types : [])
   );
-  const filteredLocations = mapLocations.filter(m => activeOrgTypes.has(m.org_type || null) || (!m.org_type && activeOrgTypes.has('')));
+  const filteredLocations = sourcedLocations.filter(m => activeOrgTypes.has(m.org_type || null) || (!m.org_type && activeOrgTypes.has('')));
   const showFriends = document.getElementById('mapShowFriends').checked;
   if (!filteredLocations.length && !(showFriends && friendLocations.length)) {
-    document.getElementById('mapChart').innerHTML = mapLocations.length
+    document.getElementById('mapChart').innerHTML = sourcedLocations.length
       ? '<p class="hint">Nothing matches the checked layers above — check a box to show orgs again.</p>'
-      : '<p class="hint">No located orgs yet — run <code>besseleth.cli enrich --all</code> (needs Ollama running) to backfill locations for existing items, or wait for the next fetch.</p>';
+      : '<p class="hint">No located orgs with more than one source yet — run <code>besseleth.cli enrich --all</code> (needs Ollama running) to backfill locations for existing items, or wait for the next fetch.</p>';
     return;
   }
 
@@ -1734,24 +1751,97 @@ function renderOrgs() {
 let jobsLoaded = false;
 let jobs = [];
 
+// Org is a multi-select "chip" checklist, same widget as Papers' Org/
+// Modality/Author filters (see that section below) — but scoped to just
+// this one field, so it's its own small self-contained state rather than
+// reusing Papers' cross-filtering engine (nothing else on this tab needs
+// cross-filtering against Org).
+const jobOrgChipState = new Set();
+
+function renderJobOrgChipOptions() {
+  const counts = new Map();
+  for (const j of jobs) if (j.org) counts.set(j.org, (counts.get(j.org) || 0) + 1);
+  for (const v of jobOrgChipState) if (!counts.has(v)) counts.set(v, 0);
+  const query = (document.getElementById('jfOrgInput').value || '').trim().toLowerCase();
+  const entries = [...counts.entries()]
+    .filter(([v]) => !query || v.toLowerCase().includes(query))
+    .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
+    .slice(0, 300);
+  const panel = document.getElementById('jfOrgOptions');
+  panel.innerHTML = entries.length
+    ? entries.map(([v, n]) => `
+        <label class="chipfilter-option">
+          <input type="checkbox" data-chip-value="${esc(v)}" ${jobOrgChipState.has(v) ? 'checked' : ''}>
+          <span>${esc(v)}</span><span class="hint">${n}</span>
+        </label>`).join('')
+    : `<div class="hint" style="padding:.3rem .4rem;">No org values match.</div>`;
+}
+
+function renderJobOrgChipChips() {
+  document.getElementById('jfOrgChips').innerHTML = [...jobOrgChipState].sort().map(v => `
+    <span class="chip">${esc(v)}<button type="button" class="chip-remove" data-chip-value="${esc(v)}" title="Remove">×</button></span>
+  `).join('');
+}
+
+function toggleJobOrgChip(value) {
+  if (jobOrgChipState.has(value)) jobOrgChipState.delete(value); else jobOrgChipState.add(value);
+  renderJobOrgChipOptions();
+  renderJobOrgChipChips();
+  renderJobs();
+}
+
+function initJobOrgChipFilter() {
+  document.getElementById('jfOrgInput').oninput = renderJobOrgChipOptions;
+  document.getElementById('jfOrgOptions').onchange = (ev) => {
+    const cb = ev.target.closest('[data-chip-value]');
+    if (cb) toggleJobOrgChip(cb.dataset.chipValue);
+  };
+  document.getElementById('jfOrgChips').onclick = (ev) => {
+    const btn = ev.target.closest('.chip-remove');
+    if (btn) toggleJobOrgChip(btn.dataset.chipValue);
+  };
+}
+
 async function loadJobs() {
   jobsLoaded = true;
   const res = await fetch('/api/jobs');
   jobs = await res.json();
-  populateDatalist('jfOrg', uniqueSorted(jobs.map(j => j.org)));
-  document.getElementById('jfOrg').oninput = renderJobs;
+  populateDatalist('jfLocation', uniqueSorted(jobs.map(j => j.location)));
+  const platformSelect = document.getElementById('jfPlatform');
+  platformSelect.innerHTML = '<option value="">All</option>' +
+    uniqueSorted(jobs.map(j => j.platform)).map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
+  initJobOrgChipFilter();
+  renderJobOrgChipOptions();
+  renderJobOrgChipChips();
+  document.getElementById('jfKeyword').oninput = renderJobs;
+  document.getElementById('jfLocation').oninput = renderJobs;
+  document.getElementById('jfPlatform').onchange = renderJobs;
   document.getElementById('jfStatus').onchange = renderJobs;
+  document.getElementById('jfSort').onchange = renderJobs;
   renderJobs();
 }
 
 function renderJobs() {
-  const org = document.getElementById('jfOrg').value;
+  const keyword = document.getElementById('jfKeyword').value.trim().toLowerCase();
+  const location = document.getElementById('jfLocation').value.trim().toLowerCase();
+  const platform = document.getElementById('jfPlatform').value;
   const status = document.getElementById('jfStatus').value; // 'active' or ''
+  const sort = document.getElementById('jfSort').value;
 
   const rows = jobs.filter(j => {
-    if (org && j.org !== org) return false;
+    if (jobOrgChipState.size && !jobOrgChipState.has(j.org)) return false;
+    if (keyword && !(j.title || '').toLowerCase().includes(keyword)) return false;
+    if (location && !(j.location || '').toLowerCase().includes(location)) return false;
+    if (platform && j.platform !== platform) return false;
     if (status === 'active' && j.removed_at) return false;
     return true;
+  });
+
+  rows.sort((a, b) => {
+    if (sort === 'first_seen_asc') return (a.first_seen_at || '').localeCompare(b.first_seen_at || '');
+    if (sort === 'org') return (a.org || '').localeCompare(b.org || '');
+    if (sort === 'title') return (a.title || '').localeCompare(b.title || '');
+    return (b.first_seen_at || '').localeCompare(a.first_seen_at || ''); // first_seen_desc, default
   });
 
   document.getElementById('jobsCount').textContent = `${rows.length} of ${jobs.length} posting(s).`;
