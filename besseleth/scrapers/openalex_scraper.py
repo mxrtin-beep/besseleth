@@ -103,7 +103,7 @@ def _work_to_item(
     )
 
 
-def fetch(config, days_back: int, max_results_per_keyword: int, mailto: str | None = None, cancel_event=None) -> list[Item]:
+def fetch(config, days_back: int, max_results_per_keyword: int, mailto: str | None = None, api_key: str | None = None, cancel_event=None) -> list[Item]:
     """Fetches papers matching each configured keyword, newest first,
     stopping once results fall outside the `days_back` window.
 
@@ -119,20 +119,23 @@ def fetch(config, days_back: int, max_results_per_keyword: int, mailto: str | No
     hit.
 
     A deep backfill pages through a LOT of requests (page=14+ for one
-    keyword alone isn't unusual), and OpenAlex's default anonymous rate
-    limit is tight enough that a sustained backfill routinely trips 429s
-    — which was the actual, direct explanation for citation counts
+    keyword alone isn't unusual), and OpenAlex's rate limit without an
+    API key is tight enough that a sustained backfill routinely trips
+    429s — which was the actual, direct explanation for citation counts
     looking all-zero: most requests were failing outright, not being
     filtered, so almost nothing from OpenAlex was ever actually stored.
-    Two mitigations, both from OpenAlex's own documented recommendations:
-    `mailto` (optional — pass your email via sources.papers.mailto in
-    config.yaml) joins their "polite pool," a meaningfully higher and
-    more reliable rate limit than anonymous requests get; and a real
-    User-Agent identifies the client instead of the requests-library
-    default. Combined with retry-with-backoff on a 429 (same pattern as
-    arxiv_scraper's fix), this should get a deep backfill through without
-    the sustained failure cascade you'd get from hammering the anonymous
-    pool with no pacing at all.
+    `api_key` (pass yours via sources.papers.openalex_api_key in
+    config.yaml, or the OPENALEX_API_KEY env var — see
+    https://openalex.org/settings/api for a free key) is what actually
+    grants a real rate limit now; OpenAlex retired the old mailto-based
+    "polite pool" and free anonymous calls are capped low enough to be
+    unusable for real fetching. `mailto` is still sent too (harmless,
+    and identifies the client in the User-Agent either way), but no
+    longer does anything for rate limits on its own. Combined with
+    retry-with-backoff on a 429 (same pattern as arxiv_scraper's fix),
+    this should get a deep backfill through without the sustained
+    failure cascade you'd get from hammering the free tier with no key
+    and no pacing at all.
 
     filter=type:article|review — OpenAlex classifies works by a real
     `type` field (article, review, preprint, book-chapter, editorial,
@@ -166,7 +169,9 @@ def fetch(config, days_back: int, max_results_per_keyword: int, mailto: str | No
                 "page": page,
             }
             if mailto:
-                params["mailto"] = mailto  # joins OpenAlex's "polite pool" — see fetch()'s docstring
+                params["mailto"] = mailto
+            if api_key:
+                params["api_key"] = api_key  # grants OpenAlex's real rate limit — see fetch()'s docstring
             headers = {"User-Agent": f"besseleth/1.0 (industry-briefing tool{f'; mailto:{mailto}' if mailto else ''})"}
 
             data = None
@@ -263,7 +268,7 @@ OPENALEX_AUTHORS_API = "https://api.openalex.org/authors"
 MAX_RESULTS_PER_AUTHOR_HARD_CAP = 200  # a backfill safety valve, same idea as MAX_RESULTS_PER_KEYWORD_HARD_CAP
 
 
-def _resolve_author_id(db, pi: str, university: str, mailto: str | None, headers: dict) -> str | None:
+def _resolve_author_id(db, pi: str, university: str, mailto: str | None, api_key: str | None, headers: dict) -> str | None:
     """Finds the OpenAlex author id for a labs.yaml {pi, university}
     entry — cached in lab_author_cache (see db.py) so this search only
     ever runs once per lab, not on every fetch. OpenAlex's author search
@@ -299,7 +304,12 @@ def _resolve_author_id(db, pi: str, university: str, mailto: str | None, headers
     try:
         resp = requests.get(
             OPENALEX_AUTHORS_API,
-            params={"search": f"{pi} {university}", "per_page": 5, **({"mailto": mailto} if mailto else {})},
+            params={
+                "search": f"{pi} {university}",
+                "per_page": 5,
+                **({"mailto": mailto} if mailto else {}),
+                **({"api_key": api_key} if api_key else {}),
+            },
             headers=headers,
             timeout=20,
         )
@@ -330,7 +340,8 @@ def _resolve_author_id(db, pi: str, university: str, mailto: str | None, headers
 
 
 def fetch_known_lab_papers(
-    config, db, days_back: int, max_results_per_author: int = 25, mailto: str | None = None, cancel_event=None
+    config, db, days_back: int, max_results_per_author: int = 25, mailto: str | None = None,
+    api_key: str | None = None, cancel_event=None
 ) -> list[Item]:
     """Pulls a labs.yaml-listed PI's own papers directly from OpenAlex
     by AUTHOR, not by your keyword list — the actual fix for "a lab I
@@ -368,7 +379,7 @@ def fetch_known_lab_papers(
         pi, university = lab.get("pi"), lab.get("university")
         if not pi or not university:
             continue
-        author_id = _resolve_author_id(db, pi, university, mailto, headers)
+        author_id = _resolve_author_id(db, pi, university, mailto, api_key, headers)
         if not author_id:
             continue
 
@@ -383,6 +394,8 @@ def fetch_known_lab_papers(
             }
             if mailto:
                 params["mailto"] = mailto
+            if api_key:
+                params["api_key"] = api_key
             try:
                 resp = requests.get(OPENALEX_WORKS_API, params=params, headers=headers, timeout=20)
                 resp.raise_for_status()

@@ -5,7 +5,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from .cancel import check_cancelled
-from .config import Config
+from .config import Config, env
 from .db import DB, Item
 from .personalize import flag_interests, personalize_items
 from .scrapers import (
@@ -95,6 +95,7 @@ def fetch_all(
             days_back=_days_back(papers_cfg.get("days_back", 8), since),
             max_results_per_keyword=papers_cfg.get("max_results_per_keyword", 15),
             mailto=papers_cfg.get("mailto"),
+            api_key=papers_cfg.get("openalex_api_key") or env("OPENALEX_API_KEY"),
             cancel_event=cancel_event,
         )
         results["papers"] += _dedupe_and_store(items, db)
@@ -110,6 +111,7 @@ def fetch_all(
                 config, db,
                 days_back=_days_back(papers_cfg.get("days_back", 8), since),
                 mailto=papers_cfg.get("mailto"),
+                api_key=papers_cfg.get("openalex_api_key") or env("OPENALEX_API_KEY"),
                 cancel_event=cancel_event,
             )
             results["papers"] += _dedupe_and_store(lab_items, db)
