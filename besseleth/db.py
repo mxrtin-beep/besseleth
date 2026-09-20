@@ -1338,11 +1338,20 @@ class DB:
         stock price/IPO date (almost never populated — most neurotech
         companies are private) as a numeric signal that's actually
         available for most tracked companies, not just the rare public
-        one."""
+        one. Keyed by squashed (lowercased, stripped) org name — job_postings.org
+        is whatever string that org's job board was set up under, which doesn't
+        always match companies.name's exact casing/whitespace; a case-sensitive
+        dict lookup against that would silently show 0 for a company with real,
+        visible postings on the Jobs tab. Callers should squash the company name
+        the same way before looking a count up here."""
         rows = self.conn.execute(
             "SELECT org, COUNT(*) FROM job_postings WHERE removed_at IS NULL GROUP BY org"
         ).fetchall()
-        return {org: count for org, count in rows}
+        counts: dict[str, int] = {}
+        for org, count in rows:
+            key = (org or "").strip().lower()
+            counts[key] = counts.get(key, 0) + count
+        return counts
 
     def job_postings_added_by_org(self, days: int = 30) -> dict[str, int]:
         """How many NEW postings each org's board has picked up in the
@@ -1354,7 +1363,12 @@ class DB:
         rows = self.conn.execute(
             "SELECT org, COUNT(*) FROM job_postings WHERE first_seen_at >= ? GROUP BY org", (cutoff,)
         ).fetchall()
-        return {org: count for org, count in rows}
+        # Squashed key — same reasoning as active_job_counts_by_org.
+        counts: dict[str, int] = {}
+        for org, count in rows:
+            key = (org or "").strip().lower()
+            counts[key] = counts.get(key, 0) + count
+        return counts
 
     def publication_counts_by_org(self) -> dict[str, int]:
         """How many 'papers' items besseleth has ever attributed to each
@@ -1366,7 +1380,13 @@ class DB:
         rows = self.conn.execute(
             "SELECT org, COUNT(*) FROM items WHERE source = 'papers' AND org IS NOT NULL AND org != '' GROUP BY org"
         ).fetchall()
-        return {org: count for org, count in rows}
+        # Squashed key — same case/whitespace-mismatch reasoning as
+        # active_job_counts_by_org.
+        counts: dict[str, int] = {}
+        for org, count in rows:
+            key = (org or "").strip().lower()
+            counts[key] = counts.get(key, 0) + count
+        return counts
 
     def job_postings(self, active_only: bool = False) -> list[sqlite3.Row]:
         self.conn.row_factory = sqlite3.Row
@@ -1522,6 +1542,36 @@ class DB:
             for row in rows
         }
 
+    def delete_placeholder_companies(self) -> int:
+        """One-time cleanup for rows set_clinical_trial_stats/
+        set_nih_grant_stats used to create for every org ever mentioned
+        in any item — before they stopped inserting bare rows (see their
+        docstrings). Deletes a company row only when it has genuinely no
+        real signal at all: no funding, no stock ticker, no IPO, no
+        NIH/trials match, AND no job postings under its name — and only
+        if it's auto_extracted (never touches a row you've hand-verified
+        or hand-added, which is exactly what auto_extracted=0 means).
+        Returns the number of rows deleted. Safe to run more than once —
+        a no-op once nothing matches."""
+        cur = self.conn.execute(
+            """
+            DELETE FROM companies
+            WHERE auto_extracted = 1
+              AND funding_total_usd IS NULL
+              AND (last_funding_round IS NULL OR last_funding_round = '')
+              AND (stock_ticker IS NULL OR stock_ticker = '')
+              AND (ipo_date IS NULL OR ipo_date = '')
+              AND (nih_grant_count IS NULL OR nih_grant_count = 0)
+              AND (clinical_trial_count IS NULL OR clinical_trial_count = 0)
+              AND NOT EXISTS (
+                  SELECT 1 FROM job_postings
+                  WHERE lower(trim(job_postings.org)) = lower(trim(companies.name))
+              )
+            """
+        )
+        self.conn.commit()
+        return cur.rowcount
+
     def get_company(self, name: str) -> sqlite3.Row | None:
         self.conn.row_factory = sqlite3.Row
         return self.conn.execute("SELECT * FROM companies WHERE lower(name) = lower(?)", (name,)).fetchone()
@@ -1549,41 +1599,42 @@ class DB:
         external count that's meant to be replaced wholesale on every
         re-check: there's one true current answer for 'how many trials/
         patients has this sponsor got right now,' not a set of
-        potentially-conflicting historical reports to preserve. Inserts a
-        bare row if the org isn't in `companies` yet."""
+        potentially-conflicting historical reports to preserve.
+
+        Deliberately does NOT insert a bare row for an org that isn't
+        already in `companies` — this used to create a placeholder
+        company row for literally every org ever mentioned in any item
+        (via pipeline.py passing every db.orgs() name here, including
+        one-off academic labs/universities with no real company data at
+        all), which flooded the Companies tab with all-zero rows and
+        made its charts look sparse. Only refreshes an org that's
+        already a tracked company for some other reason (funding, a
+        device, stock, or a prior real NIH/trials match); a mention with
+        no existing company row is silently skipped, not created."""
+        if not self.get_company(org):
+            return
         now = datetime.now(timezone.utc).isoformat()
-        if not self.add_company(
-            name=org, stock_ticker="", stock_price=None, stock_price_updated_at="",
-            funding_total_usd=None, last_funding_round="", last_funding_date="",
-            ipo_date="", stock_exchange="", is_public=0, source_url="",
-            notes="", auto_extracted=1,
-            clinical_trial_count=count, clinical_trial_enrollment_total=enrollment_total,
-            clinical_trials_checked_at=now,
-        ):
-            self.conn.execute(
-                "UPDATE companies SET clinical_trial_count = ?, clinical_trial_enrollment_total = ?, "
-                "clinical_trials_checked_at = ? WHERE lower(name) = lower(?)",
-                (count, enrollment_total, now, org),
-            )
-            self.conn.commit()
+        self.conn.execute(
+            "UPDATE companies SET clinical_trial_count = ?, clinical_trial_enrollment_total = ?, "
+            "clinical_trials_checked_at = ? WHERE lower(name) = lower(?)",
+            (count, enrollment_total, now, org),
+        )
+        self.conn.commit()
 
     def set_nih_grant_stats(self, org: str, count: int, total_usd: float) -> None:
         """Same refresh-wholesale semantics as set_clinical_trial_stats,
-        for NIH RePORTER grant data."""
+        for NIH RePORTER grant data — including the same deliberate
+        choice to never insert a bare company row for an org that isn't
+        already tracked (see that docstring for why)."""
+        if not self.get_company(org):
+            return
         now = datetime.now(timezone.utc).isoformat()
-        if not self.add_company(
-            name=org, stock_ticker="", stock_price=None, stock_price_updated_at="",
-            funding_total_usd=None, last_funding_round="", last_funding_date="",
-            ipo_date="", stock_exchange="", is_public=0, source_url="",
-            notes="", auto_extracted=1,
-            nih_grant_count=count, nih_grant_total_usd=total_usd, nih_grants_checked_at=now,
-        ):
-            self.conn.execute(
-                "UPDATE companies SET nih_grant_count = ?, nih_grant_total_usd = ?, nih_grants_checked_at = ? "
-                "WHERE lower(name) = lower(?)",
-                (count, total_usd, now, org),
-            )
-            self.conn.commit()
+        self.conn.execute(
+            "UPDATE companies SET nih_grant_count = ?, nih_grant_total_usd = ?, nih_grants_checked_at = ? "
+            "WHERE lower(name) = lower(?)",
+            (count, total_usd, now, org),
+        )
+        self.conn.commit()
 
     def set_company_ipo(self, name: str, ipo_date: str, stock_exchange: str) -> None:
         """Records that a company went public — inserts a bare row if

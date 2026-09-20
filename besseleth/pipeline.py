@@ -193,20 +193,28 @@ def fetch_all(
         f"board, {jobs_result['active_postings']} posting(s) currently active."
     )
 
-    # Same "runs after enrichment, needs db.orgs()" shape as jobs sync
-    # above — both free/keyless APIs, both self-limit to orgs not
-    # rechecked recently rather than re-querying every org on every fetch.
-    known_orgs = [row["org"] for row in db.orgs()]
+    # Deliberately NOT db.orgs() (every org ever mentioned in any item,
+    # including a one-off academic lab named in a single paper) — that
+    # used to flood the Companies tab with an all-zero placeholder row
+    # for literally every org ever seen, since set_clinical_trial_stats/
+    # set_nih_grant_stats used to insert a bare row for any org passed
+    # in here. Both now refuse to create a new row (see their
+    # docstrings), so this only needs to cover the *live*, already-
+    # tracked company list — an org that's never otherwise become a
+    # tracked company (via real funding/device data, or a prior real
+    # match here) just won't get NIH/trials stats, rather than getting a
+    # bare placeholder row of its own.
+    tracked_company_names = [row["name"] for row in db.companies()]
     trials_cfg = config.raw.get("trends", {}).get("clinical_trials", {})
-    if trials_cfg.get("enabled", True) and known_orgs:
-        print("[pipeline] Syncing clinical trial stats for known orgs...")
-        trials_result = clinicaltrials_scraper.sync_all(db, known_orgs, recheck_days=trials_cfg.get("recheck_days", 7))
+    if trials_cfg.get("enabled", True) and tracked_company_names:
+        print("[pipeline] Syncing clinical trial stats for tracked companies...")
+        trials_result = clinicaltrials_scraper.sync_all(db, tracked_company_names, recheck_days=trials_cfg.get("recheck_days", 7))
         print(f"[pipeline] Clinical trials: checked {trials_result['orgs_checked']}, skipped {trials_result['orgs_skipped']} (recently checked).")
 
     grants_cfg = config.raw.get("trends", {}).get("nih_grants", {})
-    if grants_cfg.get("enabled", True) and known_orgs:
-        print("[pipeline] Syncing NIH grant stats for known orgs...")
-        grants_result = grants_scraper.sync_all(db, known_orgs, recheck_days=grants_cfg.get("recheck_days", 7))
+    if grants_cfg.get("enabled", True) and tracked_company_names:
+        print("[pipeline] Syncing NIH grant stats for tracked companies...")
+        grants_result = grants_scraper.sync_all(db, tracked_company_names, recheck_days=grants_cfg.get("recheck_days", 7))
         print(f"[pipeline] NIH grants: checked {grants_result['orgs_checked']}, skipped {grants_result['orgs_skipped']} (recently checked).")
 
     # Persisted here (not just by the scheduler's own wrapper) so `cli

@@ -198,10 +198,13 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
                     # unlike stock_price/ipo_date (almost never populated;
                     # most tracked companies are private), this is
                     # available for any company with a known job board —
-                    # see db.active_job_counts_by_org's docstring.
-                    "active_job_postings": active_job_counts.get(c.name, 0),
-                    "job_postings_added_30d": added_job_counts.get(c.name, 0),
-                    "publication_count": publication_counts.get(c.name, 0),
+                    # see db.active_job_counts_by_org's docstring. Looked
+                    # up by squashed name (see that docstring) since
+                    # job_postings.org's casing/whitespace doesn't always
+                    # match companies.name exactly.
+                    "active_job_postings": active_job_counts.get(c.name.strip().lower(), 0),
+                    "job_postings_added_30d": added_job_counts.get(c.name.strip().lower(), 0),
+                    "publication_count": publication_counts.get(c.name.strip().lower(), 0),
                     **{
                         k: v for k, v in external_metrics.get(c.name, {}).items()
                     },

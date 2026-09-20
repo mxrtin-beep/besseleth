@@ -10,6 +10,10 @@ Usage:
     python -m besseleth.cli social-add     [--url URL] [--text "..."]  # force-tag as social
     python -m besseleth.cli device-suggest --item-id <id>  # draft a devices.yaml entry from a scraped item
     python -m besseleth.cli company-refresh-stock          # update stock_price for companies.yaml's tickers (free)
+    python -m besseleth.cli cleanup-placeholder-companies  # one-time: delete company rows with no real signal at
+                                                              # all (a leftover from before NIH/trials sync stopped
+                                                              # creating a bare row for every org ever mentioned) —
+                                                              # safe to re-run, a no-op once nothing matches
     python -m besseleth.cli standardize-locations            # reformat every stored location to "Country[, State], City" (free)
     python -m besseleth.cli report-delete <report-id>       # e.g. report-delete 2026-09-01
     python -m besseleth.cli item-delete --item-id <id>       # remove a pasted (or any) item outright
@@ -78,6 +82,7 @@ COMMANDS = [
     "social-add",
     "device-suggest",
     "company-refresh-stock",
+    "cleanup-placeholder-companies",
     "reextract-paper-orgs",
     "reextract-org-locations",
     "standardize-locations",
@@ -150,6 +155,15 @@ def main(argv=None):
             print("[cli] No companies with a stock_ticker set — add one via the dashboard's Trends tab.")
         for line in log:
             print(f"[cli] {line}")
+        return
+
+    if args.command == "cleanup-placeholder-companies":
+        db = DB(config.db_path)
+        try:
+            deleted = db.delete_placeholder_companies()
+        finally:
+            db.close()
+        print(f"[cli] Deleted {deleted} placeholder company row(s) with no real signal.")
         return
 
     if args.command == "standardize-locations":
