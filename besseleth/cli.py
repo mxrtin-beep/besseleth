@@ -10,6 +10,11 @@ Usage:
     python -m besseleth.cli social-add     [--url URL] [--text "..."]  # force-tag as social
     python -m besseleth.cli device-suggest --item-id <id>  # draft a devices.yaml entry from a scraped item
     python -m besseleth.cli company-refresh-stock          # update stock_price for companies.yaml's tickers (free)
+    python -m besseleth.cli cleanup-placeholder-companies  # disk hygiene: prunes the companies-table CACHE of
+                                                              # auto-extracted rows for orgs no longer live (not on
+                                                              # any current item) — the Companies tab already only
+                                                              # ever shows live orgs regardless, so this isn't
+                                                              # required for correctness; safe to re-run
     python -m besseleth.cli standardize-locations            # reformat every stored location to "Country[, State], City" (free)
     python -m besseleth.cli report-delete <report-id>       # e.g. report-delete 2026-09-01
     python -m besseleth.cli item-delete --item-id <id>       # remove a pasted (or any) item outright
@@ -78,6 +83,7 @@ COMMANDS = [
     "social-add",
     "device-suggest",
     "company-refresh-stock",
+    "cleanup-placeholder-companies",
     "reextract-paper-orgs",
     "reextract-org-locations",
     "standardize-locations",
@@ -150,6 +156,20 @@ def main(argv=None):
             print("[cli] No companies with a stock_ticker set — add one via the dashboard's Trends tab.")
         for line in log:
             print(f"[cli] {line}")
+        return
+
+    if args.command == "cleanup-placeholder-companies":
+        db = DB(config.db_path)
+        try:
+            deleted = db.delete_stale_auto_companies()
+        finally:
+            db.close()
+        print(
+            f"[cli] Deleted {deleted} stale auto-extracted company cache row(s) "
+            "(orgs no longer live and never hand-added). The Companies tab itself "
+            "already only ever showed live orgs — see db.live_org_stats() — so this "
+            "is disk hygiene, not required for the tab to be correct."
+        )
         return
 
     if args.command == "standardize-locations":
