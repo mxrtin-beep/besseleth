@@ -169,47 +169,51 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
     @app.get("/api/companies")
     def api_companies():
-        companies = load_companies(config.companies_path, config.legacy_companies_yaml_path)
+        # A live view (see db.live_org_stats's docstring for why): every
+        # org currently the org on at least one stored item, plus any
+        # hand-added/hand-verified company — NOT every org this install
+        # has ever auto-extracted across its whole history, which is
+        # what the underlying `companies` table alone would give you.
         db = DB(config.db_path)
         try:
+            rows = db.live_org_stats()
             active_job_counts = db.active_job_counts_by_org()
             added_job_counts = db.job_postings_added_by_org()
             publication_counts = db.publication_counts_by_org()
-            external_metrics = db.external_metrics_by_org()
         finally:
             db.close()
         return jsonify(
             [
                 {
-                    "name": c.name,
-                    "stock_ticker": c.stock_ticker,
-                    "stock_price": c.stock_price,
-                    "stock_price_updated_at": c.stock_price_updated_at,
-                    "funding_total_usd": c.funding_total_usd,
-                    "last_funding_round": c.last_funding_round,
-                    "last_funding_date": c.last_funding_date,
-                    "ipo_date": c.ipo_date,
-                    "stock_exchange": c.stock_exchange,
-                    "is_public": c.is_public,
-                    "source_url": c.source_url,
-                    "notes": c.notes,
-                    "auto_extracted": c.auto_extracted,
+                    "name": r["name"],
+                    "stock_ticker": r["stock_ticker"] or "",
+                    "stock_price": r["stock_price"],
+                    "stock_price_updated_at": r["stock_price_updated_at"] or "",
+                    "funding_total_usd": r["funding_total_usd"],
+                    "last_funding_round": r["last_funding_round"] or "",
+                    "last_funding_date": r["last_funding_date"] or "",
+                    "ipo_date": r["ipo_date"] or "",
+                    "stock_exchange": r["stock_exchange"] or "",
+                    "is_public": bool(r["is_public"]),
+                    "source_url": r["source_url"] or "",
+                    "notes": r["notes"] or "",
+                    "auto_extracted": bool(r["auto_extracted"]) if r["auto_extracted"] is not None else True,
+                    "clinical_trial_count": r["clinical_trial_count"],
+                    "clinical_trial_enrollment_total": r["clinical_trial_enrollment_total"],
+                    "nih_grant_count": r["nih_grant_count"],
+                    "nih_grant_total_usd": r["nih_grant_total_usd"],
                     # A free, always-fresh proxy for hiring momentum —
                     # unlike stock_price/ipo_date (almost never populated;
                     # most tracked companies are private), this is
-                    # available for any company with a known job board —
-                    # see db.active_job_counts_by_org's docstring. Looked
-                    # up by squashed name (see that docstring) since
-                    # job_postings.org's casing/whitespace doesn't always
-                    # match companies.name exactly.
-                    "active_job_postings": active_job_counts.get(c.name.strip().lower(), 0),
-                    "job_postings_added_30d": added_job_counts.get(c.name.strip().lower(), 0),
-                    "publication_count": publication_counts.get(c.name.strip().lower(), 0),
-                    **{
-                        k: v for k, v in external_metrics.get(c.name, {}).items()
-                    },
+                    # available for any org with a known job board — see
+                    # db.active_job_counts_by_org's docstring. Looked up
+                    # by squashed name since job_postings.org's casing/
+                    # whitespace doesn't always match exactly.
+                    "active_job_postings": active_job_counts.get(r["name"].strip().lower(), 0),
+                    "job_postings_added_30d": added_job_counts.get(r["name"].strip().lower(), 0),
+                    "publication_count": publication_counts.get(r["name"].strip().lower(), 0),
                 }
-                for c in companies
+                for r in rows
             ]
         )
 

@@ -10,10 +10,11 @@ Usage:
     python -m besseleth.cli social-add     [--url URL] [--text "..."]  # force-tag as social
     python -m besseleth.cli device-suggest --item-id <id>  # draft a devices.yaml entry from a scraped item
     python -m besseleth.cli company-refresh-stock          # update stock_price for companies.yaml's tickers (free)
-    python -m besseleth.cli cleanup-placeholder-companies  # one-time: delete company rows with no real signal at
-                                                              # all (a leftover from before NIH/trials sync stopped
-                                                              # creating a bare row for every org ever mentioned) —
-                                                              # safe to re-run, a no-op once nothing matches
+    python -m besseleth.cli cleanup-placeholder-companies  # disk hygiene: prunes the companies-table CACHE of
+                                                              # auto-extracted rows for orgs no longer live (not on
+                                                              # any current item) — the Companies tab already only
+                                                              # ever shows live orgs regardless, so this isn't
+                                                              # required for correctness; safe to re-run
     python -m besseleth.cli standardize-locations            # reformat every stored location to "Country[, State], City" (free)
     python -m besseleth.cli report-delete <report-id>       # e.g. report-delete 2026-09-01
     python -m besseleth.cli item-delete --item-id <id>       # remove a pasted (or any) item outright
@@ -160,10 +161,15 @@ def main(argv=None):
     if args.command == "cleanup-placeholder-companies":
         db = DB(config.db_path)
         try:
-            deleted = db.delete_placeholder_companies()
+            deleted = db.delete_stale_auto_companies()
         finally:
             db.close()
-        print(f"[cli] Deleted {deleted} placeholder company row(s) with no real signal.")
+        print(
+            f"[cli] Deleted {deleted} stale auto-extracted company cache row(s) "
+            "(orgs no longer live and never hand-added). The Companies tab itself "
+            "already only ever showed live orgs — see db.live_org_stats() — so this "
+            "is disk hygiene, not required for the tab to be correct."
+        )
         return
 
     if args.command == "standardize-locations":

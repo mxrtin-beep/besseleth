@@ -1542,35 +1542,93 @@ class DB:
             for row in rows
         }
 
-    def delete_placeholder_companies(self) -> int:
-        """One-time cleanup for rows set_clinical_trial_stats/
-        set_nih_grant_stats used to create for every org ever mentioned
-        in any item — before they stopped inserting bare rows (see their
-        docstrings). Deletes a company row only when it has genuinely no
-        real signal at all: no funding, no stock ticker, no IPO, no
-        NIH/trials match, AND no job postings under its name — and only
-        if it's auto_extracted (never touches a row you've hand-verified
-        or hand-added, which is exactly what auto_extracted=0 means).
-        Returns the number of rows deleted. Safe to run more than once —
-        a no-op once nothing matches."""
+    def delete_stale_auto_companies(self) -> int:
+        """Prunes the companies-table CACHE (not the Companies tab's
+        displayed row set — see live_org_stats()) of auto-extracted rows
+        for an org that's no longer live: not currently the org on any
+        stored item (db.orgs()), and not a job-board-tracked org either.
+        Companies-tab rows come from live_org_stats() now, which already
+        never shows a dead org regardless of what's still cached here —
+        this is just disk hygiene so the cache doesn't grow forever with
+        entries for orgs you source-cleared/deleted long ago. Never
+        touches a hand-added/hand-verified row (auto_extracted = 0) —
+        that's what the flag is for. Returns the number deleted; safe to
+        re-run."""
         cur = self.conn.execute(
             """
             DELETE FROM companies
             WHERE auto_extracted = 1
-              AND funding_total_usd IS NULL
-              AND (last_funding_round IS NULL OR last_funding_round = '')
-              AND (stock_ticker IS NULL OR stock_ticker = '')
-              AND (ipo_date IS NULL OR ipo_date = '')
-              AND (nih_grant_count IS NULL OR nih_grant_count = 0)
-              AND (clinical_trial_count IS NULL OR clinical_trial_count = 0)
-              AND NOT EXISTS (
-                  SELECT 1 FROM job_postings
-                  WHERE lower(trim(job_postings.org)) = lower(trim(companies.name))
+              AND lower(trim(name)) NOT IN (
+                  SELECT lower(trim(org)) FROM items WHERE org IS NOT NULL AND org != ''
+              )
+              AND lower(trim(name)) NOT IN (
+                  SELECT lower(trim(org)) FROM job_postings
               )
             """
         )
         self.conn.commit()
         return cur.rowcount
+
+    def live_org_stats(self) -> list[sqlite3.Row]:
+        """The Companies tab's actual row set: every org CURRENTLY the
+        org on at least one stored item (db.orgs() — naturally live,
+        since a source-clear/item-delete removing every one of an org's
+        items removes it from here too), left-joined with whatever
+        stats companies/job_postings happen to have cached for it. Plus
+        any hand-added/hand-verified company (auto_extracted = 0) even
+        if no live item currently names it — you added it on purpose,
+        it doesn't disappear just because its one mentioning item got
+        cleaned up.
+
+        This is deliberately NOT `SELECT * FROM companies`: that table
+        used to (and, for cached-but-now-dead orgs, still can) hold a
+        row for literally every org ever auto-extracted across every
+        fetch this install has ever run, including one-off academic
+        labs mentioned in a single paper years ago — a permanently
+        accumulating table, not a live one. Matching against org names
+        squashed (lowercased, trimmed) the same way job/publication
+        counts already are — see active_job_counts_by_org's docstring."""
+        # Two SELECTs unioned instead of a FULL OUTER JOIN — SQLite only
+        # gained FULL OUTER JOIN in 3.39 (2022), not safe to assume here.
+        # First half: every live org (from items), left-joined to
+        # whatever's cached for it. Second half: hand-added/hand-verified
+        # companies (auto_extracted=0) that AREN'T currently live —
+        # added on purpose, so they stay even without a live item.
+        cols = """
+            COALESCE(c.name, i.org) AS name,
+            c.stock_ticker, c.stock_price, c.stock_price_updated_at,
+            c.funding_total_usd, c.last_funding_round, c.last_funding_date,
+            c.ipo_date, c.stock_exchange, c.is_public,
+            c.source_url, c.notes, c.auto_extracted,
+            c.clinical_trial_count, c.clinical_trial_enrollment_total,
+            c.nih_grant_count, c.nih_grant_total_usd
+        """
+        self.conn.row_factory = sqlite3.Row
+        rows = self.conn.execute(
+            f"""
+            SELECT {cols}
+            FROM (SELECT DISTINCT org FROM items WHERE org IS NOT NULL AND org != '') AS i
+            LEFT JOIN companies AS c ON lower(trim(c.name)) = lower(trim(i.org))
+
+            UNION
+
+            SELECT
+                c.name AS name,
+                c.stock_ticker, c.stock_price, c.stock_price_updated_at,
+                c.funding_total_usd, c.last_funding_round, c.last_funding_date,
+                c.ipo_date, c.stock_exchange, c.is_public,
+                c.source_url, c.notes, c.auto_extracted,
+                c.clinical_trial_count, c.clinical_trial_enrollment_total,
+                c.nih_grant_count, c.nih_grant_total_usd
+            FROM companies AS c
+            WHERE c.auto_extracted = 0
+              AND lower(trim(c.name)) NOT IN (
+                  SELECT lower(trim(org)) FROM items WHERE org IS NOT NULL AND org != ''
+              )
+            ORDER BY name
+            """
+        ).fetchall()
+        return rows
 
     def get_company(self, name: str) -> sqlite3.Row | None:
         self.conn.row_factory = sqlite3.Row
@@ -1599,42 +1657,46 @@ class DB:
         external count that's meant to be replaced wholesale on every
         re-check: there's one true current answer for 'how many trials/
         patients has this sponsor got right now,' not a set of
-        potentially-conflicting historical reports to preserve.
-
-        Deliberately does NOT insert a bare row for an org that isn't
-        already in `companies` — this used to create a placeholder
-        company row for literally every org ever mentioned in any item
-        (via pipeline.py passing every db.orgs() name here, including
-        one-off academic labs/universities with no real company data at
-        all), which flooded the Companies tab with all-zero rows and
-        made its charts look sparse. Only refreshes an org that's
-        already a tracked company for some other reason (funding, a
-        device, stock, or a prior real NIH/trials match); a mention with
-        no existing company row is silently skipped, not created."""
-        if not self.get_company(org):
-            return
+        potentially-conflicting historical reports to preserve. Inserts
+        a bare cache row if `org` isn't in `companies` yet — harmless:
+        the companies table is just a stats CACHE now, not the thing
+        that decides what shows on the Companies tab (see
+        live_org_stats()), so caching a stat for an org that later stops
+        being live just leaves an unused row behind (cleaned up
+        eventually by delete_stale_auto_companies(), not urgent)."""
         now = datetime.now(timezone.utc).isoformat()
-        self.conn.execute(
-            "UPDATE companies SET clinical_trial_count = ?, clinical_trial_enrollment_total = ?, "
-            "clinical_trials_checked_at = ? WHERE lower(name) = lower(?)",
-            (count, enrollment_total, now, org),
-        )
-        self.conn.commit()
+        if not self.add_company(
+            name=org, stock_ticker="", stock_price=None, stock_price_updated_at="",
+            funding_total_usd=None, last_funding_round="", last_funding_date="",
+            ipo_date="", stock_exchange="", is_public=0, source_url="",
+            notes="", auto_extracted=1,
+            clinical_trial_count=count, clinical_trial_enrollment_total=enrollment_total,
+            clinical_trials_checked_at=now,
+        ):
+            self.conn.execute(
+                "UPDATE companies SET clinical_trial_count = ?, clinical_trial_enrollment_total = ?, "
+                "clinical_trials_checked_at = ? WHERE lower(name) = lower(?)",
+                (count, enrollment_total, now, org),
+            )
+            self.conn.commit()
 
     def set_nih_grant_stats(self, org: str, count: int, total_usd: float) -> None:
-        """Same refresh-wholesale semantics as set_clinical_trial_stats,
-        for NIH RePORTER grant data — including the same deliberate
-        choice to never insert a bare company row for an org that isn't
-        already tracked (see that docstring for why)."""
-        if not self.get_company(org):
-            return
+        """Same refresh-wholesale, harmless-bare-row semantics as
+        set_clinical_trial_stats, for NIH RePORTER grant data."""
         now = datetime.now(timezone.utc).isoformat()
-        self.conn.execute(
-            "UPDATE companies SET nih_grant_count = ?, nih_grant_total_usd = ?, nih_grants_checked_at = ? "
-            "WHERE lower(name) = lower(?)",
-            (count, total_usd, now, org),
-        )
-        self.conn.commit()
+        if not self.add_company(
+            name=org, stock_ticker="", stock_price=None, stock_price_updated_at="",
+            funding_total_usd=None, last_funding_round="", last_funding_date="",
+            ipo_date="", stock_exchange="", is_public=0, source_url="",
+            notes="", auto_extracted=1,
+            nih_grant_count=count, nih_grant_total_usd=total_usd, nih_grants_checked_at=now,
+        ):
+            self.conn.execute(
+                "UPDATE companies SET nih_grant_count = ?, nih_grant_total_usd = ?, nih_grants_checked_at = ? "
+                "WHERE lower(name) = lower(?)",
+                (count, total_usd, now, org),
+            )
+            self.conn.commit()
 
     def set_company_ipo(self, name: str, ipo_date: str, stock_exchange: str) -> None:
         """Records that a company went public — inserts a bare row if
