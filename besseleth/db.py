@@ -389,6 +389,28 @@ class DB:
         )
         self.conn.commit()
 
+    def get_cached_duplicates(self, kind: str) -> list | None:
+        """Cached find_possible_duplicate_orgs()/find_possible_duplicate_companies()
+        result for `kind` ('org' or 'company') — see set_cached_duplicates.
+        None means never cached yet (fresh install, or before the first
+        fetch/enrich has run), distinct from an empty list (computed,
+        genuinely found nothing)."""
+        raw = self.get_meta(f"duplicate_cache_{kind}")
+        return json.loads(raw) if raw is not None else None
+
+    def set_cached_duplicates(self, kind: str, pairs: list) -> None:
+        """Caches a duplicate-pairs result (a list of tuples/lists — JSON
+        round-trips it as lists either way) so the Orgs/Companies tabs
+        can read a precomputed answer instead of re-running an O(n^2)
+        fuzzy-match scan across every stored org/company on EVERY tab
+        open. find_possible_duplicate_orgs/find_possible_duplicate_companies
+        stayed genuinely quadratic in the number of distinct names, which
+        was fine when there were a few dozen but became the dashboard's
+        actual bottleneck once an install had accumulated hundreds of
+        orgs over time — recomputed here once per fetch cycle (see
+        pipeline.py, after enrichment) instead of on-demand per request."""
+        self.set_meta(f"duplicate_cache_{kind}", json.dumps(pairs))
+
     def record_enrich_run(self, items: int, seconds: float) -> None:
         """Accumulates all-time enrich stats in `meta`, alongside the
         most recent run's own numbers — powers the dashboard's "enriched
@@ -1338,11 +1360,20 @@ class DB:
         stock price/IPO date (almost never populated — most neurotech
         companies are private) as a numeric signal that's actually
         available for most tracked companies, not just the rare public
-        one."""
+        one. Keyed by squashed (lowercased, stripped) org name — job_postings.org
+        is whatever string that org's job board was set up under, which doesn't
+        always match companies.name's exact casing/whitespace; a case-sensitive
+        dict lookup against that would silently show 0 for a company with real,
+        visible postings on the Jobs tab. Callers should squash the company name
+        the same way before looking a count up here."""
         rows = self.conn.execute(
             "SELECT org, COUNT(*) FROM job_postings WHERE removed_at IS NULL GROUP BY org"
         ).fetchall()
-        return {org: count for org, count in rows}
+        counts: dict[str, int] = {}
+        for org, count in rows:
+            key = (org or "").strip().lower()
+            counts[key] = counts.get(key, 0) + count
+        return counts
 
     def job_postings_added_by_org(self, days: int = 30) -> dict[str, int]:
         """How many NEW postings each org's board has picked up in the
@@ -1354,7 +1385,12 @@ class DB:
         rows = self.conn.execute(
             "SELECT org, COUNT(*) FROM job_postings WHERE first_seen_at >= ? GROUP BY org", (cutoff,)
         ).fetchall()
-        return {org: count for org, count in rows}
+        # Squashed key — same reasoning as active_job_counts_by_org.
+        counts: dict[str, int] = {}
+        for org, count in rows:
+            key = (org or "").strip().lower()
+            counts[key] = counts.get(key, 0) + count
+        return counts
 
     def publication_counts_by_org(self) -> dict[str, int]:
         """How many 'papers' items besseleth has ever attributed to each
@@ -1366,7 +1402,13 @@ class DB:
         rows = self.conn.execute(
             "SELECT org, COUNT(*) FROM items WHERE source = 'papers' AND org IS NOT NULL AND org != '' GROUP BY org"
         ).fetchall()
-        return {org: count for org, count in rows}
+        # Squashed key — same case/whitespace-mismatch reasoning as
+        # active_job_counts_by_org.
+        counts: dict[str, int] = {}
+        for org, count in rows:
+            key = (org or "").strip().lower()
+            counts[key] = counts.get(key, 0) + count
+        return counts
 
     def job_postings(self, active_only: bool = False) -> list[sqlite3.Row]:
         self.conn.row_factory = sqlite3.Row
@@ -1522,6 +1564,94 @@ class DB:
             for row in rows
         }
 
+    def delete_stale_auto_companies(self) -> int:
+        """Prunes the companies-table CACHE (not the Companies tab's
+        displayed row set — see live_org_stats()) of auto-extracted rows
+        for an org that's no longer live: not currently the org on any
+        stored item (db.orgs()), and not a job-board-tracked org either.
+        Companies-tab rows come from live_org_stats() now, which already
+        never shows a dead org regardless of what's still cached here —
+        this is just disk hygiene so the cache doesn't grow forever with
+        entries for orgs you source-cleared/deleted long ago. Never
+        touches a hand-added/hand-verified row (auto_extracted = 0) —
+        that's what the flag is for. Returns the number deleted; safe to
+        re-run."""
+        cur = self.conn.execute(
+            """
+            DELETE FROM companies
+            WHERE auto_extracted = 1
+              AND lower(trim(name)) NOT IN (
+                  SELECT lower(trim(org)) FROM items WHERE org IS NOT NULL AND org != ''
+              )
+              AND lower(trim(name)) NOT IN (
+                  SELECT lower(trim(org)) FROM job_postings
+              )
+            """
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def live_org_stats(self) -> list[sqlite3.Row]:
+        """The Companies tab's actual row set: every org CURRENTLY the
+        org on at least one stored item (db.orgs() — naturally live,
+        since a source-clear/item-delete removing every one of an org's
+        items removes it from here too), left-joined with whatever
+        stats companies/job_postings happen to have cached for it. Plus
+        any hand-added/hand-verified company (auto_extracted = 0) even
+        if no live item currently names it — you added it on purpose,
+        it doesn't disappear just because its one mentioning item got
+        cleaned up.
+
+        This is deliberately NOT `SELECT * FROM companies`: that table
+        used to (and, for cached-but-now-dead orgs, still can) hold a
+        row for literally every org ever auto-extracted across every
+        fetch this install has ever run, including one-off academic
+        labs mentioned in a single paper years ago — a permanently
+        accumulating table, not a live one. Matching against org names
+        squashed (lowercased, trimmed) the same way job/publication
+        counts already are — see active_job_counts_by_org's docstring."""
+        # Two SELECTs unioned instead of a FULL OUTER JOIN — SQLite only
+        # gained FULL OUTER JOIN in 3.39 (2022), not safe to assume here.
+        # First half: every live org (from items), left-joined to
+        # whatever's cached for it. Second half: hand-added/hand-verified
+        # companies (auto_extracted=0) that AREN'T currently live —
+        # added on purpose, so they stay even without a live item.
+        cols = """
+            COALESCE(c.name, i.org) AS name,
+            c.stock_ticker, c.stock_price, c.stock_price_updated_at,
+            c.funding_total_usd, c.last_funding_round, c.last_funding_date,
+            c.ipo_date, c.stock_exchange, c.is_public,
+            c.source_url, c.notes, c.auto_extracted,
+            c.clinical_trial_count, c.clinical_trial_enrollment_total,
+            c.nih_grant_count, c.nih_grant_total_usd
+        """
+        self.conn.row_factory = sqlite3.Row
+        rows = self.conn.execute(
+            f"""
+            SELECT {cols}
+            FROM (SELECT DISTINCT org FROM items WHERE org IS NOT NULL AND org != '') AS i
+            LEFT JOIN companies AS c ON lower(trim(c.name)) = lower(trim(i.org))
+
+            UNION
+
+            SELECT
+                c.name AS name,
+                c.stock_ticker, c.stock_price, c.stock_price_updated_at,
+                c.funding_total_usd, c.last_funding_round, c.last_funding_date,
+                c.ipo_date, c.stock_exchange, c.is_public,
+                c.source_url, c.notes, c.auto_extracted,
+                c.clinical_trial_count, c.clinical_trial_enrollment_total,
+                c.nih_grant_count, c.nih_grant_total_usd
+            FROM companies AS c
+            WHERE c.auto_extracted = 0
+              AND lower(trim(c.name)) NOT IN (
+                  SELECT lower(trim(org)) FROM items WHERE org IS NOT NULL AND org != ''
+              )
+            ORDER BY name
+            """
+        ).fetchall()
+        return rows
+
     def get_company(self, name: str) -> sqlite3.Row | None:
         self.conn.row_factory = sqlite3.Row
         return self.conn.execute("SELECT * FROM companies WHERE lower(name) = lower(?)", (name,)).fetchone()
@@ -1549,8 +1679,13 @@ class DB:
         external count that's meant to be replaced wholesale on every
         re-check: there's one true current answer for 'how many trials/
         patients has this sponsor got right now,' not a set of
-        potentially-conflicting historical reports to preserve. Inserts a
-        bare row if the org isn't in `companies` yet."""
+        potentially-conflicting historical reports to preserve. Inserts
+        a bare cache row if `org` isn't in `companies` yet — harmless:
+        the companies table is just a stats CACHE now, not the thing
+        that decides what shows on the Companies tab (see
+        live_org_stats()), so caching a stat for an org that later stops
+        being live just leaves an unused row behind (cleaned up
+        eventually by delete_stale_auto_companies(), not urgent)."""
         now = datetime.now(timezone.utc).isoformat()
         if not self.add_company(
             name=org, stock_ticker="", stock_price=None, stock_price_updated_at="",
@@ -1568,8 +1703,8 @@ class DB:
             self.conn.commit()
 
     def set_nih_grant_stats(self, org: str, count: int, total_usd: float) -> None:
-        """Same refresh-wholesale semantics as set_clinical_trial_stats,
-        for NIH RePORTER grant data."""
+        """Same refresh-wholesale, harmless-bare-row semantics as
+        set_clinical_trial_stats, for NIH RePORTER grant data."""
         now = datetime.now(timezone.utc).isoformat()
         if not self.add_company(
             name=org, stock_ticker="", stock_price=None, stock_price_updated_at="",

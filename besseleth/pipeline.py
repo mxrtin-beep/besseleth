@@ -193,9 +193,17 @@ def fetch_all(
         f"board, {jobs_result['active_postings']} posting(s) currently active."
     )
 
-    # Same "runs after enrichment, needs db.orgs()" shape as jobs sync
-    # above — both free/keyless APIs, both self-limit to orgs not
-    # rechecked recently rather than re-querying every org on every fetch.
+    # Every LIVE org (db.orgs() — currently the org on at least one
+    # stored item), not the companies table's own row set: the whole
+    # point of NIH/clinical-trials sync is checking orgs that AREN'T
+    # already known business entities (mostly academic labs/
+    # universities, which funding-round news coverage never touches —
+    # see grants_scraper's module docstring), so restricting this to
+    # already-tracked companies would defeat it entirely. set_*_stats
+    # caches a bare row for whatever it finds (see their docstrings);
+    # the Companies tab decides what to DISPLAY from db.live_org_stats(),
+    # which only ever shows a currently-live org (or one you hand-added)
+    # regardless of what's sitting in this cache.
     known_orgs = [row["org"] for row in db.orgs()]
     trials_cfg = config.raw.get("trends", {}).get("clinical_trials", {})
     if trials_cfg.get("enabled", True) and known_orgs:
@@ -208,6 +216,19 @@ def fetch_all(
         print("[pipeline] Syncing NIH grant stats for known orgs...")
         grants_result = grants_scraper.sync_all(db, known_orgs, recheck_days=grants_cfg.get("recheck_days", 7))
         print(f"[pipeline] NIH grants: checked {grants_result['orgs_checked']}, skipped {grants_result['orgs_skipped']} (recently checked).")
+
+    # Recomputes the Orgs/Companies tabs' fuzzy-duplicate suggestions
+    # ONCE per fetch cycle, here, instead of live on every tab open —
+    # find_possible_duplicate_orgs/find_possible_duplicate_companies are
+    # both genuinely O(n^2) in the number of distinct names, which was
+    # the dashboard's actual bottleneck once an install accumulated
+    # hundreds of orgs over time. See db.set_cached_duplicates's
+    # docstring.
+    print("[pipeline] Recomputing org/company duplicate-suggestion caches...")
+    db.set_cached_duplicates("org", db.find_possible_duplicate_orgs())
+    from .trends.company_store import find_possible_duplicate_companies
+
+    db.set_cached_duplicates("company", find_possible_duplicate_companies(config.db_path))
 
     # Persisted here (not just by the scheduler's own wrapper) so `cli
     # fetch`/`cli run` update this too — previously only a scheduled run
