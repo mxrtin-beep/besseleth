@@ -226,9 +226,21 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # db.dismissed_duplicate_pairs's docstring) — without this a
         # dismissal didn't persist and the same pair reappeared on
         # every reload/restart.
-        pairs = find_possible_duplicate_companies(config.companies_path)
+        #
+        # Reads pipeline.py's post-fetch cache (see
+        # db.set_cached_duplicates's docstring for why this isn't
+        # computed live here) — genuinely O(n^2) in the number of
+        # distinct companies, which used to make this endpoint the
+        # dashboard's actual bottleneck. Falls back to computing it
+        # live, once, only if nothing's been cached yet at all (a
+        # fresh install before its first fetch has run) — that result
+        # is also cached so this fallback only ever fires once.
         db = DB(config.db_path)
         try:
+            pairs = db.get_cached_duplicates("company")
+            if pairs is None:
+                pairs = find_possible_duplicate_companies(config.companies_path)
+                db.set_cached_duplicates("company", pairs)
             dismissed = db.dismissed_duplicate_pairs("company")
         finally:
             db.close()
@@ -265,9 +277,16 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # and catching a second shape it can't (a corporate-suffix
         # variant like "Valve" vs "Valve Corporation" — see
         # db.find_possible_duplicate_orgs's docstring).
+        #
+        # Cached the same way and for the same reason as the companies
+        # version above — see that endpoint's comment and
+        # db.set_cached_duplicates's docstring.
         db = DB(config.db_path)
         try:
-            pairs = db.find_possible_duplicate_orgs()
+            pairs = db.get_cached_duplicates("org")
+            if pairs is None:
+                pairs = db.find_possible_duplicate_orgs()
+                db.set_cached_duplicates("org", pairs)
             dismissed = db.dismissed_duplicate_pairs("org")
         finally:
             db.close()

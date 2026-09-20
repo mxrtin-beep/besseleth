@@ -389,6 +389,28 @@ class DB:
         )
         self.conn.commit()
 
+    def get_cached_duplicates(self, kind: str) -> list | None:
+        """Cached find_possible_duplicate_orgs()/find_possible_duplicate_companies()
+        result for `kind` ('org' or 'company') — see set_cached_duplicates.
+        None means never cached yet (fresh install, or before the first
+        fetch/enrich has run), distinct from an empty list (computed,
+        genuinely found nothing)."""
+        raw = self.get_meta(f"duplicate_cache_{kind}")
+        return json.loads(raw) if raw is not None else None
+
+    def set_cached_duplicates(self, kind: str, pairs: list) -> None:
+        """Caches a duplicate-pairs result (a list of tuples/lists — JSON
+        round-trips it as lists either way) so the Orgs/Companies tabs
+        can read a precomputed answer instead of re-running an O(n^2)
+        fuzzy-match scan across every stored org/company on EVERY tab
+        open. find_possible_duplicate_orgs/find_possible_duplicate_companies
+        stayed genuinely quadratic in the number of distinct names, which
+        was fine when there were a few dozen but became the dashboard's
+        actual bottleneck once an install had accumulated hundreds of
+        orgs over time — recomputed here once per fetch cycle (see
+        pipeline.py, after enrichment) instead of on-demand per request."""
+        self.set_meta(f"duplicate_cache_{kind}", json.dumps(pairs))
+
     def record_enrich_run(self, items: int, seconds: float) -> None:
         """Accumulates all-time enrich stats in `meta`, alongside the
         most recent run's own numbers — powers the dashboard's "enriched

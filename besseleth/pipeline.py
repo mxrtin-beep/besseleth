@@ -217,6 +217,19 @@ def fetch_all(
         grants_result = grants_scraper.sync_all(db, known_orgs, recheck_days=grants_cfg.get("recheck_days", 7))
         print(f"[pipeline] NIH grants: checked {grants_result['orgs_checked']}, skipped {grants_result['orgs_skipped']} (recently checked).")
 
+    # Recomputes the Orgs/Companies tabs' fuzzy-duplicate suggestions
+    # ONCE per fetch cycle, here, instead of live on every tab open —
+    # find_possible_duplicate_orgs/find_possible_duplicate_companies are
+    # both genuinely O(n^2) in the number of distinct names, which was
+    # the dashboard's actual bottleneck once an install accumulated
+    # hundreds of orgs over time. See db.set_cached_duplicates's
+    # docstring.
+    print("[pipeline] Recomputing org/company duplicate-suggestion caches...")
+    db.set_cached_duplicates("org", db.find_possible_duplicate_orgs())
+    from .trends.company_store import find_possible_duplicate_companies
+
+    db.set_cached_duplicates("company", find_possible_duplicate_companies(config.db_path))
+
     # Persisted here (not just by the scheduler's own wrapper) so `cli
     # fetch`/`cli run` update this too — previously only a scheduled run
     # or the dashboard's "Run now" ever touched it, so a CLI-only
