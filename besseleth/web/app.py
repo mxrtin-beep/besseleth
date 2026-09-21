@@ -899,6 +899,13 @@ def create_app(
     @app.post("/api/run-now")
     def api_run_now():
         status = _industry_status(app)
+        # Resolved HERE, in the actual request handler, not inside
+        # _work() below — _industry_config(app) reads request.args,
+        # which only exists while a real HTTP request is being handled.
+        # _work() runs on a background thread AFTER this handler already
+        # returned, so calling it there raises "Working outside of
+        # request context" the moment the thread actually runs.
+        industry_config = _industry_config(app)
         if status.running_now:
             return jsonify({"ok": False, "message": "Already running."}), 409
         # Runs in a background thread — fetching+summarizing can take a
@@ -919,7 +926,7 @@ def create_app(
 
         def _work():
             try:
-                run_now(_industry_config(app), status)
+                run_now(industry_config, status)
             finally:
                 status.set_progress(None)
                 with status._lock:
@@ -949,6 +956,9 @@ def create_app(
         from ..enrich import enrich_items_detailed
 
         status = _industry_status(app)
+        # See /api/run-now's comment — must resolve before the thread
+        # starts, not inside it.
+        industry_config = _industry_config(app)
         if status.running_now:
             return jsonify({"ok": False, "message": "Already running."}), 409
         payload = request.get_json(silent=True) or {}
@@ -970,10 +980,10 @@ def create_app(
 
         def _work():
             try:
-                db = DB(_industry_config(app).db_path)
+                db = DB(industry_config.db_path)
                 try:
                     result = enrich_items_detailed(
-                        _industry_config(app), db, force=force, run_until_done=run_until_done,
+                        industry_config, db, force=force, run_until_done=run_until_done,
                         progress_cb=status.set_progress, cancel_event=status.cancel_event,
                     )
                 finally:
@@ -1067,6 +1077,9 @@ def create_app(
     @app.post("/api/backfill")
     def api_backfill():
         status = _industry_status(app)
+        # See /api/run-now's comment — must resolve before the thread
+        # starts, not inside it.
+        industry_config = _industry_config(app)
         if status.running_now:
             return jsonify({"ok": False, "message": "Already running."}), 409
         payload = request.get_json(silent=True) or {}
@@ -1083,9 +1096,9 @@ def create_app(
 
         def _work():
             try:
-                db = DB(_industry_config(app).db_path)
+                db = DB(industry_config.db_path)
                 try:
-                    results = fetch_all(_industry_config(app), db, since=since, progress_cb=status.set_progress, cancel_event=status.cancel_event)
+                    results = fetch_all(industry_config, db, since=since, progress_cb=status.set_progress, cancel_event=status.cancel_event)
                 finally:
                     db.close()
                 with status._lock:
@@ -1115,6 +1128,9 @@ def create_app(
         # Same async/cancel/progress shape as /api/backfill, since a big
         # backlog's LLM tier can take a while.
         status = _industry_status(app)
+        # See /api/run-now's comment — must resolve before the thread
+        # starts, not inside it.
+        industry_config = _industry_config(app)
         if status.running_now:
             return jsonify({"ok": False, "message": "Already running."}), 409
         payload = request.get_json(silent=True) or {}
@@ -1129,10 +1145,10 @@ def create_app(
             try:
                 from ..enrich import reextract_org_names
 
-                db = DB(_industry_config(app).db_path)
+                db = DB(industry_config.db_path)
                 try:
                     result = reextract_org_names(
-                        _industry_config(app), db, cancel_event=status.cancel_event, progress_cb=status.set_progress,
+                        industry_config, db, cancel_event=status.cancel_event, progress_cb=status.set_progress,
                         max_llm_calls=10**9 if uncapped else None,
                     )
                 finally:
@@ -1164,6 +1180,9 @@ def create_app(
         # (scrapers/openalex_scraper.py, scrapers/arxiv_scraper.py); this
         # is what fixes the EXISTING backlog. Same async shape as above.
         status = _industry_status(app)
+        # See /api/run-now's comment — must resolve before the thread
+        # starts, not inside it.
+        industry_config = _industry_config(app)
         if status.running_now:
             return jsonify({"ok": False, "message": "Already running."}), 409
         payload = request.get_json(silent=True) or {}
@@ -1178,10 +1197,10 @@ def create_app(
             try:
                 from ..enrich import reextract_paper_orgs
 
-                db = DB(_industry_config(app).db_path)
+                db = DB(industry_config.db_path)
                 try:
                     result = reextract_paper_orgs(
-                        _industry_config(app), db, cancel_event=status.cancel_event, progress_cb=status.set_progress,
+                        industry_config, db, cancel_event=status.cancel_event, progress_cb=status.set_progress,
                         max_llm_calls=10**9 if uncapped else None,
                     )
                 finally:
@@ -1212,6 +1231,9 @@ def create_app(
         # location, even a wrong one written before a lookup-logic fix.
         # Same async shape as the other re-extract endpoints.
         status = _industry_status(app)
+        # See /api/run-now's comment — must resolve before the thread
+        # starts, not inside it.
+        industry_config = _industry_config(app)
         if status.running_now:
             return jsonify({"ok": False, "message": "Already running."}), 409
         payload = request.get_json(silent=True) or {}
@@ -1226,10 +1248,10 @@ def create_app(
             try:
                 from ..enrich import reextract_org_locations
 
-                db = DB(_industry_config(app).db_path)
+                db = DB(industry_config.db_path)
                 try:
                     result = reextract_org_locations(
-                        _industry_config(app), db, cancel_event=status.cancel_event, progress_cb=status.set_progress,
+                        industry_config, db, cancel_event=status.cancel_event, progress_cb=status.set_progress,
                         max_lookups=10**9 if uncapped else None,
                     )
                 finally:
