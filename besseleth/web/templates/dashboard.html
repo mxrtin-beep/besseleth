@@ -131,6 +131,7 @@
 <aside id="sidebar">
   <button class="collapseBtn" id="collapseSidebarBtn" title="Hide sidebar">&laquo;</button>
   <h1 id="industryHeading">{{ industry }}</h1>
+  <p class="hint"><a href="/" id="switchIndustryLink" style="color:inherit;">&larr; Switch industry</a></p>
   <p class="hint">Reports</p>
   <nav id="reportNav">
     {% for rid in report_ids %}
@@ -504,6 +505,27 @@
 </main>
 
 <script>
+// Which industry this whole dashboard load means — see app.py's
+// _industry_config docstring. Baked in server-side at page render (the
+// URL's own ?industry= at the time / rendered here), not re-read from
+// location.search on every call, so it stays stable for the life of
+// this page load even if something else edits the URL bar.
+const INDUSTRY_SLUG = {{ industry_slug | tojson }};
+
+// Every same-origin /api/... call in this dashboard must go through
+// this instead of the bare apiFetch() — appends ?industry=<slug> (or
+// &industry= if the URL already has a query string) so the request
+// actually hits THIS industry's data, not whichever one happens to be
+// the primary/default. A non-/api/ URL (the Plotly CDN, etc.) is
+// passed through untouched.
+function apiFetch(url, opts) {
+  if (typeof url === 'string' && url.startsWith('/api/')) {
+    const sep = url.includes('?') ? '&' : '?';
+    url = `${url}${sep}industry=${encodeURIComponent(INDUSTRY_SLUG)}`;
+  }
+  return fetch(url, opts);
+}
+
 // Free-text values throughout this dashboard (org, title, org_description,
 // location_text, etc.) come from scraped pages or LLM output, not from us —
 // they can legitimately contain "<", ">", "&", or quotes (e.g. "AT&T Labs",
@@ -611,7 +633,7 @@ function wireReportNav() {
       document.querySelectorAll('.reportRow').forEach(r => r.classList.remove('active'));
       btn.closest('.reportRow').classList.add('active');
       showTab('report');
-      const res = await fetch(`/api/report/${btn.dataset.report}`);
+      const res = await apiFetch(`/api/report/${btn.dataset.report}`);
       const data = await res.json();
       reportPane.innerHTML = data.html;
       // The rendered-from-markdown report body doesn't set target itself
@@ -625,7 +647,7 @@ function wireReportNav() {
       ev.stopPropagation();
       const rid = btn.dataset.del;
       if (!confirm(`Delete report ${rid}? This can't be undone.`)) return;
-      await fetch(`/api/report/${rid}`, { method: 'DELETE' });
+      await apiFetch(`/api/report/${rid}`, { method: 'DELETE' });
       const row = btn.closest('.reportRow');
       const wasActive = row.classList.contains('active');
       row.remove();
@@ -713,7 +735,7 @@ cancelRunBtn.onclick = async () => {
   cancelRunBtn.disabled = true;
   cancelRunBtn.textContent = 'Cancelling…';
   try {
-    await fetch('/api/cancel-run', { method: 'POST' });
+    await apiFetch('/api/cancel-run', { method: 'POST' });
   } catch (e) {
     cancelRunBtn.disabled = false;
     cancelRunBtn.textContent = 'Cancel';
@@ -722,7 +744,7 @@ cancelRunBtn.onclick = async () => {
 
 async function pollStatus() {
   try {
-    const res = await fetch('/api/status');
+    const res = await apiFetch('/api/status');
     const s = await res.json();
     runNowBtn.disabled = s.running_now;
     backfillBtn.disabled = s.running_now;
@@ -773,7 +795,7 @@ async function pollStatus() {
 async function waitUntilDone() {
   return new Promise((resolve) => {
     const check = async () => {
-      const res = await fetch('/api/status');
+      const res = await apiFetch('/api/status');
       const s = await res.json();
       updateProgressBar(s);
       if (s.running_now) {
@@ -792,7 +814,7 @@ runNowBtn.onclick = async () => {
   runNowBtn.textContent = 'Running…';
   statusText.textContent = 'Starting…';
   try {
-    await fetch('/api/run-now', { method: 'POST' });
+    await apiFetch('/api/run-now', { method: 'POST' });
     await waitUntilDone();
   } finally {
     // A run-now can produce a new report, so reload to pick it up in the sidebar.
@@ -805,7 +827,7 @@ backfillBtn.onclick = async () => {
   backfillBtn.disabled = true;
   statusText.textContent = `Starting backfill from ${backfillDate.value}…`;
   try {
-    const res = await fetch('/api/backfill', {
+    const res = await apiFetch('/api/backfill', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ since: backfillDate.value }),
     });
@@ -837,7 +859,7 @@ document.getElementById('pasteBtn').onclick = async () => {
   if (!text) { result.className = 'err'; result.textContent = 'Paste something first.'; return; }
   result.className = ''; result.textContent = 'Adding…';
   try {
-    const res = await fetch('/api/paste', {
+    const res = await apiFetch('/api/paste', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, url }),
     });
@@ -861,7 +883,7 @@ document.getElementById('pasteBtn').onclick = async () => {
 const SOURCE_LABELS = { linkedin: 'LinkedIn', event: 'Event', social: 'Social', clip: 'Clipped' };
 
 async function loadPasted() {
-  const res = await fetch('/api/pasted');
+  const res = await apiFetch('/api/pasted');
   const items = await res.json();
   const table = document.getElementById('pastedTable');
   if (!items.length) {
@@ -884,7 +906,7 @@ async function loadPasted() {
   table.querySelectorAll('[data-del-item]').forEach(btn => {
     btn.onclick = async () => {
       if (!confirm('Delete this pasted item? This removes it outright.')) return;
-      await fetch(`/api/item/${btn.dataset.delItem}`, { method: 'DELETE' });
+      await apiFetch(`/api/item/${btn.dataset.delItem}`, { method: 'DELETE' });
       document.querySelector(`[data-item-row="${btn.dataset.delItem}"]`)?.remove();
     };
   });
@@ -900,7 +922,7 @@ document.getElementById('addFeedBtn').onclick = async () => {
   if (!url) { result.className = 'err'; result.textContent = 'Enter a feed URL first.'; return; }
   result.className = ''; result.textContent = 'Adding…';
   try {
-    const res = await fetch('/api/feeds', {
+    const res = await apiFetch('/api/feeds', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ category, url, label }),
     });
@@ -941,7 +963,7 @@ function renderFeedsTable(tableId, category, feedList) {
   table.querySelectorAll('[data-del-feed]').forEach(btn => {
     btn.onclick = async () => {
       if (!confirm('Remove this feed?')) return;
-      await fetch('/api/feeds', {
+      await apiFetch('/api/feeds', {
         method: 'DELETE', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ category: btn.dataset.delCategory, url: btn.dataset.delFeed }),
       });
@@ -951,7 +973,7 @@ function renderFeedsTable(tableId, category, feedList) {
 }
 
 async function loadFeeds() {
-  const res = await fetch('/api/feeds');
+  const res = await apiFetch('/api/feeds');
   const feeds = await res.json();
   renderFeedsTable('newsFeedsTable', 'news', feeds.news || []);
   renderFeedsTable('blogFeedsTable', 'blog', feeds.blog || []);
@@ -1019,7 +1041,7 @@ document.getElementById('addContactBtn').onclick = async () => {
   try {
     const url = editingContactIndex === null ? '/api/contacts' : `/api/contacts/${editingContactIndex}`;
     const method = editingContactIndex === null ? 'POST' : 'PUT';
-    const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+    const res = await apiFetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
     const respData = await res.json();
     if (respData.ok) {
       result.className = 'ok';
@@ -1066,7 +1088,7 @@ function renderContacts() {
   table.querySelectorAll('[data-del-contact]').forEach(btn => {
     btn.onclick = async () => {
       if (!confirm('Delete this contact?')) return;
-      await fetch(`/api/contacts/${btn.dataset.delContact}`, { method: 'DELETE' });
+      await apiFetch(`/api/contacts/${btn.dataset.delContact}`, { method: 'DELETE' });
       loadContacts();
     };
   });
@@ -1128,7 +1150,7 @@ async function loadSettings() {
   renderTabVisibilityList();
 
   const [summRes, schedRes, industryRes] = await Promise.all([
-    fetch('/api/settings/summarizer'), fetch('/api/settings/schedule'), fetch('/api/settings/industry'),
+    apiFetch('/api/settings/summarizer'), apiFetch('/api/settings/schedule'), apiFetch('/api/settings/industry'),
   ]);
   const summ = await summRes.json();
   document.getElementById('settingsBackend').value = summ.backend;
@@ -1152,7 +1174,7 @@ document.getElementById('saveSettingsIndustryBtn').onclick = async () => {
   const keywords = document.getElementById('settingsKeywords').value.split('\n').map(s => s.trim()).filter(Boolean);
   result.textContent = 'Saving…';
   try {
-    const res = await fetch('/api/settings/industry', {
+    const res = await apiFetch('/api/settings/industry', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, keywords }),
     });
@@ -1214,7 +1236,7 @@ async function runOrgLocationsMaintenance(all) {
   result.textContent = 'Re-checking org locations…';
   const locResult = await runMaintenancePass('/api/enrich/reextract-org-locations', all);
   result.textContent = 'Standardizing location formatting…';
-  const stdRes = await fetch('/api/locations/standardize', { method: 'POST' });
+  const stdRes = await apiFetch('/api/locations/standardize', { method: 'POST' });
   const stdData = await stdRes.json();
   const changed = (locResult?.changed || 0) + (stdData.updated || 0);
   result.textContent = `${locResult?.checked || 0} org(s) re-checked, ${stdData.checked || 0} location(s) reformatted: ${changed} total change(s). Run again to keep working through a larger backlog.`;
@@ -1259,7 +1281,7 @@ document.getElementById('runBothMaintenanceBtn').onclick = async () => {
 // waits for it to finish. Returns last_enrich_result, or null if it
 // failed to even start (e.g. something else was already running).
 async function runMaintenancePass(url, all) {
-  const started = await fetch(url, {
+  const started = await apiFetch(url, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ all }),
   });
   const startedData = await started.json();
@@ -1275,7 +1297,7 @@ document.getElementById('saveSettingsScheduleBtn').onclick = async () => {
   const timezone = document.getElementById('settingsTimezone').value.trim();
   result.textContent = 'Saving…';
   try {
-    const res = await fetch('/api/settings/schedule', {
+    const res = await apiFetch('/api/settings/schedule', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ fetch_interval_hours, report_cron, timezone }),
     });
@@ -1293,7 +1315,7 @@ document.getElementById('saveSettingsBackendBtn').onclick = async () => {
   const ollama_url = document.getElementById('settingsOllamaUrl').value.trim();
   result.textContent = 'Saving…';
   try {
-    const res = await fetch('/api/settings/summarizer', {
+    const res = await apiFetch('/api/settings/summarizer', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ backend, groq_api_key: groq_api_key || undefined, ollama_url: ollama_url || undefined }),
     });
@@ -1309,13 +1331,13 @@ document.getElementById('saveSettingsBackendBtn').onclick = async () => {
 applyHiddenTabs();
 
 async function loadContacts() {
-  const res = await fetch('/api/contacts');
+  const res = await apiFetch('/api/contacts');
   contacts = await res.json();
   renderContacts();
 }
 
 async function loadInterests() {
-  const res = await fetch('/api/interests');
+  const res = await apiFetch('/api/interests');
   const interests = await res.json();
   document.getElementById('interestsText').value = interests.join('\n');
 }
@@ -1325,7 +1347,7 @@ document.getElementById('saveInterestsBtn').onclick = async () => {
   const interests = document.getElementById('interestsText').value.split('\n').map(s => s.trim()).filter(Boolean);
   result.textContent = 'Saving…';
   try {
-    const res = await fetch('/api/interests', {
+    const res = await apiFetch('/api/interests', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ interests }),
     });
     const data = await res.json();
@@ -1344,7 +1366,7 @@ document.getElementById('importLinkedinBtn').onclick = async () => {
   try {
     const formData = new FormData();
     formData.append('file', file);
-    const res = await fetch('/api/contacts/import-linkedin', { method: 'POST', body: formData });
+    const res = await apiFetch('/api/contacts/import-linkedin', { method: 'POST', body: formData });
     const data = await res.json();
     if (data.ok) {
       result.className = data.added > 0 ? 'ok' : '';
@@ -1371,7 +1393,7 @@ const FRIEND_COLOR = '#e07a5f';
 
 async function loadMap() {
   mapLoaded = true;
-  const [locRes, friendRes] = await Promise.all([fetch('/api/locations'), fetch('/api/contacts/locations')]);
+  const [locRes, friendRes] = await Promise.all([apiFetch('/api/locations'), apiFetch('/api/contacts/locations')]);
   mapLocations = await locRes.json();
   friendLocations = await friendRes.json();
   renderMap();
@@ -1651,7 +1673,7 @@ function populateDatalist(inputId, values) {
 
 async function loadPapers() {
   papersLoaded = true;
-  const res = await fetch('/api/papers');
+  const res = await apiFetch('/api/papers');
   papers = await res.json();
   populateSelect('pfSource', uniqueSorted(papers.map(p => p.source)));
   populateSelect('pfOrgType', uniqueSorted(papers.map(p => p.org_type)));
@@ -1671,7 +1693,7 @@ let possibleDupeOrgs = [];
 
 async function loadOrgs() {
   orgsLoaded = true;
-  const [orgsRes, dupesRes] = await Promise.all([fetch('/api/orgs'), fetch('/api/orgs/possible-duplicates')]);
+  const [orgsRes, dupesRes] = await Promise.all([apiFetch('/api/orgs'), apiFetch('/api/orgs/possible-duplicates')]);
   orgs = await orgsRes.json();
   possibleDupeOrgs = await dupesRes.json();
   populateSelect('ofOrgType', uniqueSorted(orgs.map(o => o.org_type)));
@@ -1697,18 +1719,18 @@ function renderPossibleDupeOrgs() {
     btn.onclick = async () => {
       const dupe = possibleDupeOrgs[Number(btn.dataset.i)];
       if (btn.dataset.keep === 'neither') {
-        await fetch('/api/duplicates/dismiss', {
+        await apiFetch('/api/duplicates/dismiss', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ kind: 'org', a: dupe.a, b: dupe.b }),
         });
       } else {
         const keep = btn.dataset.keep === 'a' ? dupe.a : dupe.b;
         const drop = btn.dataset.keep === 'a' ? dupe.b : dupe.a;
-        await fetch('/api/orgs/merge', {
+        await apiFetch('/api/orgs/merge', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ keep, drop }),
         });
-        const orgsRes = await fetch('/api/orgs');
+        const orgsRes = await apiFetch('/api/orgs');
         orgs = await orgsRes.json();
       }
       possibleDupeOrgs = possibleDupeOrgs.filter((_, i) => i !== Number(btn.dataset.i));
@@ -1804,7 +1826,7 @@ function initJobOrgChipFilter() {
 
 async function loadJobs() {
   jobsLoaded = true;
-  const res = await fetch('/api/jobs');
+  const res = await apiFetch('/api/jobs');
   jobs = await res.json();
   populateDatalist('jfLocation', uniqueSorted(jobs.map(j => j.location)));
   const platformSelect = document.getElementById('jfPlatform');
@@ -1866,7 +1888,7 @@ function renderJobs() {
     btn.onclick = async () => {
       const org = btn.dataset.rejectOrg;
       if (!confirm(`"${org}" isn't actually a relevant org? This clears it from every item (Orgs/Map/Trends/Jobs), and removes its job postings. Can't be undone.`)) return;
-      const res = await fetch('/api/jobs/reject-org', {
+      const res = await apiFetch('/api/jobs/reject-org', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ org }),
       });
       const data = await res.json();
@@ -1901,7 +1923,7 @@ function renderEnrichStats(stats) {
 }
 
 (async () => {
-  const res = await fetch('/api/enrich/stats');
+  const res = await apiFetch('/api/enrich/stats');
   renderEnrichStats(await res.json());
 })();
 
@@ -1914,7 +1936,7 @@ document.getElementById('enrichNowBtn').onclick = async (ev) => {
   try {
     const force = document.getElementById('enrichForce').checked;
     const run_until_done = document.getElementById('enrichUntilDone').checked;
-    const started = await fetch('/api/enrich', {
+    const started = await apiFetch('/api/enrich', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force, run_until_done }),
     });
     const startedData = await started.json();
@@ -1935,7 +1957,7 @@ document.getElementById('enrichNowBtn').onclick = async (ev) => {
     // straight from enrich.py's own return value, which doesn't know the
     // current_enriched/current_total live counts (those are computed
     // separately, only in this endpoint).
-    renderEnrichStats(await (await fetch('/api/enrich/stats')).json());
+    renderEnrichStats(await (await apiFetch('/api/enrich/stats')).json());
   } catch (e) {
     btn.textContent = 'Enrich now (failed)';
     resultEl.textContent = 'Request failed — see server log.';
@@ -2064,7 +2086,7 @@ function renderPapers(resetPage = true) {
   table.querySelectorAll('[data-del-paper]').forEach(btn => {
     btn.onclick = async () => {
       if (!confirm('Delete this item outright? This can\'t be undone.')) return;
-      await fetch(`/api/item/${btn.dataset.delPaper}`, { method: 'DELETE' });
+      await apiFetch(`/api/item/${btn.dataset.delPaper}`, { method: 'DELETE' });
       papers = papers.filter(p => p.id !== btn.dataset.delPaper);
       renderPapers();
     };
@@ -2096,7 +2118,7 @@ document.getElementById('clearSourceBtn').onclick = async () => {
   const btn = document.getElementById('clearSourceBtn');
   btn.disabled = true;
   try {
-    const res = await fetch(`/api/source/${encodeURIComponent(source)}`, { method: 'DELETE' });
+    const res = await apiFetch(`/api/source/${encodeURIComponent(source)}`, { method: 'DELETE' });
     const data = await res.json();
     papers = papers.filter(p => p.source !== source);
     renderPapers();
@@ -2118,7 +2140,7 @@ document.getElementById('paperUploadInput').onchange = async (ev) => {
   const body = new FormData();
   body.append('file', file);
   try {
-    const res = await fetch('/api/papers/upload', { method: 'POST', body });
+    const res = await apiFetch('/api/papers/upload', { method: 'POST', body });
     const data = await res.json();
     if (!data.ok) {
       statusEl.textContent = `Failed: ${data.message}`;
@@ -2132,7 +2154,7 @@ document.getElementById('paperUploadInput').onchange = async (ev) => {
           ? `<a href="${r.url}" target="_blank" rel="noopener">${r.title}</a>` : r.title).join(', ')
       : 'No related papers found on file yet.';
     resultBox.style.display = 'block';
-    const papersRes = await fetch('/api/papers');
+    const papersRes = await apiFetch('/api/papers');
     papers = await papersRes.json();
     renderPapers();
   } catch (e) {
@@ -2194,7 +2216,7 @@ function renderRecentActivity(s) {
 }
 
 async function loadEnrichLog() {
-  const statusRes = await fetch('/api/status');
+  const statusRes = await apiFetch('/api/status');
   renderRecentActivity(await statusRes.json());
   await refreshChangeLog();
 }
@@ -2205,7 +2227,7 @@ async function loadEnrichLog() {
 // "Re-resolve paper orgs") shows up within a couple seconds instead of
 // only once the whole run finishes and you happen to reopen the tab.
 async function refreshChangeLog() {
-  const res = await fetch('/api/enrich/log');
+  const res = await apiFetch('/api/enrich/log');
   const data = await res.json();
 
   const statusEl = document.getElementById('enrichLogStatus');
@@ -2272,8 +2294,8 @@ let metricsTable = [];
 
 async function loadTrends() {
   const [metricsRes, devicesRes, companiesRes, stagesRes, dupesRes, eventsRes, metricsTableRes] = await Promise.all([
-    fetch('/api/metrics'), fetch('/api/devices'), fetch('/api/companies'), fetch('/api/trends/fda-stages'),
-    fetch('/api/companies/possible-duplicates'), fetch('/api/company-events'), fetch('/api/metrics-table'),
+    apiFetch('/api/metrics'), apiFetch('/api/devices'), apiFetch('/api/companies'), apiFetch('/api/trends/fda-stages'),
+    apiFetch('/api/companies/possible-duplicates'), apiFetch('/api/company-events'), apiFetch('/api/metrics-table'),
   ]);
   metricsData = await metricsRes.json();
   devices = await devicesRes.json();
@@ -2358,18 +2380,18 @@ function renderPossibleDupes() {
     btn.onclick = async () => {
       const dupe = possibleDupes[Number(btn.dataset.i)];
       if (btn.dataset.keep === 'neither') {
-        await fetch('/api/duplicates/dismiss', {
+        await apiFetch('/api/duplicates/dismiss', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ kind: 'company', a: dupe.a, b: dupe.b }),
         });
       } else {
         const keep = btn.dataset.keep === 'a' ? dupe.a : dupe.b;
         const drop = btn.dataset.keep === 'a' ? dupe.b : dupe.a;
-        await fetch('/api/companies/merge', {
+        await apiFetch('/api/companies/merge', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ keep, drop }),
         });
-        const companiesRes = await fetch('/api/companies');
+        const companiesRes = await apiFetch('/api/companies');
         companies = await companiesRes.json();
       }
       possibleDupes = possibleDupes.filter((_, i) => i !== Number(btn.dataset.i));
@@ -2648,12 +2670,12 @@ function renderTable() {
       const event_type = prompt('Type — one of: regulatory_approval, merger_acquisition, leadership_change, other', 'other');
       const event_date = prompt('Date (YYYY-MM-DD), optional:') || null;
       const source_url = prompt('Source URL, optional:') || '';
-      const res = await fetch('/api/company-events', {
+      const res = await apiFetch('/api/company-events', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ org, title, event_type, event_date, source_url }),
       });
       if ((await res.json()).ok) {
-        const eventsRes = await fetch('/api/company-events');
+        const eventsRes = await apiFetch('/api/company-events');
         companyEvents = await eventsRes.json();
         renderTable(); renderChart();
       }
@@ -2661,7 +2683,7 @@ function renderTable() {
     table.querySelectorAll('[data-event-id]').forEach(btn => {
       btn.onclick = async () => {
         if (!confirm('Delete this event?')) return;
-        await fetch(`/api/company-events/${btn.dataset.eventId}`, { method: 'DELETE' });
+        await apiFetch(`/api/company-events/${btn.dataset.eventId}`, { method: 'DELETE' });
         companyEvents = companyEvents.filter(e => String(e.id) !== btn.dataset.eventId);
         renderTable(); renderChart();
       };
@@ -2716,7 +2738,7 @@ function renderTable() {
     table.querySelectorAll('[data-del-device]').forEach(btn => {
       btn.onclick = async () => {
         if (!confirm('Delete this device row outright? This can\'t be undone — if the underlying item still exists, re-enriching it may add it back (hopefully corrected this time).')) return;
-        await fetch(`/api/devices/${btn.dataset.delDevice}`, { method: 'DELETE' });
+        await apiFetch(`/api/devices/${btn.dataset.delDevice}`, { method: 'DELETE' });
         devices = devices.filter(x => String(x.id) !== btn.dataset.delDevice);
         renderTable();
         renderChart();
