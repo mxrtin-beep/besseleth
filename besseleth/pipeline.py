@@ -13,6 +13,7 @@ from .scrapers import (
     blog_scraper,
     clinicaltrials_scraper,
     conference_scraper,
+    europepmc_scraper,
     events_scraper,
     grants_scraper,
     jobs_scraper,
@@ -59,7 +60,7 @@ def fetch_all(
     scrapers one). Raises FetchCancelled the moment it's set; whatever
     scraper already finished and got stored before that stays stored."""
     results: dict[str, list[Item]] = {s: [] for s in SOURCES}
-    _TOTAL_FETCH_STEPS = 9  # arXiv, Papers, News, Blogs, Conferences, Events, Social, LinkedIn, Enrichment+Jobs
+    _TOTAL_FETCH_STEPS = 10  # arXiv, Papers, Preprints, News, Blogs, Conferences, Events, Social, LinkedIn, Enrichment+Jobs
     _step = [0]  # mutable cell, closed over below — a plain int can't be reassigned from the closure
 
     def _tick(label: str):
@@ -116,6 +117,19 @@ def fetch_all(
             )
             results["papers"] += _dedupe_and_store(lab_items, db)
     _tick("Papers (OpenAlex)")
+
+    check_cancelled(cancel_event)
+    europepmc_cfg = config.source("europepmc")
+    if europepmc_cfg.get("enabled"):
+        print("[pipeline] Fetching preprints (bioRxiv/medRxiv/ChemRxiv/Research Square via Europe PMC)...")
+        items = europepmc_scraper.fetch(
+            config,
+            days_back=_days_back(europepmc_cfg.get("days_back", 8), since),
+            max_results_per_keyword=europepmc_cfg.get("max_results_per_keyword", 15),
+            cancel_event=cancel_event,
+        )
+        results["papers"] += _dedupe_and_store(items, db)
+    _tick("Preprints (Europe PMC)")
 
     # User-submitted feeds (the dashboard's Feeds tab) are additional
     # sources_.news/blogs feed URLs, merged in here rather than written
