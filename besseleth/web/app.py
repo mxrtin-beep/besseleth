@@ -269,7 +269,7 @@ def create_app(
         # reports/ directory (resolved relative to ITS OWN config.yaml,
         # see Config._resolve), not a shared one.
         industry_config = _industry_config(app)
-        reports_dir = Path(industry_config.report.get("output_dir", "reports"))
+        reports_dir = industry_config.reports_dir
         reports = sorted(reports_dir.glob("report-*.md"), key=report_mod.report_sort_key, reverse=True)
         report_ids = [p.stem.removeprefix("report-") for p in reports]
         return render_template(
@@ -282,7 +282,7 @@ def create_app(
 
     @app.get("/api/report/<report_id>")
     def api_report(report_id):
-        reports_dir = Path(_industry_config(app).report.get("output_dir", "reports"))
+        reports_dir = _industry_config(app).reports_dir
         path = reports_dir / f"report-{report_id}.md"
         if not path.exists():
             abort(404)
@@ -291,7 +291,7 @@ def create_app(
 
     @app.delete("/api/report/<report_id>")
     def api_delete_report(report_id):
-        reports_dir = Path(_industry_config(app).report.get("output_dir", "reports"))
+        reports_dir = _industry_config(app).reports_dir
         path = reports_dir / f"report-{report_id}.md"
         if not path.exists():
             abort(404)
@@ -869,7 +869,7 @@ def create_app(
         # and anything else saved under the report output dir.
         # ?industry=<slug> selects which industry's reports/ dir this
         # means — see _industry_config's docstring.
-        reports_dir = Path(_industry_config(app).report.get("output_dir", "reports"))
+        reports_dir = _industry_config(app).reports_dir
         return send_from_directory(reports_dir, filename)
 
     @app.get("/api/status")

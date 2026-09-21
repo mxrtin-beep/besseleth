@@ -372,7 +372,7 @@ def generate_weekly_report(config: Config, db: DB, progress_cb=None, cancel_even
         top_findings_max_count=report_cfg.get("top_findings_max_count", 5),
     )
 
-    path, report_id = report_mod.save_report(markdown, report_id, report_cfg.get("output_dir", "reports"))
+    path, report_id = report_mod.save_report(markdown, report_id, config.reports_dir)
     report_mod.email_report(markdown, report_id, config.industry_name, report_cfg.get("email", {}))
     _prune_old_reports(config)
 
@@ -395,7 +395,7 @@ def _prune_old_reports(config: Config):
     keep_last = config.raw.get("reports", {}).get("keep_last", 0)
     if not keep_last:
         return
-    reports_dir = Path(config.report.get("output_dir", "reports"))
+    reports_dir = config.reports_dir
     reports = sorted(reports_dir.glob("report-*.md"), key=report_mod.report_sort_key, reverse=True)
     for stale in reports[keep_last:]:
         stale.unlink(missing_ok=True)

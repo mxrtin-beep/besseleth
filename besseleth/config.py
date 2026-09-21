@@ -132,6 +132,13 @@ class Config:
         return self.raw.get("report", {})
 
     @property
+    def reports_dir(self) -> Path:
+        # Resolved against this config's own directory (see _resolve) so
+        # each industry gets its own industries/<slug>/reports/ folder
+        # instead of every industry sharing one CWD-relative "reports/".
+        return self._resolve(self.report.get("output_dir", "reports"))
+
+    @property
     def db_path(self) -> Path:
         return self._resolve(self.raw.get("database", {}).get("path", "data/besseleth.db"))
 
