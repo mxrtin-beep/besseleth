@@ -133,6 +133,21 @@ sources:
     # client), but no longer does anything for rate limits on its own.
     # mailto: "you@example.com"
 
+  europepmc:
+    # bioRxiv/medRxiv/ChemRxiv/Research Square preprints — arXiv's
+    # parallels for biology/medicine/chemistry, which arXiv itself
+    # basically never touches (its q-bio categories skew computational/
+    # quantitative, not wet-lab work). Free, keyless, via Europe PMC's
+    # search API (europepmc.org) — bioRxiv's own API only lists by date
+    # range, no real keyword search, so this is the actual way to search
+    # it. `SRC:PPR` (baked into the query, not configurable here)
+    # restricts results to preprints specifically, not the published-
+    # journal literature Europe PMC also indexes (that's what `papers`/
+    # OpenAlex above is for).
+    enabled: true
+    max_results_per_keyword: 15
+    days_back: 8
+
   news:
     enabled: true
     days_back: 8

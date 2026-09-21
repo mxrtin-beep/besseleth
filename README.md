@@ -3,7 +3,7 @@
 A weekly industry-briefing bot. Point it at an industry (e.g.
 *neurotechnology*), and it:
 
-- Pulls **papers** matching your keywords/categories from two complementary feeds under one `papers` source: **arXiv** (free, official API — preprints, same-day freshness, no citation data) and **OpenAlex** (free, keyless — published journal/conference papers, real authors and a citation count for ranking by impact, but indexes with a lag of days to weeks). The report's papers section is one list, sorted by citations, highest first
+- Pulls **papers** matching your keywords/categories from three complementary feeds under one `papers` source: **arXiv** (free, official API — physics/CS/quantitative-biology preprints, same-day freshness, no citation data), **OpenAlex** (free, keyless — published journal/conference papers, real authors and a citation count for ranking by impact, but indexes with a lag of days to weeks), and **Europe PMC** (free, keyless — bioRxiv/medRxiv/ChemRxiv/Research Square preprints, arXiv's parallels for biology/medicine/chemistry, which arXiv itself rarely touches). The report's papers section is one list, sorted by citations, highest first
 - Pulls **news** from RSS feeds — including a free Google News search feed by default (optionally NewsAPI.org too); add more from the dashboard's **Feeds** tab, no config-file editing needed
 - Pulls **blogs** (company/lab blogs, researcher Substacks) from RSS — Substack needs no code, just its `/feed` URL; also addable from the Feeds tab
 - Tracks a curated **conferences** watchlist, plus optional **conference news** (CFPs, accepted talks) via each conference's own RSS feed
@@ -444,9 +444,10 @@ want a subset.
 Unlike the weekly report (a rolling snapshot of what's new), the
 dashboard's **Papers** tab is a standing index of every papers/news/blog
 item besseleth has ever fetched, filterable and sortable. `papers`
-covers both feeds — arXiv preprints and OpenAlex-indexed published
-papers — as one source, since to a reader they're the same thing: a
-research paper, just via two complementary feeds with different
+covers all three feeds — arXiv preprints, OpenAlex-indexed published
+papers, and Europe PMC-indexed bioRxiv/medRxiv/ChemRxiv/Research Square
+preprints — as one source, since to a reader they're the same thing: a
+research paper, just via complementary feeds with different
 tradeoffs (see the intro bullets above). An OpenAlex-sourced item
 carries **Authors** and **Citations** columns straight from the API —
 not LLM-derived, so they're exact; an arXiv-sourced one shows "citations
