@@ -136,7 +136,7 @@
   <nav id="reportNav">
     {% for rid in report_ids %}
     <div class="reportRow" data-row="{{ rid }}">
-      <button class="reportBtn" data-report="{{ rid }}">{{ rid }}</button>
+      <button class="reportBtn" data-report="{{ rid }}">{{ industry }} — {{ rid }}</button>
       <button class="delBtn" data-del="{{ rid }}" title="Delete this report">🗑</button>
     </div>
     {% else %}
