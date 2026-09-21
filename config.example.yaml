@@ -280,6 +280,19 @@ enrichment:
   #     button — a backlog otherwise "catches up" a little at a time and
   #     items stay showing "pending" in the dashboard until their turn
   #     comes, which is expected, not stuck.
+  #
+  # If you're on summarizer.backend: "groq" and "Enrich everything" hits
+  # Groq's rate limit partway through a big backlog: pause_seconds is
+  # also what keeps you under Groq's per-minute request cap (e.g. its
+  # free tier is commonly ~30 req/min for a given model — check
+  # console.groq.com for your account's actual limit — so pause_seconds
+  # needs to be at least 60/that-number to never exceed it; a bit more
+  # for margin). Hitting the cap anyway (its DAILY request/token cap,
+  # not just the per-minute one, is easy to hit on a large one-shot
+  # backlog) no longer burns through the rest of the backlog on doomed
+  # retries — a run stops itself after a few consecutive failures in a
+  # row and leaves the rest untouched for the next run, rather than
+  # grinding through hundreds of guaranteed-to-fail items.
   enabled: true
   max_items_per_run: 10   # smaller bursts, catches up over more fetches instead of one big spike
   default_days_back: 14   # "Enrich now"/`cli enrich` (no flags): enrich everything unenriched from this many

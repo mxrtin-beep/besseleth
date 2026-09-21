@@ -1997,6 +1997,22 @@ def enrich_items_detailed(
     work_seconds = 0.0  # excludes the deliberate pause_seconds sleeps — this is actual enrich time, not throttling
     cancelled = False
     stopped_no_progress = False
+    stopped_consecutive_failures = False
+    consecutive_failures = 0
+    # A sustained rate limit (Groq's daily/per-minute cap, no Ollama
+    # fallback configured) makes _enrich_one fail on EVERY subsequent
+    # item, not just some — that's a systemic problem, not noise, and it
+    # doesn't recover mid-run. Without this, run_until_done/"Enrich
+    # everything" would burn through the rest of a large backlog (each
+    # item a doomed API call) before the batch-level stopped_no_progress
+    # check below even gets a chance to fire (that one only looks at a
+    # whole max_items_per_run batch at a time). A short run of
+    # consecutive failures — a few in a row, not the whole batch — is
+    # enough signal to stop immediately instead: whatever's left is
+    # simply untouched (still "unenriched"), so it's picked up again
+    # automatically on the next scheduled fetch or the next time you
+    # click Enrich, no different from a run that was never started.
+    CONSECUTIVE_FAILURE_LIMIT = 3
     try:
         locations_filled = _backfill_org_locations(
             config, db, max_lookups_override=location_lookup_cap, cancel_event=cancel_event, progress_cb=progress_cb
@@ -2109,9 +2125,21 @@ def enrich_items_detailed(
                     if _enrich_one(row, db, config, summarizer_cfg):
                         total_processed += 1
                         batch_processed += 1
+                        consecutive_failures = 0
+                    else:
+                        consecutive_failures += 1
                 except Exception as e:
                     print(f"[enrich] Failed on item {row['id']}: {e}")
+                    consecutive_failures += 1
                 work_seconds += time.time() - item_start
+                if consecutive_failures >= CONSECUTIVE_FAILURE_LIMIT:
+                    stopped_consecutive_failures = True
+                    print(
+                        f"[enrich] Stopping: {consecutive_failures} item(s) in a row failed to enrich — "
+                        "likely a sustained rate limit or backend outage, not one-off noise. The rest of "
+                        "this backlog is untouched and will be picked up on the next fetch/enrich run."
+                    )
+                    break
                 # Gives the CPU a breather between LLM calls instead of hammering
                 # it back-to-back for the whole batch — set enrichment.pause_seconds
                 # in config.yaml if enrich runs are making the machine unusable.
@@ -2119,6 +2147,8 @@ def enrich_items_detailed(
                 if pause_seconds and i < len(rows) - 1:
                     time.sleep(pause_seconds)
 
+            if stopped_consecutive_failures:
+                break
             if not keep_going:
                 break
             if not batch_processed:
@@ -2172,6 +2202,12 @@ def enrich_items_detailed(
         # printed when it happens), but the STOPPED-EARLY fact itself
         # belongs in the message too.
         message += " Stopped early — a whole batch made no progress (see server log for what failed)."
+    if stopped_consecutive_failures:
+        message += (
+            f" Stopped early after {CONSECUTIVE_FAILURE_LIMIT} item(s) in a row failed — likely a "
+            "sustained rate limit or backend outage. The rest of this backlog is untouched and will be "
+            "picked up on the next fetch/enrich run, not lost."
+        )
     # Only run_until_done/force/background empty out (or hit) the whole
     # backlog on their own — the plain interactive case deliberately
     # stops after ONE capped batch (max_items_per_run) even when there's
