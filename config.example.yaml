@@ -343,12 +343,22 @@ summarizer:
   groq_model: "llama-3.3-70b-versatile"
   groq_fallback_to_ollama: true  # if Groq is rate-limited/unreachable and Ollama below is running, use it for that call instead of giving up
   ollama_url: "http://localhost:11434"
+  # Seconds to wait for a single Ollama call before giving up — separate
+  # from Groq's own (much shorter) per-call timeout, since CPU inference
+  # (especially over a network hop to another machine, e.g. Tailscale)
+  # routinely takes far longer than an API call ever would. Defaults to
+  # 180s if unset; raise this if enrich runs report calls "failed
+  # mid-call" and your Ollama server's own log (not besseleth's) shows
+  # the request was still generating when it got cut off.
+  ollama_timeout: 180
   # llama3.1 (8B) is heavy for a CPU-only/lower-RAM machine — a "hi" prompt
-  # taking ~a minute means every real enrichment call will time out (see
-  # summarizer.py's 60s timeout). llama3.2:1b is far lighter and still
-  # fine for this structured-extraction prompt; step up to llama3.2:3b if
-  # your machine handles 1b easily and you want better extraction quality.
-  # `ollama pull llama3.2:1b` first, then this just has to match.
+  # taking ~a minute means every real enrichment call will time out.
+  # llama3.2:1b is far lighter and still fine for this structured-
+  # extraction prompt; step up to llama3.2:3b or a 7b-class model if your
+  # machine (or a dedicated Ollama box reached over Tailscale) handles it
+  # easily and you want better extraction quality.
+  # `ollama pull llama3.2:1b` first, then this just has to match — model
+  # names must match exactly, including any `:tag` suffix.
   model: "llama3.2:1b"
   max_items_per_summary_call: 8
   num_thread: 4              # cap CPU threads Ollama uses per call — unset means its default (usually ALL

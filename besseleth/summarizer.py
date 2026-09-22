@@ -89,6 +89,12 @@ def _llm_generate(prompt: str, cfg: dict, timeout: int = 120, num_thread: int | 
     it's assumed reachable) and Groq was rate-limited or unreachable.
     Returns None (never raises) if nothing worked, so every caller's
     existing "result or fallback" pattern keeps working unchanged."""
+    # Local/remote Ollama inference (especially over Tailscale to a
+    # CPU-only machine) routinely takes far longer than Groq's API ever
+    # would for the same prompt, so callers' timeout= (tuned for Groq)
+    # is not reused for Ollama calls — summarizer.ollama_timeout sets
+    # that separately, defaulting well above any caller's Groq timeout.
+    ollama_timeout = cfg.get("ollama_timeout", max(timeout, 180))
     backend = cfg.get("backend", "groq")
     if backend == "groq":
         api_key = cfg.get("groq_api_key") or os.environ.get("GROQ_API_KEY", "")
@@ -105,12 +111,12 @@ def _llm_generate(prompt: str, cfg: dict, timeout: int = 120, num_thread: int | 
         print("[summarizer] Falling back to Ollama for this call.")
         return _ollama_generate(
             prompt, cfg.get("ollama_url", "http://localhost:11434"), cfg.get("model", "llama3.1"),
-            timeout=timeout, num_thread=num_thread,
+            timeout=ollama_timeout, num_thread=num_thread,
         )
     if backend == "ollama":
         return _ollama_generate(
             prompt, cfg.get("ollama_url", "http://localhost:11434"), cfg.get("model", "llama3.1"),
-            timeout=timeout, num_thread=num_thread,
+            timeout=ollama_timeout, num_thread=num_thread,
         )
     return None
 
