@@ -105,7 +105,7 @@ def llm_status(summarizer_cfg: dict) -> tuple[bool, str]:
 
         if summarizer_cfg.get("groq_api_key") or os.environ.get("GROQ_API_KEY"):
             return True, "Groq API key configured."
-        if summarizer_cfg.get("groq_fallback_to_ollama", True):
+        if summarizer_cfg.get("groq_fallback_to_ollama", False):
             # No key, but Ollama fallback is on — fine as long as Ollama
             # itself is actually reachable.
             return ollama_status(summarizer_cfg)
@@ -1189,7 +1189,17 @@ def _enrich_one(row, db: DB, config: Config, summarizer_cfg: dict) -> bool:
     if result is None:
         return False  # no LLM backend reachable — retry next time
 
-    data = _extract_json(result) or {}
+    data = _extract_json(result)
+    if data is None:
+        # The LLM responded but not with parseable JSON (a weak/local
+        # model ignoring the format instructions, output truncated by a
+        # too-small num_ctx, etc). Treating this as success (the old
+        # behavior — `or {}` made every field fall back to null/
+        # "unknown") permanently saved a blank enrichment with no way
+        # to ever retry it, silently discarding org/novelty/modality/
+        # everything for that item forever. Retry next run instead.
+        print(f"[enrich] LLM response for item {row['id']} wasn't valid JSON; will retry next run.")
+        return False
     novelty = data.get("novelty_score")
     try:
         novelty = int(novelty) if novelty is not None else None
