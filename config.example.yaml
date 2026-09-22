@@ -368,6 +368,14 @@ summarizer:
                               # some cores free for everything else you're running. 4 is a reasonable default
                               # for most laptops; raise it if enrichment feels too slow and your machine can
                               # spare it, lower it (e.g. 2) if it's still too disruptive.
+  # num_ctx: 2048             # caps Ollama's context window for this call, which caps how much RAM its KV
+                              # cache needs. Unset uses Ollama's own default (2048 as of recent Ollama
+                              # versions, but check `ollama show <model>`), which combined with the model
+                              # itself can exceed a low-RAM machine's physical memory — the OS then swaps to
+                              # disk, and THAT, not CPU speed, is usually the real cause of an enrich call
+                              # that used to take seconds suddenly taking minutes or timing out outright. If
+                              # Task Manager/htop shows memory maxed out (not CPU) during a slow enrich run,
+                              # set this lower rather than reaching for a smaller model first.
 
 jobs:
   # Job postings for the orgs besseleth has extracted from items (see the
