@@ -341,7 +341,9 @@ summarizer:
   backend: "groq"
   groq_api_key: ""           # or set the GROQ_API_KEY env var instead (keeps this out of a tracked config.yaml)
   groq_model: "llama-3.3-70b-versatile"
-  groq_fallback_to_ollama: true  # if Groq is rate-limited/unreachable and Ollama below is running, use it for that call instead of giving up
+  groq_fallback_to_ollama: false # if true, fall back to the Ollama config below when Groq is rate-limited/unreachable instead of
+                                  # just skipping that item for retry next run. Off by default — CPU/remote Ollama inference is
+                                  # slow enough (and its own failures quiet enough) that this should be opt-in, not automatic.
   ollama_url: "http://localhost:11434"
   # Seconds to wait for a single Ollama call before giving up — separate
   # from Groq's own (much shorter) per-call timeout, since CPU inference

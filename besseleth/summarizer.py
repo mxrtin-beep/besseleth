@@ -99,12 +99,13 @@ def _groq_generate(prompt: str, api_key: str, model: str, timeout: int = 60) -> 
 def _llm_generate(prompt: str, cfg: dict, timeout: int = 120, num_thread: int | None = None) -> str | None:
     """The one entry point every summarizer/enrich LLM call should go
     through — dispatches on summarizer.backend and, for "groq" (the
-    default), falls back to Ollama automatically if one is configured
-    (summarizer.ollama_url/model set, or just left at their defaults —
-    Ollama has no separate "enabled" flag, if backend isn't "groq" alone
-    it's assumed reachable) and Groq was rate-limited or unreachable.
-    Returns None (never raises) if nothing worked, so every caller's
-    existing "result or fallback" pattern keeps working unchanged."""
+    default), falls back to Ollama if summarizer.groq_fallback_to_ollama
+    is explicitly set true (default false — CPU/remote Ollama inference
+    is slow enough, and quiet enough about it, that opting into it
+    should be a deliberate choice, not a silent default) and Groq was
+    rate-limited or unreachable. Returns None (never raises) if nothing
+    worked, so every caller's existing "result or fallback" pattern
+    keeps working unchanged."""
     # Local/remote Ollama inference (especially over Tailscale to a
     # CPU-only machine) routinely takes far longer than Groq's API ever
     # would for the same prompt, so callers' timeout= (tuned for Groq)
@@ -119,7 +120,7 @@ def _llm_generate(prompt: str, cfg: dict, timeout: int = 120, num_thread: int | 
         result, rate_limited = _groq_generate(prompt, api_key, model, timeout=min(timeout, 60))
         if result:
             return result
-        if not cfg.get("groq_fallback_to_ollama", True):
+        if not cfg.get("groq_fallback_to_ollama", False):
             return None
         # Falls through here for any Groq failure — rate-limited, no key
         # configured, or a plain network/5xx error — rather than trying
