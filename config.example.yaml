@@ -418,6 +418,18 @@ report:
     smtp_pass_env: "REPORT_SMTP_PASS"
     to: []
 
+# A separate, non-personalized digest generated alongside the report above
+# (same run, same already-fetched/enriched/deduped items — no extra fetch
+# or re-enrichment) — organized into fixed categories (Funding, Regulatory,
+# Clinical, Commercial, Hiring) instead of by source, meant for a mailing
+# list rather than just you. Each bullet's first word links to its source.
+# Uses report.email's SMTP host/credentials above (same sending account),
+# just a different recipient list below.
+newsletter:
+  enabled: false
+  output_dir: "newsletters"
+  to: []   # the mailing list — never report.email.to, which is your own address
+
 database:
   path: "data/besseleth.db"
 

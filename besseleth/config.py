@@ -139,6 +139,15 @@ class Config:
         return self._resolve(self.report.get("output_dir", "reports"))
 
     @property
+    def newsletter(self) -> dict:
+        return self.raw.get("newsletter", {})
+
+    @property
+    def newsletters_dir(self) -> Path:
+        # Same per-industry resolution as reports_dir — see its comment.
+        return self._resolve(self.newsletter.get("output_dir", "newsletters"))
+
+    @property
     def db_path(self) -> Path:
         return self._resolve(self.raw.get("database", {}).get("path", "data/besseleth.db"))
 

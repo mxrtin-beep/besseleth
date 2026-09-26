@@ -737,6 +737,28 @@ because something new got scraped or pasted — always reflects the current
 window exactly as if no report had ever run before; it never skips an
 item just because an earlier report already included it.
 
+## Newsletter (a separate, non-personalized digest for a mailing list)
+
+Set `newsletter.enabled: true` in `config.yaml` and a newsletter is built
+automatically every time a report is — same run, same already-fetched/
+enriched/near-duplicate-merged items, no extra fetch or re-enrichment.
+Unlike the report, it isn't personalized to you: it's organized into fixed
+categories (Funding, Regulatory, Clinical, Commercial, Hiring) instead of
+by source, meant to be read/forwarded by people who aren't you. Each
+bullet's first word links to its source.
+
+```yaml
+newsletter:
+  enabled: true
+  output_dir: "newsletters"
+  to: ["list@yourdomain.com"]   # the mailing list — separate from report.email.to (your own address)
+```
+
+It reuses `report.email`'s SMTP host/credentials (same sending account),
+just a different recipient list. Newsletters show up in their own sidebar
+section on the dashboard, next to Reports — click one to open the actual
+sent HTML in a new tab, ✉ to resend it, 🗑 to delete it.
+
 The report opens with **🏆 Most surprising / important this week** —
 every item that scored at least `report.top_findings_min_novelty` (1-5,
 default 3) on `novelty_score`, ranked highest first and capped at

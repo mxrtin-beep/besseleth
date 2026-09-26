@@ -22,6 +22,7 @@ from .scrapers import (
     openalex_scraper,
     social_scraper,
 )
+from . import newsletter as newsletter_mod
 from . import report as report_mod
 from .dedupe import merge_near_duplicates
 from .enrich import enrich_items
@@ -375,6 +376,24 @@ def generate_weekly_report(config: Config, db: DB, progress_cb=None, cancel_even
     path, report_id = report_mod.save_report(markdown, report_id, config.reports_dir)
     report_mod.email_report(markdown, report_id, config.industry_name, report_cfg.get("email", {}))
     _prune_old_reports(config)
+
+    # Built from the exact same `all_items` (already fetched, enriched,
+    # and near-duplicate-merged above) rather than a separate query/
+    # dedupe pass — the only newsletter-specific work is its own LLM
+    # calls (categorize+bullet, executive summary), not re-doing
+    # anything the report generation above already did.
+    if config.newsletter.get("enabled"):
+        issue_number = int(db.get_meta("newsletter_issue_count") or 0) + 1
+        newsletter_id, newsletter_html, newsletter_text = newsletter_mod.build_newsletter(
+            config.industry_name, all_items, config.summarizer, issue_number=issue_number,
+        )
+        newsletter_path, newsletter_id = newsletter_mod.save_newsletter(newsletter_html, newsletter_id, config.newsletters_dir)
+        newsletter_mod.email_newsletter(
+            newsletter_html, newsletter_text, newsletter_id, config.industry_name,
+            config.newsletter, report_cfg.get("email", {}),
+        )
+        db.set_meta("newsletter_issue_count", str(issue_number))
+        print(f"[pipeline] Newsletter #{issue_number} written to {newsletter_path}")
 
     # Purely informational (the dashboard shows which report an item last
     # appeared in) — selection above is windowed by date, not gated on

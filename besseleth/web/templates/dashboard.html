@@ -143,6 +143,18 @@
     <p class="hint">No reports yet — wait for the schedule or hit "Run now".</p>
     {% endfor %}
   </nav>
+  <p class="hint">Newsletters</p>
+  <nav id="newsletterNav">
+    {% for nid in newsletter_ids %}
+    <div class="reportRow" data-newsletter-row="{{ nid }}">
+      <a href="/api/newsletter/{{ nid }}" target="_blank" rel="noopener" style="display:block; text-decoration:none; color:inherit; flex:1; padding:.5rem;">{{ industry }} — {{ nid }}</a>
+      <button class="btn" data-resend-newsletter="{{ nid }}" title="Resend this newsletter to the mailing list" style="padding:.2rem .4rem;">✉</button>
+      <button class="delNewsletterBtn" data-del-newsletter="{{ nid }}" title="Delete this newsletter">🗑</button>
+    </div>
+    {% else %}
+    <p class="hint">No newsletters yet — enable newsletter.enabled in config, then wait for the schedule or hit "Run now" (it's generated alongside the report).</p>
+    {% endfor %}
+  </nav>
 </aside>
 <button id="showSidebarBtn" title="Show sidebar">&raquo; Reports</button>
 <main>
@@ -668,6 +680,29 @@ wireReportNav();
 {% if report_ids %}
 document.querySelector('.reportBtn').click();
 {% endif %}
+
+function wireNewsletterNav() {
+  document.querySelectorAll('[data-resend-newsletter]').forEach(btn => {
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      const nid = btn.dataset.resendNewsletter;
+      if (!confirm(`Resend newsletter ${nid} to the mailing list?`)) return;
+      const res = await apiFetch(`/api/newsletter/${nid}/resend`, { method: 'POST' });
+      const data = await res.json();
+      alert(data.message || (data.ok ? 'Sent.' : 'Failed to resend.'));
+    };
+  });
+  document.querySelectorAll('.delNewsletterBtn').forEach(btn => {
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      const nid = btn.dataset.delNewsletter;
+      if (!confirm(`Delete newsletter ${nid}? This can't be undone.`)) return;
+      await apiFetch(`/api/newsletter/${nid}`, { method: 'DELETE' });
+      btn.closest('[data-newsletter-row]').remove();
+    };
+  });
+}
+wireNewsletterNav();
 
 // --- Status bar / scheduler control / backfill --------------------------
 const statusText = document.getElementById('statusText');

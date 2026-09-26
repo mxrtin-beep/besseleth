@@ -47,6 +47,7 @@ from ..interests_store import load_interests, save_interests
 from ..cancel import FetchCancelled
 from ..pipeline import SOURCES as ALL_ITEM_SOURCES
 from ..pipeline import fetch_all
+from .. import newsletter as newsletter_mod
 from .. import report as report_mod
 from ..scheduler import SchedulerStatus, reschedule, run_now, start_scheduler
 from ..scrapers.manual_drop import add_smart_item
@@ -272,11 +273,15 @@ def create_app(
         reports_dir = industry_config.reports_dir
         reports = sorted(reports_dir.glob("report-*.md"), key=report_mod.report_sort_key, reverse=True)
         report_ids = [p.stem.removeprefix("report-") for p in reports]
+        newsletters_dir = industry_config.newsletters_dir
+        newsletters = sorted(newsletters_dir.glob("newsletter-*.html"), key=newsletter_mod.newsletter_sort_key, reverse=True)
+        newsletter_ids = [p.stem.removeprefix("newsletter-") for p in newsletters]
         return render_template(
             "dashboard.html",
             industry=industry_config.industry_name,
             industry_slug=_current_industry_slug(app),
             report_ids=report_ids,
+            newsletter_ids=newsletter_ids,
             trend_metrics=industry_config.trend_metrics,
         )
 
@@ -297,6 +302,44 @@ def create_app(
             abort(404)
         path.unlink()
         return jsonify({"ok": True, "deleted": report_id})
+
+    @app.get("/api/newsletter/<newsletter_id>")
+    def api_newsletter(newsletter_id):
+        # Served as the raw saved HTML (not JSON-wrapped like /api/report)
+        # — it's already a real email, meant to be opened in its own tab/
+        # window, not rendered inline in the dashboard's own layout.
+        path = _industry_config(app).newsletters_dir / f"newsletter-{newsletter_id}.html"
+        if not path.exists():
+            abort(404)
+        return Response(path.read_text(encoding="utf-8"), mimetype="text/html")
+
+    @app.delete("/api/newsletter/<newsletter_id>")
+    def api_delete_newsletter(newsletter_id):
+        path = _industry_config(app).newsletters_dir / f"newsletter-{newsletter_id}.html"
+        if not path.exists():
+            abort(404)
+        path.unlink()
+        return jsonify({"ok": True, "deleted": newsletter_id})
+
+    @app.post("/api/newsletter/<newsletter_id>/resend")
+    def api_resend_newsletter(newsletter_id):
+        industry_config = _industry_config(app)
+        path = industry_config.newsletters_dir / f"newsletter-{newsletter_id}.html"
+        if not path.exists():
+            abort(404)
+        html = path.read_text(encoding="utf-8")
+        # Best-effort plaintext fallback from the saved HTML — the
+        # original plaintext part isn't kept on disk (only the html
+        # file is saved), so a resend loses the plaintext MIME part's
+        # exact wording but not its content; every real client renders
+        # the html part anyway.
+        plaintext = re.sub(r"<[^>]+>", " ", html)
+        plaintext = re.sub(r"\s+", " ", plaintext).strip()
+        newsletter_mod.email_newsletter(
+            html, plaintext, newsletter_id, industry_config.industry_name,
+            industry_config.newsletter, industry_config.report.get("email", {}),
+        )
+        return jsonify({"ok": True, "message": f"Resent newsletter {newsletter_id}."})
 
     @app.get("/api/devices")
     def api_devices():
