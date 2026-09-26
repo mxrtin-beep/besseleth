@@ -13,6 +13,7 @@ from .scrapers import (
     blog_scraper,
     clinicaltrials_scraper,
     conference_scraper,
+    europepmc_scraper,
     events_scraper,
     grants_scraper,
     jobs_scraper,
@@ -21,6 +22,7 @@ from .scrapers import (
     openalex_scraper,
     social_scraper,
 )
+from . import newsletter as newsletter_mod
 from . import report as report_mod
 from .dedupe import merge_near_duplicates
 from .enrich import enrich_items
@@ -59,7 +61,7 @@ def fetch_all(
     scrapers one). Raises FetchCancelled the moment it's set; whatever
     scraper already finished and got stored before that stays stored."""
     results: dict[str, list[Item]] = {s: [] for s in SOURCES}
-    _TOTAL_FETCH_STEPS = 9  # arXiv, Papers, News, Blogs, Conferences, Events, Social, LinkedIn, Enrichment+Jobs
+    _TOTAL_FETCH_STEPS = 10  # arXiv, Papers, Preprints, News, Blogs, Conferences, Events, Social, LinkedIn, Enrichment+Jobs
     _step = [0]  # mutable cell, closed over below — a plain int can't be reassigned from the closure
 
     def _tick(label: str):
@@ -116,6 +118,19 @@ def fetch_all(
             )
             results["papers"] += _dedupe_and_store(lab_items, db)
     _tick("Papers (OpenAlex)")
+
+    check_cancelled(cancel_event)
+    europepmc_cfg = config.source("europepmc")
+    if europepmc_cfg.get("enabled"):
+        print("[pipeline] Fetching preprints (bioRxiv/medRxiv/ChemRxiv/Research Square via Europe PMC)...")
+        items = europepmc_scraper.fetch(
+            config,
+            days_back=_days_back(europepmc_cfg.get("days_back", 8), since),
+            max_results_per_keyword=europepmc_cfg.get("max_results_per_keyword", 15),
+            cancel_event=cancel_event,
+        )
+        results["papers"] += _dedupe_and_store(items, db)
+    _tick("Preprints (Europe PMC)")
 
     # User-submitted feeds (the dashboard's Feeds tab) are additional
     # sources_.news/blogs feed URLs, merged in here rather than written
@@ -358,9 +373,27 @@ def generate_weekly_report(config: Config, db: DB, progress_cb=None, cancel_even
         top_findings_max_count=report_cfg.get("top_findings_max_count", 5),
     )
 
-    path, report_id = report_mod.save_report(markdown, report_id, report_cfg.get("output_dir", "reports"))
+    path, report_id = report_mod.save_report(markdown, report_id, config.reports_dir)
     report_mod.email_report(markdown, report_id, config.industry_name, report_cfg.get("email", {}))
     _prune_old_reports(config)
+
+    # Built from the exact same `all_items` (already fetched, enriched,
+    # and near-duplicate-merged above) rather than a separate query/
+    # dedupe pass — the only newsletter-specific work is its own LLM
+    # calls (categorize+bullet, executive summary), not re-doing
+    # anything the report generation above already did.
+    if config.newsletter.get("enabled"):
+        issue_number = int(db.get_meta("newsletter_issue_count") or 0) + 1
+        newsletter_id, newsletter_html, newsletter_text = newsletter_mod.build_newsletter(
+            config.industry_name, all_items, config.summarizer, issue_number=issue_number,
+        )
+        newsletter_path, newsletter_id = newsletter_mod.save_newsletter(newsletter_html, newsletter_id, config.newsletters_dir)
+        newsletter_mod.email_newsletter(
+            newsletter_html, newsletter_text, newsletter_id, config.industry_name,
+            config.newsletter, report_cfg.get("email", {}),
+        )
+        db.set_meta("newsletter_issue_count", str(issue_number))
+        print(f"[pipeline] Newsletter #{issue_number} written to {newsletter_path}")
 
     # Purely informational (the dashboard shows which report an item last
     # appeared in) — selection above is windowed by date, not gated on
@@ -381,7 +414,7 @@ def _prune_old_reports(config: Config):
     keep_last = config.raw.get("reports", {}).get("keep_last", 0)
     if not keep_last:
         return
-    reports_dir = Path(config.report.get("output_dir", "reports"))
+    reports_dir = config.reports_dir
     reports = sorted(reports_dir.glob("report-*.md"), key=report_mod.report_sort_key, reverse=True)
     for stale in reports[keep_last:]:
         stale.unlink(missing_ok=True)

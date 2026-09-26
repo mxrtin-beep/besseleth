@@ -20,6 +20,7 @@ Tunnel, etc.) — see _require_auth() below.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import secrets
@@ -30,7 +31,16 @@ from pathlib import Path
 import markdown as md
 from flask import Flask, Response, abort, jsonify, render_template, request, send_from_directory
 
-from ..config import Config, load_config, update_industry_settings, update_schedule_settings, update_summarizer_settings
+from ..config import (
+    DEFAULT_INDUSTRY_SLUG,
+    Config,
+    discover_industries,
+    load_config,
+    update_industry_settings,
+    update_newsletter_settings,
+    update_schedule_settings,
+    update_summarizer_settings,
+)
 from ..contacts_store import Contact, add_contact, import_linkedin_csv, load_contacts, remove_contact, update_contact
 from ..db import DB
 from ..feeds_store import add_feed, load_feeds, remove_feed
@@ -38,6 +48,7 @@ from ..interests_store import load_interests, save_interests
 from ..cancel import FetchCancelled
 from ..pipeline import SOURCES as ALL_ITEM_SOURCES
 from ..pipeline import fetch_all
+from .. import newsletter as newsletter_mod
 from .. import report as report_mod
 from ..scheduler import SchedulerStatus, reschedule, run_now, start_scheduler
 from ..scrapers.manual_drop import add_smart_item
@@ -77,18 +88,164 @@ def _require_auth() -> "Response | None":
     return Response("Authentication required.", 401, {"WWW-Authenticate": 'Basic realm="besseleth"'})
 
 
-def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=None) -> Flask:
+def _current_industry_slug(app: Flask) -> str:
+    """The ?industry=<slug> this request means, defaulting to
+    DEFAULT_INDUSTRY_SLUG (today's single-industry behavior) when
+    absent OR unknown — see _industry_config's docstring for why an
+    unknown slug degrades instead of 404ing."""
+    slug = request.args.get("industry")
+    industries: dict[str, Config] = app.config["BESSELETH_INDUSTRIES"]
+    return slug if slug in industries else DEFAULT_INDUSTRY_SLUG
+
+
+def _industry_config(app: Flask) -> Config:
+    """Which industry's config/data this request means — `?industry=
+    <slug>` (a slug from discover_industries, e.g. a folder name under
+    industries/) if given and known, else the app's primary config
+    (DEFAULT_INDUSTRY_SLUG — today's single-industry behavior). An
+    unknown slug falls back to the primary too rather than 404ing, so a
+    stale/mistyped `?industry=` in a bookmarked URL degrades instead of
+    breaking."""
+    industries: dict[str, Config] = app.config["BESSELETH_INDUSTRIES"]
+    return industries[_current_industry_slug(app)]
+
+
+def _industry_status(app: Flask) -> SchedulerStatus:
+    """The SchedulerStatus for the currently-selected industry (see
+    _industry_config) — each industry gets its own, since each runs its
+    own independent background fetch/report schedule (see main()); a
+    run in progress for one industry shouldn't show as "running" or
+    block a click on another industry's Run Now."""
+    statuses: dict[str, SchedulerStatus] = app.config["BESSELETH_STATUSES"]
+    return statuses[_current_industry_slug(app)]
+
+
+def _industry_scheduler(app: Flask):
+    """The BackgroundScheduler (or None, if that industry's
+    schedule.enabled is false) for the currently-selected industry —
+    see _industry_status."""
+    schedulers: dict = app.config["BESSELETH_SCHEDULERS"]
+    return schedulers[_current_industry_slug(app)]
+
+
+def create_app(
+    config: Config,
+    status: SchedulerStatus | None = None,
+    scheduler=None,
+    industries: dict[str, Config] | None = None,
+    statuses: dict[str, SchedulerStatus] | None = None,
+    schedulers: dict | None = None,
+) -> Flask:
     app = Flask(__name__)
     app.config["BESSELETH_CONFIG"] = config
-    app.config["BESSELETH_STATUS"] = status or SchedulerStatus(enabled=False)
-    # The live APScheduler instance (None if schedule.enabled is false) —
-    # kept around so the Settings tab's schedule form can re-arm its jobs
-    # with a new interval/cron immediately (see reschedule() in
-    # scheduler.py) instead of only taking effect after a restart.
-    app.config["BESSELETH_SCHEDULER"] = scheduler
+    # Several industries in one running app (see config.discover_industries)
+    # — defaults to just `config`/`status`/`scheduler` under
+    # DEFAULT_INDUSTRY_SLUG when no industries/ directory exists (or the
+    # plural dicts aren't passed at all), which is every existing single-
+    # industry install/caller, so nothing here changes for it. Every route
+    # below resolves ?industry=<slug> via _industry_config(app)/
+    # _industry_status(app)/_industry_scheduler(app) instead of closing
+    # over `config`/`status`/`scheduler` directly, so picking a different
+    # industry actually scopes every tab's data AND its own independent
+    # background schedule, not just a couple of endpoints.
+    app.config["BESSELETH_INDUSTRIES"] = industries or {DEFAULT_INDUSTRY_SLUG: config}
+    app.config["BESSELETH_STATUSES"] = statuses or {DEFAULT_INDUSTRY_SLUG: status or SchedulerStatus(enabled=False)}
+    app.config["BESSELETH_SCHEDULERS"] = schedulers or {DEFAULT_INDUSTRY_SLUG: scheduler}
     app.before_request(_require_auth)
 
-    reports_dir = Path(config.report.get("output_dir", "reports"))
+    @app.get("/api/industries")
+    def api_industries():
+        # Lists what ?industry=<slug> (see _industry_config) accepts —
+        # powers the industry picker/switcher. Always at least one entry
+        # (today's single-industry setup), even with no industries/
+        # directory.
+        industries: dict[str, Config] = app.config["BESSELETH_INDUSTRIES"]
+        return jsonify(
+            [{"slug": slug, "name": cfg.industry_name} for slug, cfg in industries.items()]
+        )
+
+    @app.post("/api/industries")
+    def api_create_industry():
+        # Creates a brand-new industries/<slug>/config.yaml from the
+        # config.example.yaml template (industry name/keywords filled
+        # in), then immediately registers it into this RUNNING process —
+        # starts its own scheduler and adds it to BESSELETH_INDUSTRIES/
+        # STATUSES/SCHEDULERS — so it's usable right away, no restart.
+        # Slugified from the name (lowercased, non-alphanumeric squashed
+        # to underscores) rather than asking for one separately — one
+        # less field, and it's an internal identifier (shows up in URLs/
+        # folder names), not something meant to be hand-tuned.
+        payload = request.get_json(silent=True) or {}
+        name = (payload.get("name") or "").strip()
+        keywords = payload.get("keywords") or []
+        keywords = [k.strip() for k in keywords if isinstance(k, str) and k.strip()]
+        if not name:
+            return jsonify({"ok": False, "message": "An industry name is required."}), 400
+        if not keywords:
+            return jsonify({"ok": False, "message": "At least one keyword is required."}), 400
+
+        slug = re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
+        if not slug:
+            return jsonify({"ok": False, "message": "That name doesn't produce a usable identifier — try including a letter or number."}), 400
+
+        industries: dict[str, Config] = app.config["BESSELETH_INDUSTRIES"]
+        if slug == DEFAULT_INDUSTRY_SLUG or slug in industries:
+            return jsonify({"ok": False, "message": f"An industry already exists with the identifier {slug!r} — pick a different name."}), 409
+
+        template_path = Path("config.example.yaml")
+        if not template_path.exists():
+            return jsonify({"ok": False, "message": "config.example.yaml template not found — can't scaffold a new industry."}), 500
+        template_text = template_path.read_text(encoding="utf-8")
+        new_config_path = Path("industries") / slug / "config.yaml"
+        new_config_path.parent.mkdir(parents=True, exist_ok=True)
+        # Surgical edits on the TEMPLATE TEXT (see _set_scalar_in_block/
+        # _set_list_in_block — same mechanism the Settings tab uses to
+        # save changes) rather than a full re-dump, so the new industry's
+        # config.yaml keeps every comment/default from the template
+        # instead of starting from a bare skeleton.
+        from ..config import _set_list_in_block, _set_scalar_in_block
+
+        new_text = _set_scalar_in_block(template_text, "industry", "name", json.dumps(name))
+        new_text = _set_list_in_block(new_text, "industry", "keywords", keywords)
+        new_config_path.write_text(new_text, encoding="utf-8")
+
+        new_industry_config = load_config(new_config_path)
+        industries[slug] = new_industry_config
+        sched, stat = start_scheduler(new_industry_config)
+        app.config["BESSELETH_SCHEDULERS"][slug] = sched
+        app.config["BESSELETH_STATUSES"][slug] = stat
+        return jsonify({"ok": True, "slug": slug, "name": name})
+
+    @app.delete("/api/industries/<slug>")
+    def api_delete_industry(slug):
+        # Stops that industry's scheduler, un-registers it from this
+        # running process, and deletes its industries/<slug>/ folder
+        # (config.yaml, its database, everything) outright — a real
+        # delete, not a hide, since discover_industries() would just
+        # find the folder again on the next restart otherwise. The
+        # primary/default industry (DEFAULT_INDUSTRY_SLUG — whatever
+        # config.yaml this process was started with) can't be deleted
+        # this way; there's always at least one industry.
+        if slug == DEFAULT_INDUSTRY_SLUG:
+            return jsonify({"ok": False, "message": "Can't delete the primary industry this dashboard was started with."}), 400
+        industries: dict[str, Config] = app.config["BESSELETH_INDUSTRIES"]
+        if slug not in industries:
+            return jsonify({"ok": False, "message": f"No industry {slug!r}."}), 404
+
+        scheduler = app.config["BESSELETH_SCHEDULERS"].get(slug)
+        if scheduler is not None:
+            scheduler.shutdown(wait=False)
+
+        industry_config = industries.pop(slug)
+        app.config["BESSELETH_SCHEDULERS"].pop(slug, None)
+        app.config["BESSELETH_STATUSES"].pop(slug, None)
+
+        import shutil
+
+        folder = industry_config.path.parent
+        if folder.exists() and folder.resolve() != Path.cwd().resolve():
+            shutil.rmtree(folder)
+        return jsonify({"ok": True})
 
     @app.get("/favicon.ico")
     def favicon():
@@ -100,17 +257,38 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
     @app.get("/")
     def index():
+        # No ?industry= at all (not even an unknown one — that still
+        # counts as "picked something," see _industry_config) means
+        # "show the picker," not "assume the primary industry" — the
+        # picker is the front door whenever there's more than one
+        # industry, or you're setting one up for the first time; the
+        # dashboard itself only ever renders once a specific industry is
+        # named in the URL.
+        if "industry" not in request.args:
+            return render_template("picker.html")
+        # ?industry=<slug> selects which industry's dashboard this is —
+        # see _industry_config's docstring. Each industry has its own
+        # reports/ directory (resolved relative to ITS OWN config.yaml,
+        # see Config._resolve), not a shared one.
+        industry_config = _industry_config(app)
+        reports_dir = industry_config.reports_dir
         reports = sorted(reports_dir.glob("report-*.md"), key=report_mod.report_sort_key, reverse=True)
         report_ids = [p.stem.removeprefix("report-") for p in reports]
+        newsletters_dir = industry_config.newsletters_dir
+        newsletters = sorted(newsletters_dir.glob("newsletter-*.html"), key=newsletter_mod.newsletter_sort_key, reverse=True)
+        newsletter_ids = [p.stem.removeprefix("newsletter-") for p in newsletters]
         return render_template(
             "dashboard.html",
-            industry=config.industry_name,
+            industry=industry_config.industry_name,
+            industry_slug=_current_industry_slug(app),
             report_ids=report_ids,
-            trend_metrics=config.trend_metrics,
+            newsletter_ids=newsletter_ids,
+            trend_metrics=industry_config.trend_metrics,
         )
 
     @app.get("/api/report/<report_id>")
     def api_report(report_id):
+        reports_dir = _industry_config(app).reports_dir
         path = reports_dir / f"report-{report_id}.md"
         if not path.exists():
             abort(404)
@@ -119,15 +297,54 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
     @app.delete("/api/report/<report_id>")
     def api_delete_report(report_id):
+        reports_dir = _industry_config(app).reports_dir
         path = reports_dir / f"report-{report_id}.md"
         if not path.exists():
             abort(404)
         path.unlink()
         return jsonify({"ok": True, "deleted": report_id})
 
+    @app.get("/api/newsletter/<newsletter_id>")
+    def api_newsletter(newsletter_id):
+        # Served as the raw saved HTML (not JSON-wrapped like /api/report)
+        # — it's already a real email, meant to be opened in its own tab/
+        # window, not rendered inline in the dashboard's own layout.
+        path = _industry_config(app).newsletters_dir / f"newsletter-{newsletter_id}.html"
+        if not path.exists():
+            abort(404)
+        return Response(path.read_text(encoding="utf-8"), mimetype="text/html")
+
+    @app.delete("/api/newsletter/<newsletter_id>")
+    def api_delete_newsletter(newsletter_id):
+        path = _industry_config(app).newsletters_dir / f"newsletter-{newsletter_id}.html"
+        if not path.exists():
+            abort(404)
+        path.unlink()
+        return jsonify({"ok": True, "deleted": newsletter_id})
+
+    @app.post("/api/newsletter/<newsletter_id>/resend")
+    def api_resend_newsletter(newsletter_id):
+        industry_config = _industry_config(app)
+        path = industry_config.newsletters_dir / f"newsletter-{newsletter_id}.html"
+        if not path.exists():
+            abort(404)
+        html = path.read_text(encoding="utf-8")
+        # Best-effort plaintext fallback from the saved HTML — the
+        # original plaintext part isn't kept on disk (only the html
+        # file is saved), so a resend loses the plaintext MIME part's
+        # exact wording but not its content; every real client renders
+        # the html part anyway.
+        plaintext = re.sub(r"<[^>]+>", " ", html)
+        plaintext = re.sub(r"\s+", " ", plaintext).strip()
+        newsletter_mod.email_newsletter(
+            html, plaintext, newsletter_id, industry_config.industry_name,
+            industry_config.newsletter, industry_config.report.get("email", {}),
+        )
+        return jsonify({"ok": True, "message": f"Resent newsletter {newsletter_id}."})
+
     @app.get("/api/devices")
     def api_devices():
-        devices = load_devices(config.devices_path, config.legacy_devices_yaml_path)
+        devices = load_devices(_industry_config(app).devices_path, _industry_config(app).legacy_devices_yaml_path)
         result = []
         for d in devices:
             stage_rank, stage_label = stage_for(d.fda_status)
@@ -151,7 +368,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
     @app.delete("/api/devices/<int:device_id>")
     def api_delete_device(device_id):
-        db = DB(config.db_path)
+        db = DB(_industry_config(app).db_path)
         try:
             deleted = db.delete_device(device_id)
         finally:
@@ -174,7 +391,9 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # hand-added/hand-verified company — NOT every org this install
         # has ever auto-extracted across its whole history, which is
         # what the underlying `companies` table alone would give you.
-        db = DB(config.db_path)
+        # ?industry=<slug> selects which industry's data this means —
+        # see _industry_config's docstring.
+        db = DB(_industry_config(app).db_path)
         try:
             rows = db.live_org_stats()
             active_job_counts = db.active_job_counts_by_org()
@@ -235,11 +454,11 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # live, once, only if nothing's been cached yet at all (a
         # fresh install before its first fetch has run) — that result
         # is also cached so this fallback only ever fires once.
-        db = DB(config.db_path)
+        db = DB(_industry_config(app).db_path)
         try:
             pairs = db.get_cached_duplicates("company")
             if pairs is None:
-                pairs = find_possible_duplicate_companies(config.companies_path)
+                pairs = find_possible_duplicate_companies(_industry_config(app).companies_path)
                 db.set_cached_duplicates("company", pairs)
             dismissed = db.dismissed_duplicate_pairs("company")
         finally:
@@ -253,7 +472,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         kind, a, b = payload.get("kind"), payload.get("a"), payload.get("b")
         if kind not in ("org", "company") or not a or not b:
             return jsonify({"ok": False, "message": "'kind' (org|company), 'a', and 'b' are required."}), 400
-        db = DB(config.db_path)
+        db = DB(_industry_config(app).db_path)
         try:
             db.dismiss_duplicate_pair(kind, a, b)
         finally:
@@ -266,7 +485,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         keep, drop = payload.get("keep"), payload.get("drop")
         if not keep or not drop:
             return jsonify({"ok": False, "message": "Both 'keep' and 'drop' are required."}), 400
-        merge_company_pair(config.companies_path, keep_name=keep, drop_name=drop)
+        merge_company_pair(_industry_config(app).companies_path, keep_name=keep, drop_name=drop)
         return jsonify({"ok": True})
 
     @app.get("/api/orgs/possible-duplicates")
@@ -281,7 +500,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # Cached the same way and for the same reason as the companies
         # version above — see that endpoint's comment and
         # db.set_cached_duplicates's docstring.
-        db = DB(config.db_path)
+        db = DB(_industry_config(app).db_path)
         try:
             pairs = db.get_cached_duplicates("org")
             if pairs is None:
@@ -299,7 +518,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         keep, drop = payload.get("keep"), payload.get("drop")
         if not keep or not drop:
             return jsonify({"ok": False, "message": "Both 'keep' and 'drop' are required."}), 400
-        db = DB(config.db_path)
+        db = DB(_industry_config(app).db_path)
         try:
             changed = db.merge_org(keep_org=keep, drop_org=drop)
         finally:
@@ -323,7 +542,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         org = (payload.get("org") or "").strip()
         if not org:
             return jsonify({"ok": False, "message": "Missing 'org'."}), 400
-        db = DB(config.db_path)
+        db = DB(_industry_config(app).db_path)
         try:
             cleared = db.clear_org_matches([org])
             removed = db.delete_jobs_for_org(org)
@@ -333,7 +552,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
     @app.get("/api/jobs")
     def api_jobs():
-        db = DB(config.db_path)
+        db = DB(_industry_config(app).db_path)
         try:
             rows = db.job_postings()
         finally:
@@ -364,14 +583,16 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # everything stored, not scoped to what enrichment happens to be
         # configured to touch. (A previous version of this endpoint read
         # enrichment.sources as the display list here, which is a
-        # different concern that just happens to share a config key —
+        # different concern that just happens to share a _industry_config(app) key —
         # with enrichment.sources customized down to its own default of
         # ["papers", "news", "blog"], that silently hid linkedin/social/
         # event/clip/conference from this table even when they had real
         # data, which looked exactly like "nothing ever gets fetched for
         # those sources" from the dashboard alone.) The source filter
         # dropdown narrows it down to just one if that's all you want.
-        db = DB(config.db_path)
+        # ?industry=<slug> selects which industry's data this means —
+        # see _industry_config's docstring.
+        db = DB(_industry_config(app).db_path)
         try:
             rows = db.papers(ALL_ITEM_SOURCES)
         finally:
@@ -406,12 +627,18 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # with funding/stock data from the companies table where the
         # names match, so this one table covers labs, academic/gov orgs,
         # and funded companies alike.
-        db = DB(config.db_path)
+        # ?industry=<slug> selects which industry's data this means —
+        # see _industry_config's docstring.
+        industry_config = _industry_config(app)
+        db = DB(industry_config.db_path)
         try:
             rows = db.orgs()
         finally:
             db.close()
-        companies_by_name = {c.name.lower(): c for c in load_companies(config.companies_path, config.legacy_companies_yaml_path)}
+        companies_by_name = {
+            c.name.lower(): c
+            for c in load_companies(industry_config.companies_path, industry_config.legacy_companies_yaml_path)
+        }
         result = []
         for r in rows:
             company = companies_by_name.get((r["org"] or "").lower())
@@ -435,7 +662,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
     @app.get("/api/locations")
     def api_locations():
-        db = DB(config.db_path)
+        db = DB(_industry_config(app).db_path)
         try:
             rows = db.locations()
         finally:
@@ -471,10 +698,10 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # call. A contact whose employer hasn't been resolved yet (new
         # contact, or the next enrich run hasn't reached it) is just
         # skipped rather than shown with no location.
-        db = DB(config.db_path)
+        db = DB(_industry_config(app).db_path)
         try:
             points = []
-            for contact in config.contacts:
+            for contact in _industry_config(app).contacts:
                 workplaces = contact.get("workplaces") or []
                 if not workplaces or not workplaces[0].get("company"):
                     continue
@@ -498,13 +725,13 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
     @app.get("/api/metrics")
     def api_metrics():
-        # Axis options for the trend explorer: config-defined numeric
+        # Axis options for the trend explorer: _industry_config(app)-defined numeric
         # metrics plus the built-in "date_reported" time axis. Includes
         # both the device and company metric sets — the dashboard picks
         # whichever matches the selected dataset.
-        numeric = [m for m in config.trend_metrics if m.get("type", "numeric") == "numeric"]
-        categorical = [m for m in config.trend_metrics if m.get("type") == "categorical"]
-        company_numeric = [m for m in config.company_metrics if m.get("type", "numeric") == "numeric"]
+        numeric = [m for m in _industry_config(app).trend_metrics if m.get("type", "numeric") == "numeric"]
+        categorical = [m for m in _industry_config(app).trend_metrics if m.get("type") == "categorical"]
+        company_numeric = [m for m in _industry_config(app).company_metrics if m.get("type", "numeric") == "numeric"]
         return jsonify(
             {
                 "numeric": numeric,
@@ -520,7 +747,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # returns groq_api_key's actual value (it's a secret; the field
         # just shows "set"/"not set" and a save always overwrites rather
         # than needing the old value round-tripped back to the browser).
-        cfg = config.summarizer
+        cfg = _industry_config(app).summarizer
         return jsonify({
             "backend": cfg.get("backend", "groq"),
             "groq_api_key_set": bool(cfg.get("groq_api_key") or os.environ.get("GROQ_API_KEY")),
@@ -531,10 +758,10 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
     @app.post("/api/settings/summarizer")
     def api_set_summarizer_settings():
-        # Writes straight into config.yaml (see update_summarizer_settings —
+        # Writes straight into _industry_config(app).yaml (see update_summarizer_settings —
         # a targeted text edit, not a full re-dump, so a hand-written
-        # config.yaml's comments survive) and takes effect immediately,
-        # no restart needed, since every LLM call reads config.summarizer
+        # _industry_config(app).yaml's comments survive) and takes effect immediately,
+        # no restart needed, since every LLM call reads _industry_config(app).summarizer
         # fresh each time rather than caching it at startup.
         payload = request.get_json(silent=True) or {}
         backend = payload.get("backend")
@@ -545,14 +772,14 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
             fields["groq_api_key"] = payload["groq_api_key"]
         if payload.get("ollama_url"):
             fields["ollama_url"] = payload["ollama_url"]
-        update_summarizer_settings(config, **fields)
+        update_summarizer_settings(_industry_config(app), **fields)
         return jsonify({"ok": True})
 
     @app.post("/api/companies/refresh-stock")
     def api_refresh_stock():
         from ..trends.company_store import refresh_stock_prices
 
-        log = refresh_stock_prices(config.companies_path)
+        log = refresh_stock_prices(_industry_config(app).companies_path)
         return jsonify({"ok": True, "log": log})
 
     @app.post("/api/locations/standardize")
@@ -566,7 +793,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # racing a page load.
         from ..enrich import standardize_location_labels
 
-        db = DB(config.db_path)
+        db = DB(_industry_config(app).db_path)
         try:
             result = standardize_location_labels(db)
         finally:
@@ -575,7 +802,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
     @app.get("/api/settings/schedule")
     def api_get_schedule_settings():
-        sched = config.raw.get("schedule", {}) or {}
+        sched = _industry_config(app).raw.get("schedule", {}) or {}
         return jsonify({
             "enabled": sched.get("enabled", True),
             "fetch_interval_hours": sched.get("fetch_interval_hours", 6),
@@ -608,13 +835,13 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
                 ZoneInfo(timezone_name)
             except Exception:
                 return jsonify({"ok": False, "message": f"Unknown timezone {timezone_name!r} (use an IANA name, e.g. America/Los_Angeles)."}), 400
-        update_schedule_settings(config, fetch_interval_hours=fetch_interval_hours, report_cron=report_cron, timezone=timezone_name)
-        reschedule(app.config.get("BESSELETH_SCHEDULER"), config)
+        update_schedule_settings(_industry_config(app), fetch_interval_hours=fetch_interval_hours, report_cron=report_cron, timezone=timezone_name)
+        reschedule(_industry_scheduler(app), _industry_config(app))
         return jsonify({"ok": True})
 
     @app.get("/api/settings/industry")
     def api_get_industry_settings():
-        return jsonify({"name": config.industry_name, "keywords": config.keywords})
+        return jsonify({"name": _industry_config(app).industry_name, "keywords": _industry_config(app).keywords})
 
     @app.post("/api/settings/industry")
     def api_set_industry_settings():
@@ -625,7 +852,26 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
             keywords = [k.strip() for k in keywords if isinstance(k, str) and k.strip()]
             if not keywords:
                 return jsonify({"ok": False, "message": "At least one keyword is required."}), 400
-        update_industry_settings(config, name=name, keywords=keywords)
+        update_industry_settings(_industry_config(app), name=name, keywords=keywords)
+        return jsonify({"ok": True})
+
+    @app.get("/api/settings/newsletter")
+    def api_get_newsletter_settings():
+        newsletter = _industry_config(app).newsletter
+        return jsonify({"enabled": bool(newsletter.get("enabled", False)), "to": newsletter.get("to", [])})
+
+    @app.post("/api/settings/newsletter")
+    def api_set_newsletter_settings():
+        payload = request.get_json(silent=True) or {}
+        to = payload.get("to")
+        enabled = payload.get("enabled")
+        if to is not None:
+            if not isinstance(to, list) or not all(isinstance(a, str) for a in to):
+                return jsonify({"ok": False, "message": "to must be a list of email addresses."}), 400
+            to = [a.strip() for a in to if a.strip()]
+        if enabled is not None and not isinstance(enabled, bool):
+            return jsonify({"ok": False, "message": "enabled must be true or false."}), 400
+        update_newsletter_settings(_industry_config(app), to=to, enabled=enabled)
         return jsonify({"ok": True})
 
     @app.get("/api/metrics-table")
@@ -638,11 +884,11 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # value. This is the troubleshooting view for "is extraction
         # actually pulling out the right numbers" — cross-check a value
         # here against its source_url rather than trusting the chart.
-        metric_units = {m["key"]: m.get("unit", "") for m in config.trend_metrics}
-        metric_units.update({m["key"]: m.get("unit", "") for m in config.company_metrics})
+        metric_units = {m["key"]: m.get("unit", "") for m in _industry_config(app).trend_metrics}
+        metric_units.update({m["key"]: m.get("unit", "") for m in _industry_config(app).company_metrics})
 
         rows = []
-        for d in load_devices(config.devices_path, config.legacy_devices_yaml_path):
+        for d in load_devices(_industry_config(app).devices_path, _industry_config(app).legacy_devices_yaml_path):
             for key, value in d.metrics.items():
                 if not isinstance(value, (int, float)):
                     continue  # categorical (e.g. fda_status/device_type) — not a number to audit here
@@ -661,7 +907,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
             "funding_total_usd": ("USD", "last_funding_date"),
             "stock_price": ("", "stock_price_updated_at"),
         }
-        for c in load_companies(config.companies_path, config.legacy_companies_yaml_path):
+        for c in load_companies(_industry_config(app).companies_path, _industry_config(app).legacy_companies_yaml_path):
             for key, (unit, date_field) in company_numeric_keys.items():
                 value = getattr(c, key)
                 if value is None:
@@ -684,6 +930,9 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
     def report_assets(filename):
         # Serves matplotlib PNGs etc. referenced by older report renders,
         # and anything else saved under the report output dir.
+        # ?industry=<slug> selects which industry's reports/ dir this
+        # means — see _industry_config's docstring.
+        reports_dir = _industry_config(app).reports_dir
         return send_from_directory(reports_dir, filename)
 
     @app.get("/api/status")
@@ -696,9 +945,9 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # regardless of caller — whenever the in-memory value is unset,
         # so the status bar reflects real history, not just this
         # process's own uptime.
-        data = app.config["BESSELETH_STATUS"].as_dict()
+        data = _industry_status(app).as_dict()
         if not data.get("last_fetch_at") or not data.get("last_report_at"):
-            db = DB(config.db_path)
+            db = DB(_industry_config(app).db_path)
             try:
                 data.setdefault("last_fetch_at", None)
                 data.setdefault("last_report_at", None)
@@ -712,7 +961,14 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
     @app.post("/api/run-now")
     def api_run_now():
-        status = app.config["BESSELETH_STATUS"]
+        status = _industry_status(app)
+        # Resolved HERE, in the actual request handler, not inside
+        # _work() below — _industry_config(app) reads request.args,
+        # which only exists while a real HTTP request is being handled.
+        # _work() runs on a background thread AFTER this handler already
+        # returned, so calling it there raises "Working outside of
+        # request context" the moment the thread actually runs.
+        industry_config = _industry_config(app)
         if status.running_now:
             return jsonify({"ok": False, "message": "Already running."}), 409
         # Runs in a background thread — fetching+summarizing can take a
@@ -733,7 +989,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
         def _work():
             try:
-                run_now(config, status)
+                run_now(industry_config, status)
             finally:
                 status.set_progress(None)
                 with status._lock:
@@ -752,7 +1008,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # running operation stops at its next checkpoint (between
         # scrapers/pages/items), not mid-request. A no-op (not an error)
         # if nothing is running — the button just does nothing useful then.
-        status = app.config["BESSELETH_STATUS"]
+        status = _industry_status(app)
         if not status.running_now:
             return jsonify({"ok": True, "message": "Nothing is running."})
         status.request_cancel()
@@ -762,7 +1018,10 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
     def api_enrich():
         from ..enrich import enrich_items_detailed
 
-        status = app.config["BESSELETH_STATUS"]
+        status = _industry_status(app)
+        # See /api/run-now's comment — must resolve before the thread
+        # starts, not inside it.
+        industry_config = _industry_config(app)
         if status.running_now:
             return jsonify({"ok": False, "message": "Already running."}), 409
         payload = request.get_json(silent=True) or {}
@@ -784,10 +1043,10 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
         def _work():
             try:
-                db = DB(config.db_path)
+                db = DB(industry_config.db_path)
                 try:
                     result = enrich_items_detailed(
-                        config, db, force=force, run_until_done=run_until_done,
+                        industry_config, db, force=force, run_until_done=run_until_done,
                         progress_cb=status.set_progress, cancel_event=status.cancel_event,
                     )
                 finally:
@@ -816,8 +1075,8 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # page load, without triggering a run.
         from ..enrich import DEFAULT_SOURCES
 
-        sources = config.raw.get("enrichment", {}).get("sources", DEFAULT_SOURCES)
-        db = DB(config.db_path)
+        sources = _industry_config(app).raw.get("enrichment", {}).get("sources", DEFAULT_SOURCES)
+        db = DB(_industry_config(app).db_path)
         try:
             stats = db.get_enrich_stats()
             enriched, total = db.enrichment_progress(sources)
@@ -835,19 +1094,19 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
     @app.get("/api/enrich/log")
     def api_enrich_log():
         # Troubleshooting view: the most recently enriched items with
-        # exactly what got extracted, plus the live config/backend status
+        # exactly what got extracted, plus the live _industry_config(app)/backend status
         # — so "why is everything null/unknown" is answerable by looking
-        # at this tab instead of reading server logs or config.yaml by
+        # at this tab instead of reading server logs or _industry_config(app).yaml by
         # hand. Read-only, no run triggered.
         from ..enrich import llm_status
 
-        summarizer_cfg = config.summarizer
+        summarizer_cfg = _industry_config(app).summarizer
         backend = summarizer_cfg.get("backend", "groq")
         ok, status_message = llm_status(summarizer_cfg)
 
-        enrichment_sources = config.raw.get("enrichment", {}).get("sources", ["papers", "news", "blog"])
+        enrichment_sources = _industry_config(app).raw.get("enrichment", {}).get("sources", ["papers", "news", "blog"])
 
-        db = DB(config.db_path)
+        db = DB(_industry_config(app).db_path)
         try:
             changes = db.recent_changes(limit=100)
             stats = db.get_enrich_stats()
@@ -880,7 +1139,10 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
     @app.post("/api/backfill")
     def api_backfill():
-        status = app.config["BESSELETH_STATUS"]
+        status = _industry_status(app)
+        # See /api/run-now's comment — must resolve before the thread
+        # starts, not inside it.
+        industry_config = _industry_config(app)
         if status.running_now:
             return jsonify({"ok": False, "message": "Already running."}), 409
         payload = request.get_json(silent=True) or {}
@@ -897,9 +1159,9 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
         def _work():
             try:
-                db = DB(config.db_path)
+                db = DB(industry_config.db_path)
                 try:
-                    results = fetch_all(config, db, since=since, progress_cb=status.set_progress, cancel_event=status.cancel_event)
+                    results = fetch_all(industry_config, db, since=since, progress_cb=status.set_progress, cancel_event=status.cancel_event)
                 finally:
                     db.close()
                 with status._lock:
@@ -928,7 +1190,10 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # a full force=True re-enrich redoing modality/target/novelty too.
         # Same async/cancel/progress shape as /api/backfill, since a big
         # backlog's LLM tier can take a while.
-        status = app.config["BESSELETH_STATUS"]
+        status = _industry_status(app)
+        # See /api/run-now's comment — must resolve before the thread
+        # starts, not inside it.
+        industry_config = _industry_config(app)
         if status.running_now:
             return jsonify({"ok": False, "message": "Already running."}), 409
         payload = request.get_json(silent=True) or {}
@@ -943,10 +1208,10 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
             try:
                 from ..enrich import reextract_org_names
 
-                db = DB(config.db_path)
+                db = DB(industry_config.db_path)
                 try:
                     result = reextract_org_names(
-                        config, db, cancel_event=status.cancel_event, progress_cb=status.set_progress,
+                        industry_config, db, cancel_event=status.cancel_event, progress_cb=status.set_progress,
                         max_llm_calls=10**9 if uncapped else None,
                     )
                 finally:
@@ -977,7 +1242,10 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # docstring). Fresh fetches resolve this automatically already
         # (scrapers/openalex_scraper.py, scrapers/arxiv_scraper.py); this
         # is what fixes the EXISTING backlog. Same async shape as above.
-        status = app.config["BESSELETH_STATUS"]
+        status = _industry_status(app)
+        # See /api/run-now's comment — must resolve before the thread
+        # starts, not inside it.
+        industry_config = _industry_config(app)
         if status.running_now:
             return jsonify({"ok": False, "message": "Already running."}), 409
         payload = request.get_json(silent=True) or {}
@@ -992,10 +1260,10 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
             try:
                 from ..enrich import reextract_paper_orgs
 
-                db = DB(config.db_path)
+                db = DB(industry_config.db_path)
                 try:
                     result = reextract_paper_orgs(
-                        config, db, cancel_event=status.cancel_event, progress_cb=status.set_progress,
+                        industry_config, db, cancel_event=status.cancel_event, progress_cb=status.set_progress,
                         max_llm_calls=10**9 if uncapped else None,
                     )
                 finally:
@@ -1025,7 +1293,10 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # backfill pass never revisits an org that already has a
         # location, even a wrong one written before a lookup-logic fix.
         # Same async shape as the other re-extract endpoints.
-        status = app.config["BESSELETH_STATUS"]
+        status = _industry_status(app)
+        # See /api/run-now's comment — must resolve before the thread
+        # starts, not inside it.
+        industry_config = _industry_config(app)
         if status.running_now:
             return jsonify({"ok": False, "message": "Already running."}), 409
         payload = request.get_json(silent=True) or {}
@@ -1040,10 +1311,10 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
             try:
                 from ..enrich import reextract_org_locations
 
-                db = DB(config.db_path)
+                db = DB(industry_config.db_path)
                 try:
                     result = reextract_org_locations(
-                        config, db, cancel_event=status.cancel_event, progress_cb=status.set_progress,
+                        industry_config, db, cancel_event=status.cancel_event, progress_cb=status.set_progress,
                         max_lookups=10**9 if uncapped else None,
                     )
                 finally:
@@ -1073,16 +1344,16 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         url = payload.get("url", "")
         if not text:
             return jsonify({"ok": False, "message": "Nothing pasted."}), 400
-        db = DB(config.db_path)
+        db = DB(_industry_config(app).db_path)
         try:
-            item, detected_label = add_smart_item(config, db, text, url=url)
+            item, detected_label = add_smart_item(_industry_config(app), db, text, url=url)
         finally:
             db.close()
         return jsonify({"ok": True, "title": item.title, "id": item.id, "detected_as": detected_label})
 
     @app.get("/api/pasted")
     def api_pasted():
-        db = DB(config.db_path)
+        db = DB(_industry_config(app).db_path)
         try:
             rows = db.manual_items(["linkedin", "event", "social", "clip"])
         finally:
@@ -1104,7 +1375,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
     @app.get("/api/feeds")
     def api_feeds():
-        return jsonify(load_feeds(config.feeds_path))
+        return jsonify(load_feeds(_industry_config(app).feeds_path))
 
     @app.post("/api/feeds")
     def api_add_feed():
@@ -1117,7 +1388,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         if not url.startswith(("http://", "https://")):
             return jsonify({"ok": False, "message": "URL must start with http:// or https://."}), 400
 
-        added = add_feed(config.feeds_path, category, url, label)
+        added = add_feed(_industry_config(app).feeds_path, category, url, label)
         if not added:
             return jsonify({"ok": False, "message": "That feed URL is already in the list."}), 409
 
@@ -1145,14 +1416,14 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         url = (payload.get("url") or "").strip()
         if category not in ("news", "blog"):
             return jsonify({"ok": False, "message": "category must be 'news' or 'blog'."}), 400
-        removed = remove_feed(config.feeds_path, category, url)
+        removed = remove_feed(_industry_config(app).feeds_path, category, url)
         if not removed:
             abort(404)
         return jsonify({"ok": True})
 
     @app.get("/api/interests")
     def api_interests():
-        return jsonify(load_interests(config.interests_path))
+        return jsonify(load_interests(_industry_config(app).interests_path))
 
     @app.post("/api/interests")
     def api_save_interests():
@@ -1160,12 +1431,12 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         interests = payload.get("interests") or []
         if not isinstance(interests, list):
             return jsonify({"ok": False, "message": "'interests' must be a list of strings."}), 400
-        save_interests(interests, config.interests_path)
-        return jsonify({"ok": True, "interests": load_interests(config.interests_path)})
+        save_interests(interests, _industry_config(app).interests_path)
+        return jsonify({"ok": True, "interests": load_interests(_industry_config(app).interests_path)})
 
     @app.get("/api/contacts")
     def api_contacts():
-        contacts = load_contacts(config.contacts_path)
+        contacts = load_contacts(_industry_config(app).contacts_path)
         return jsonify(
             [
                 {
@@ -1216,7 +1487,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         contact = _contact_from_payload(payload)
         if not contact:
             return jsonify({"ok": False, "message": "Name is required."}), 400
-        add_contact(config.contacts_path, contact)
+        add_contact(_industry_config(app).contacts_path, contact)
         return jsonify({"ok": True})
 
     @app.put("/api/contacts/<int:index>")
@@ -1225,13 +1496,13 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         contact = _contact_from_payload(payload)
         if not contact:
             return jsonify({"ok": False, "message": "Name is required."}), 400
-        if not update_contact(config.contacts_path, index, contact):
+        if not update_contact(_industry_config(app).contacts_path, index, contact):
             abort(404)
         return jsonify({"ok": True})
 
     @app.delete("/api/contacts/<int:index>")
     def api_remove_contact(index):
-        if not remove_contact(config.contacts_path, index):
+        if not remove_contact(_industry_config(app).contacts_path, index):
             abort(404)
         return jsonify({"ok": True})
 
@@ -1267,22 +1538,22 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # excluded too, since those are exactly as unverified as
         # distinct_orgs() and carry their own "verify before trusting"
         # notice for the same reason.
-        companies = load_companies(config.db_path, config.companies_path)
+        companies = load_companies(_industry_config(app).db_path, _industry_config(app).companies_path)
         known_orgs = [c.name for c in companies if not c.auto_extracted]
-        added = import_linkedin_csv(config.contacts_path, text, keywords=config.keywords, known_orgs=known_orgs)
+        added = import_linkedin_csv(_industry_config(app).contacts_path, text, keywords=_industry_config(app).keywords, known_orgs=known_orgs)
         if added == 0:
             return jsonify({
                 "ok": True, "added": 0,
                 "message": (
                     "Found 0 new contacts — either everyone relevant is already added, this doesn't look "
-                    f"like a LinkedIn Connections.csv export, or nobody in it looks like {config.industry_name}."
+                    f"like a LinkedIn Connections.csv export, or nobody in it looks like {_industry_config(app).industry_name}."
                 ),
             })
-        return jsonify({"ok": True, "added": added, "message": f"Added {added} new contact(s) working in {config.industry_name}."})
+        return jsonify({"ok": True, "added": added, "message": f"Added {added} new contact(s) working in {_industry_config(app).industry_name}."})
 
     @app.delete("/api/item/<item_id>")
     def api_delete_item(item_id):
-        db = DB(config.db_path)
+        db = DB(_industry_config(app).db_path)
         try:
             deleted = db.delete_item(item_id)
         finally:
@@ -1309,14 +1580,14 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         with tempfile.NamedTemporaryFile(suffix=".pdf") as tmp:
             uploaded.save(tmp.name)
             try:
-                result = ingest_pdf_upload(config, tmp.name, uploaded.filename)
+                result = ingest_pdf_upload(_industry_config(app), tmp.name, uploaded.filename)
             except Exception as e:
                 return jsonify({"ok": False, "message": str(e)}), 400
         return jsonify({"ok": True, **result})
 
     @app.get("/api/company-events")
     def api_company_events():
-        db = DB(config.db_path)
+        db = DB(_industry_config(app).db_path)
         try:
             rows = db.company_events(request.args.get("org") or None)
         finally:
@@ -1339,7 +1610,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
 
     @app.delete("/api/company-events/<int:event_id>")
     def api_delete_company_event(event_id):
-        db = DB(config.db_path)
+        db = DB(_industry_config(app).db_path)
         try:
             deleted = db.delete_company_event(event_id)
         finally:
@@ -1359,7 +1630,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         event_type = (payload.get("event_type") or "other").strip()
         if not org or not title:
             return jsonify({"ok": False, "message": "'org' and 'title' are required."}), 400
-        db = DB(config.db_path)
+        db = DB(_industry_config(app).db_path)
         try:
             event_id = db.add_company_event(
                 org, event_type, payload.get("event_date") or None, title,
@@ -1379,7 +1650,7 @@ def create_app(config: Config, status: SchedulerStatus | None = None, scheduler=
         # only brings back whatever's still inside the source's normal
         # days_back window (or a fresh backfill), same caveat as any
         # other delete here.
-        db = DB(config.db_path)
+        db = DB(_industry_config(app).db_path)
         try:
             removed = db.delete_items_by_source(source)
         finally:
@@ -1400,12 +1671,34 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
-    if args.no_schedule:
-        config.raw.setdefault("schedule", {})["enabled"] = False
-    _scheduler, status = start_scheduler(config)
+    industries = discover_industries(config)
 
-    app = create_app(config, status, _scheduler)
-    print(f"[web] Serving {config.industry_name} dashboard at http://{args.host}:{args.port}")
+    # One independent scheduler per industry — each keeps fetching/
+    # reporting on its own schedule.yaml settings regardless of which
+    # one you're currently looking at in the dashboard, same as if each
+    # were its own separate process. --no-schedule disables all of them
+    # at once, same as it always disabled the (previously singular) one.
+    schedulers: dict[str, object] = {}
+    statuses: dict[str, object] = {}
+    for slug, industry_config in industries.items():
+        if args.no_schedule:
+            industry_config.raw.setdefault("schedule", {})["enabled"] = False
+        sched, stat = start_scheduler(industry_config)
+        schedulers[slug] = sched
+        statuses[slug] = stat
+
+    app = create_app(
+        config,
+        statuses[DEFAULT_INDUSTRY_SLUG],
+        schedulers[DEFAULT_INDUSTRY_SLUG],
+        industries=industries,
+        statuses=statuses,
+        schedulers=schedulers,
+    )
+    print(
+        f"[web] Serving {len(industries)} industry dashboard(s) "
+        f"({', '.join(cfg.industry_name for cfg in industries.values())}) at http://{args.host}:{args.port}"
+    )
     app.run(host=args.host, port=args.port, debug=False)
 
 

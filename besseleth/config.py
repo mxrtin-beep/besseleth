@@ -18,6 +18,20 @@ class Config:
     raw: dict[str, Any]
     path: Path
 
+    def _resolve(self, raw_path: str) -> Path:
+        """Resolves a config-declared relative path (db, contacts.yaml,
+        etc.) against THIS config file's own directory, not the
+        process's working directory — same result as before for the
+        single-industry case (where they're the same directory), but
+        what makes discover_industries() safe: two industries each
+        under their own industries/<slug>/ folder get their own
+        self-contained data (db, contacts, devices, ...) without
+        colliding, even though both configs are loaded by the same
+        running process with one shared CWD. An absolute path in
+        config.yaml is left as-is (honors an explicit override)."""
+        p = Path(raw_path)
+        return p if p.is_absolute() else self.path.parent / p
+
     @property
     def industry_name(self) -> str:
         return self.raw["industry"]["name"]
@@ -54,23 +68,23 @@ class Config:
 
     @property
     def legacy_devices_yaml_path(self) -> Path:
-        return Path(self.raw.get("trends", {}).get("devices_path", "devices.yaml"))
+        return self._resolve(self.raw.get("trends", {}).get("devices_path", "devices.yaml"))
 
     @property
     def legacy_companies_yaml_path(self) -> Path:
-        return Path(self.raw.get("trends", {}).get("companies_path", "companies.yaml"))
+        return self._resolve(self.raw.get("trends", {}).get("companies_path", "companies.yaml"))
 
     @property
     def job_boards_path(self) -> Path:
-        return Path(self.raw.get("jobs", {}).get("manual_boards_path", "job_boards.yaml"))
+        return self._resolve(self.raw.get("jobs", {}).get("manual_boards_path", "job_boards.yaml"))
 
     @property
     def feeds_path(self) -> Path:
-        return Path(self.raw.get("feeds_path", "feeds.yaml"))
+        return self._resolve(self.raw.get("feeds_path", "feeds.yaml"))
 
     @property
     def contacts_path(self) -> Path:
-        return Path(self.raw.get("contacts_path", "contacts.yaml"))
+        return self._resolve(self.raw.get("contacts_path", "contacts.yaml"))
 
     @property
     def contacts(self) -> list[dict]:
@@ -88,7 +102,7 @@ class Config:
 
     @property
     def interests_path(self) -> Path:
-        return Path(self.raw.get("interests_path", "interests.yaml"))
+        return self._resolve(self.raw.get("interests_path", "interests.yaml"))
 
     @property
     def interests(self) -> list[str]:
@@ -98,7 +112,7 @@ class Config:
 
     @property
     def labs_path(self) -> Path:
-        return Path(self.raw.get("labs_path", "labs.yaml"))
+        return self._resolve(self.raw.get("labs_path", "labs.yaml"))
 
     @property
     def labs(self) -> list[dict]:
@@ -118,8 +132,24 @@ class Config:
         return self.raw.get("report", {})
 
     @property
+    def reports_dir(self) -> Path:
+        # Resolved against this config's own directory (see _resolve) so
+        # each industry gets its own industries/<slug>/reports/ folder
+        # instead of every industry sharing one CWD-relative "reports/".
+        return self._resolve(self.report.get("output_dir", "reports"))
+
+    @property
+    def newsletter(self) -> dict:
+        return self.raw.get("newsletter", {})
+
+    @property
+    def newsletters_dir(self) -> Path:
+        # Same per-industry resolution as reports_dir — see its comment.
+        return self._resolve(self.newsletter.get("output_dir", "newsletters"))
+
+    @property
     def db_path(self) -> Path:
-        return Path(self.raw.get("database", {}).get("path", "data/besseleth.db"))
+        return self._resolve(self.raw.get("database", {}).get("path", "data/besseleth.db"))
 
 
 def load_config(path: str | Path | None = None) -> Config:
@@ -133,6 +163,48 @@ def load_config(path: str | Path | None = None) -> Config:
     with open(p, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
     return Config(raw=raw, path=p)
+
+
+DEFAULT_INDUSTRY_SLUG = "default"
+
+
+def discover_industries(primary: Config, industries_dir: str | Path = "industries") -> dict[str, Config]:
+    """First step toward multiple industries in ONE running app (e.g. a
+    Neurotech dashboard and an AI dashboard, switchable without
+    restarting anything) — see the `industries/` layout below. Returns
+    `{slug: Config}`, always including `primary` under
+    DEFAULT_INDUSTRY_SLUG so a caller with no industries/ directory at
+    all (every existing single-industry install) gets back exactly one
+    entry and nothing about today's behavior changes.
+
+    Layout: `industries/<slug>/config.yaml`, one subfolder per
+    industry — each config.yaml's own relative paths (db, contacts.yaml,
+    etc.) resolve against ITS OWN subfolder (see Config._resolve), so
+    two industries loaded by the same process never share a database or
+    a contacts list just because they share one working directory.
+    `<slug>` is whatever the folder is named (e.g. "neurotech", "ai") —
+    that's what a caller passes as `?industry=<slug>` once routes start
+    accepting one; nothing reads that query param yet.
+
+    A broken industries/<slug>/config.yaml (missing file mid-edit, bad
+    YAML) is skipped with a printed warning rather than crashing the
+    whole app over one bad subfolder — every OTHER industry, and the
+    primary config, still come up fine."""
+    result: dict[str, Config] = {DEFAULT_INDUSTRY_SLUG: primary}
+    base = Path(industries_dir)
+    if not base.is_dir():
+        return result
+    for sub in sorted(base.iterdir()):
+        if not sub.is_dir():
+            continue
+        config_path = sub / "config.yaml"
+        if not config_path.exists():
+            continue
+        try:
+            result[sub.name] = load_config(config_path)
+        except Exception as e:
+            print(f"[config] Skipping industries/{sub.name}/config.yaml — failed to load: {e}")
+    return result
 
 
 def env(name: str, default: str | None = None) -> str | None:
@@ -215,6 +287,25 @@ def _set_list_in_block(text: str, top_key: str, field_key: str, items: list[str]
             break
         new_block = "".join(lines[:start_idx]) + new_field_block + "".join(lines[end_idx:])
     return text[: match.start(1)] + new_block + text[match.end(1) :]
+
+
+def update_newsletter_settings(config: "Config", to: list[str] | None = None, enabled: bool | None = None) -> None:
+    """Persists newsletter.to/enabled into config.yaml (surgical edit)
+    and updates config.raw in memory — same pattern as
+    update_industry_settings. `to` replacing the list entirely (not
+    appending) matches the dashboard's textarea-of-addresses UI, same
+    as industry.keywords."""
+    text = config.path.read_text(encoding="utf-8")
+    if to is not None:
+        text = _set_list_in_block(text, "newsletter", "to", to)
+    if enabled is not None:
+        text = _set_scalar_in_block(text, "newsletter", "enabled", "true" if enabled else "false")
+    config.path.write_text(text, encoding="utf-8")
+    newsletter = config.raw.setdefault("newsletter", {})
+    if to is not None:
+        newsletter["to"] = to
+    if enabled is not None:
+        newsletter["enabled"] = enabled
 
 
 def update_summarizer_settings(config: "Config", **fields: str) -> None:

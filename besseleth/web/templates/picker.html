@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Besseleth — Industries</title>
+<link rel="icon" type="image/png" href="/static/favicon.png">
+<style>
+  :root { color-scheme: light; }
+  body { font-family: Helvetica, Arial, sans-serif; margin: 0; min-height: 100vh; display: flex;
+         align-items: center; justify-content: center; background: #f6f2e8; color: #0d1b3e; }
+  .wrap { width: 100%; max-width: 480px; padding: 2rem 1.5rem; }
+  h1 { font-size: 1.4rem; margin: 0 0 .3rem; }
+  p.hint { opacity: .7; font-size: .9rem; margin: 0 0 1.5rem; }
+  .industryRow { display: flex; align-items: center; margin-bottom: .5rem; border: 1px solid #8883;
+                 border-radius: 8px; overflow: hidden; }
+  .industryRow button.enterBtn { flex: 1; text-align: left; padding: .9rem 1rem; border: none; background: #fff8;
+                 cursor: pointer; font-size: 1rem; color: inherit; }
+  .industryRow button.enterBtn:hover { background: #4a90d922; }
+  .industryRow button.delBtn { border: none; background: none; cursor: pointer; opacity: .4; padding: .9rem 1rem;
+                 font-size: .95rem; }
+  .industryRow button.delBtn:hover { opacity: 1; background: #e7636333; }
+  #addForm { margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid #8883; }
+  #addForm.hidden { display: none; }
+  #addForm label { display: block; font-size: .8rem; opacity: .75; margin: .6rem 0 .25rem; }
+  #addForm input { width: 100%; box-sizing: border-box; padding: .5rem; border: 1px solid #8886; border-radius: 6px;
+                 font-size: .95rem; }
+  #addForm .row { display: flex; gap: .5rem; margin-top: 1rem; }
+  button.btn { padding: .5rem 1rem; border: 1px solid #4a90d9; background: #4a90d9; color: #fff; border-radius: 6px;
+                 cursor: pointer; font-size: .9rem; }
+  button.btn.secondary { background: none; color: #4a90d9; }
+  button#showAddBtn { width: 100%; margin-top: 1rem; padding: .7rem; border: 1px dashed #8886; background: none;
+                 border-radius: 8px; cursor: pointer; font-size: .95rem; color: inherit; opacity: .8; }
+  button#showAddBtn:hover { opacity: 1; border-color: #4a90d9; }
+  #addError { color: #b33; font-size: .85rem; margin-top: .5rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Besseleth</h1>
+  <p class="hint">Pick an industry to track, or add a new one.</p>
+  <div id="industryList"></div>
+  <button id="showAddBtn">+ Add industry</button>
+  <div id="addForm" class="hidden">
+    <label for="newName">Industry name</label>
+    <input id="newName" placeholder="e.g. Synthetic Biology" autocomplete="off">
+    <label for="newKeywords">Keywords (comma-separated)</label>
+    <input id="newKeywords" placeholder="e.g. synthetic biology, CRISPR, gene editing" autocomplete="off">
+    <div class="row">
+      <button class="btn" id="createBtn">Create</button>
+      <button class="btn secondary" id="cancelAddBtn">Cancel</button>
+    </div>
+    <div id="addError"></div>
+  </div>
+</div>
+<script>
+async function loadIndustries() {
+  const res = await fetch('/api/industries');
+  const industries = await res.json();
+  const list = document.getElementById('industryList');
+  list.innerHTML = industries.map(ind => `
+    <div class="industryRow">
+      <button class="enterBtn" data-slug="${esc(ind.slug)}">${esc(ind.name)}</button>
+      ${ind.slug === 'default' ? '' : `<button class="delBtn" data-del-slug="${esc(ind.slug)}" title="Delete this industry — removes all its data">🗑</button>`}
+    </div>`).join('');
+  list.querySelectorAll('[data-slug]').forEach(btn => {
+    btn.onclick = () => { location.href = '/?industry=' + encodeURIComponent(btn.dataset.slug); };
+  });
+  list.querySelectorAll('[data-del-slug]').forEach(btn => {
+    btn.onclick = async () => {
+      const slug = btn.dataset.delSlug;
+      if (!confirm(`Delete this industry and all its data? This can't be undone.`)) return;
+      const res = await fetch('/api/industries/' + encodeURIComponent(slug), { method: 'DELETE' });
+      const data = await res.json();
+      if (data.ok) loadIndustries();
+      else alert(data.message || 'Failed to delete.');
+    };
+  });
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s == null ? '' : String(s);
+  return d.innerHTML;
+}
+
+document.getElementById('showAddBtn').onclick = () => {
+  document.getElementById('addForm').classList.remove('hidden');
+  document.getElementById('showAddBtn').style.display = 'none';
+};
+document.getElementById('cancelAddBtn').onclick = () => {
+  document.getElementById('addForm').classList.add('hidden');
+  document.getElementById('showAddBtn').style.display = 'block';
+  document.getElementById('addError').textContent = '';
+};
+document.getElementById('createBtn').onclick = async () => {
+  const name = document.getElementById('newName').value.trim();
+  const keywords = document.getElementById('newKeywords').value.split(',').map(k => k.trim()).filter(Boolean);
+  const errEl = document.getElementById('addError');
+  errEl.textContent = '';
+  if (!name || !keywords.length) {
+    errEl.textContent = 'Name and at least one keyword are required.';
+    return;
+  }
+  const res = await fetch('/api/industries', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, keywords }),
+  });
+  const data = await res.json();
+  if (data.ok) {
+    location.href = '/?industry=' + encodeURIComponent(data.slug);
+  } else {
+    errEl.textContent = data.message || 'Failed to create industry.';
+  }
+};
+
+loadIndustries();
+</script>
+</body>
+</html>

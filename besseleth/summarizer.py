@@ -32,14 +32,30 @@ def _extractive_fallback(items: list[Item], max_sentences: int = 3) -> str:
     return " ".join(parts) or "No notable developments this week."
 
 
-def _ollama_generate(prompt: str, ollama_url: str, model: str, timeout: int = 120, num_thread: int | None = None) -> str | None:
+def _ollama_generate(
+    prompt: str, ollama_url: str, model: str, timeout: int = 120,
+    num_thread: int | None = None, num_ctx: int | None = None,
+) -> str | None:
     payload = {"model": model, "prompt": prompt, "stream": False}
+    options = {}
     if num_thread:
         # Caps how many CPU threads Ollama uses for this call — set
         # summarizer.num_thread in config.yaml (e.g. to half your core
         # count) if enrichment runs are making the machine unusable.
         # Unset by default so behavior is unchanged unless you opt in.
-        payload["options"] = {"num_thread": num_thread}
+        options["num_thread"] = num_thread
+    if num_ctx:
+        # Caps the context window (and so the KV cache's memory
+        # footprint) — Ollama's own default context is large enough
+        # that on a low-RAM machine the model + KV cache can exceed
+        # physical RAM, forcing the OS to swap to disk, which is what
+        # actually causes multi-minute-or-worse generate calls, not CPU
+        # speed. Set summarizer.num_ctx (e.g. 2048) if enrich calls are
+        # timing out and Task Manager/htop shows memory maxed out
+        # rather than CPU.
+        options["num_ctx"] = num_ctx
+    if options:
+        payload["options"] = options
     try:
         resp = requests.post(
             f"{ollama_url.rstrip('/')}/api/generate",
@@ -83,12 +99,20 @@ def _groq_generate(prompt: str, api_key: str, model: str, timeout: int = 60) -> 
 def _llm_generate(prompt: str, cfg: dict, timeout: int = 120, num_thread: int | None = None) -> str | None:
     """The one entry point every summarizer/enrich LLM call should go
     through — dispatches on summarizer.backend and, for "groq" (the
-    default), falls back to Ollama automatically if one is configured
-    (summarizer.ollama_url/model set, or just left at their defaults —
-    Ollama has no separate "enabled" flag, if backend isn't "groq" alone
-    it's assumed reachable) and Groq was rate-limited or unreachable.
-    Returns None (never raises) if nothing worked, so every caller's
-    existing "result or fallback" pattern keeps working unchanged."""
+    default), falls back to Ollama if summarizer.groq_fallback_to_ollama
+    is explicitly set true (default false — CPU/remote Ollama inference
+    is slow enough, and quiet enough about it, that opting into it
+    should be a deliberate choice, not a silent default) and Groq was
+    rate-limited or unreachable. Returns None (never raises) if nothing
+    worked, so every caller's existing "result or fallback" pattern
+    keeps working unchanged."""
+    # Local/remote Ollama inference (especially over Tailscale to a
+    # CPU-only machine) routinely takes far longer than Groq's API ever
+    # would for the same prompt, so callers' timeout= (tuned for Groq)
+    # is not reused for Ollama calls — summarizer.ollama_timeout sets
+    # that separately, defaulting well above any caller's Groq timeout.
+    ollama_timeout = cfg.get("ollama_timeout", max(timeout, 180))
+    num_ctx = cfg.get("num_ctx")
     backend = cfg.get("backend", "groq")
     if backend == "groq":
         api_key = cfg.get("groq_api_key") or os.environ.get("GROQ_API_KEY", "")
@@ -96,7 +120,7 @@ def _llm_generate(prompt: str, cfg: dict, timeout: int = 120, num_thread: int | 
         result, rate_limited = _groq_generate(prompt, api_key, model, timeout=min(timeout, 60))
         if result:
             return result
-        if not cfg.get("groq_fallback_to_ollama", True):
+        if not cfg.get("groq_fallback_to_ollama", False):
             return None
         # Falls through here for any Groq failure — rate-limited, no key
         # configured, or a plain network/5xx error — rather than trying
@@ -105,12 +129,12 @@ def _llm_generate(prompt: str, cfg: dict, timeout: int = 120, num_thread: int | 
         print("[summarizer] Falling back to Ollama for this call.")
         return _ollama_generate(
             prompt, cfg.get("ollama_url", "http://localhost:11434"), cfg.get("model", "llama3.1"),
-            timeout=timeout, num_thread=num_thread,
+            timeout=ollama_timeout, num_thread=num_thread, num_ctx=num_ctx,
         )
     if backend == "ollama":
         return _ollama_generate(
             prompt, cfg.get("ollama_url", "http://localhost:11434"), cfg.get("model", "llama3.1"),
-            timeout=timeout, num_thread=num_thread,
+            timeout=ollama_timeout, num_thread=num_thread, num_ctx=num_ctx,
         )
     return None
 

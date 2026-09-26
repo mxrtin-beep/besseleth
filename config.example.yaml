@@ -133,6 +133,21 @@ sources:
     # client), but no longer does anything for rate limits on its own.
     # mailto: "you@example.com"
 
+  europepmc:
+    # bioRxiv/medRxiv/ChemRxiv/Research Square preprints — arXiv's
+    # parallels for biology/medicine/chemistry, which arXiv itself
+    # basically never touches (its q-bio categories skew computational/
+    # quantitative, not wet-lab work). Free, keyless, via Europe PMC's
+    # search API (europepmc.org) — bioRxiv's own API only lists by date
+    # range, no real keyword search, so this is the actual way to search
+    # it. `SRC:PPR` (baked into the query, not configurable here)
+    # restricts results to preprints specifically, not the published-
+    # journal literature Europe PMC also indexes (that's what `papers`/
+    # OpenAlex above is for).
+    enabled: true
+    max_results_per_keyword: 15
+    days_back: 8
+
   news:
     enabled: true
     days_back: 8
@@ -326,14 +341,26 @@ summarizer:
   backend: "groq"
   groq_api_key: ""           # or set the GROQ_API_KEY env var instead (keeps this out of a tracked config.yaml)
   groq_model: "llama-3.3-70b-versatile"
-  groq_fallback_to_ollama: true  # if Groq is rate-limited/unreachable and Ollama below is running, use it for that call instead of giving up
+  groq_fallback_to_ollama: false # if true, fall back to the Ollama config below when Groq is rate-limited/unreachable instead of
+                                  # just skipping that item for retry next run. Off by default — CPU/remote Ollama inference is
+                                  # slow enough (and its own failures quiet enough) that this should be opt-in, not automatic.
   ollama_url: "http://localhost:11434"
+  # Seconds to wait for a single Ollama call before giving up — separate
+  # from Groq's own (much shorter) per-call timeout, since CPU inference
+  # (especially over a network hop to another machine, e.g. Tailscale)
+  # routinely takes far longer than an API call ever would. Defaults to
+  # 180s if unset; raise this if enrich runs report calls "failed
+  # mid-call" and your Ollama server's own log (not besseleth's) shows
+  # the request was still generating when it got cut off.
+  ollama_timeout: 180
   # llama3.1 (8B) is heavy for a CPU-only/lower-RAM machine — a "hi" prompt
-  # taking ~a minute means every real enrichment call will time out (see
-  # summarizer.py's 60s timeout). llama3.2:1b is far lighter and still
-  # fine for this structured-extraction prompt; step up to llama3.2:3b if
-  # your machine handles 1b easily and you want better extraction quality.
-  # `ollama pull llama3.2:1b` first, then this just has to match.
+  # taking ~a minute means every real enrichment call will time out.
+  # llama3.2:1b is far lighter and still fine for this structured-
+  # extraction prompt; step up to llama3.2:3b or a 7b-class model if your
+  # machine (or a dedicated Ollama box reached over Tailscale) handles it
+  # easily and you want better extraction quality.
+  # `ollama pull llama3.2:1b` first, then this just has to match — model
+  # names must match exactly, including any `:tag` suffix.
   model: "llama3.2:1b"
   max_items_per_summary_call: 8
   num_thread: 4              # cap CPU threads Ollama uses per call — unset means its default (usually ALL
@@ -343,6 +370,14 @@ summarizer:
                               # some cores free for everything else you're running. 4 is a reasonable default
                               # for most laptops; raise it if enrichment feels too slow and your machine can
                               # spare it, lower it (e.g. 2) if it's still too disruptive.
+  # num_ctx: 2048             # caps Ollama's context window for this call, which caps how much RAM its KV
+                              # cache needs. Unset uses Ollama's own default (2048 as of recent Ollama
+                              # versions, but check `ollama show <model>`), which combined with the model
+                              # itself can exceed a low-RAM machine's physical memory — the OS then swaps to
+                              # disk, and THAT, not CPU speed, is usually the real cause of an enrich call
+                              # that used to take seconds suddenly taking minutes or timing out outright. If
+                              # Task Manager/htop shows memory maxed out (not CPU) during a slow enrich run,
+                              # set this lower rather than reaching for a smaller model first.
 
 jobs:
   # Job postings for the orgs besseleth has extracted from items (see the
@@ -382,6 +417,18 @@ report:
     smtp_user_env: "REPORT_SMTP_USER"
     smtp_pass_env: "REPORT_SMTP_PASS"
     to: []
+
+# A separate, non-personalized digest generated alongside the report above
+# (same run, same already-fetched/enriched/deduped items — no extra fetch
+# or re-enrichment) — organized into fixed categories (Funding, Regulatory,
+# Clinical, Commercial, Hiring) instead of by source, meant for a mailing
+# list rather than just you. Each bullet's first word links to its source.
+# Uses report.email's SMTP host/credentials above (same sending account),
+# just a different recipient list below.
+newsletter:
+  enabled: false
+  output_dir: "newsletters"
+  to: []   # the mailing list — never report.email.to, which is your own address
 
 database:
   path: "data/besseleth.db"
