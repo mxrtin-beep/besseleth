@@ -475,6 +475,22 @@
     </div>
     <p class="hint" id="settingsScheduleResult">Report cron is a standard 5-field cron expression (minute hour day-of-month month day-of-week), e.g. "0 4 * * MON" = 4am every Monday. Leave timezone blank to use this host's local time.</p>
 
+    <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Newsletter</h3>
+    <p class="hint">A separate, non-personalized digest generated alongside every report (same fetched/enriched
+      items, no extra fetch) and emailed to the list below instead of just you — see the Newsletters section in
+      the sidebar for past issues.</p>
+    <div class="controls" style="align-items:center; flex-wrap:wrap">
+      <div><label for="settingsNewsletterEnabled"><input type="checkbox" id="settingsNewsletterEnabled" style="width:auto; margin-right:.4rem;">Enabled</label></div>
+    </div>
+    <div class="controls" style="align-items:stretch; flex-wrap:wrap">
+      <div style="flex:1; min-width:300px">
+        <label for="settingsNewsletterTo">Mailing list (one email address per line)</label>
+        <textarea id="settingsNewsletterTo" style="width:100%; box-sizing:border-box; min-height:80px"></textarea>
+      </div>
+      <div><button class="btn" id="saveSettingsNewsletterBtn">Save</button></div>
+    </div>
+    <p class="hint" id="settingsNewsletterResult">Uses the same SMTP host/credentials as the report's email (report.email in config.yaml) — only the recipient list is different.</p>
+
     <h3 style="margin-top:2.5rem; font-size:1rem; border-top:1px solid #8883; padding-top:1.5rem;">Data maintenance</h3>
     <div class="controls" style="align-items:center; flex-wrap:wrap">
       <div><button class="btn" id="reextractOrgNamesBtn" title="Re-checks org names for every source (papers and news/blog)">Re-check org names</button></div>
@@ -1201,7 +1217,29 @@ async function loadSettings() {
   const industry = await industryRes.json();
   document.getElementById('settingsIndustryName').value = industry.name;
   document.getElementById('settingsKeywords').value = industry.keywords.join('\n');
+
+  const newsletterRes = await apiFetch('/api/settings/newsletter');
+  const newsletter = await newsletterRes.json();
+  document.getElementById('settingsNewsletterEnabled').checked = newsletter.enabled;
+  document.getElementById('settingsNewsletterTo').value = newsletter.to.join('\n');
 }
+
+document.getElementById('saveSettingsNewsletterBtn').onclick = async () => {
+  const result = document.getElementById('settingsNewsletterResult');
+  const enabled = document.getElementById('settingsNewsletterEnabled').checked;
+  const to = document.getElementById('settingsNewsletterTo').value.split('\n').map(s => s.trim()).filter(Boolean);
+  result.textContent = 'Saving…';
+  try {
+    const res = await apiFetch('/api/settings/newsletter', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled, to }),
+    });
+    const data = await res.json();
+    result.textContent = data.ok ? 'Saved — takes effect on the next report run.' : `Failed: ${data.message}`;
+  } catch (e) {
+    result.textContent = 'Failed — see server log.';
+  }
+};
 
 document.getElementById('saveSettingsIndustryBtn').onclick = async () => {
   const result = document.getElementById('settingsIndustryResult');

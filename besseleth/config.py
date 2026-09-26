@@ -289,6 +289,25 @@ def _set_list_in_block(text: str, top_key: str, field_key: str, items: list[str]
     return text[: match.start(1)] + new_block + text[match.end(1) :]
 
 
+def update_newsletter_settings(config: "Config", to: list[str] | None = None, enabled: bool | None = None) -> None:
+    """Persists newsletter.to/enabled into config.yaml (surgical edit)
+    and updates config.raw in memory — same pattern as
+    update_industry_settings. `to` replacing the list entirely (not
+    appending) matches the dashboard's textarea-of-addresses UI, same
+    as industry.keywords."""
+    text = config.path.read_text(encoding="utf-8")
+    if to is not None:
+        text = _set_list_in_block(text, "newsletter", "to", to)
+    if enabled is not None:
+        text = _set_scalar_in_block(text, "newsletter", "enabled", "true" if enabled else "false")
+    config.path.write_text(text, encoding="utf-8")
+    newsletter = config.raw.setdefault("newsletter", {})
+    if to is not None:
+        newsletter["to"] = to
+    if enabled is not None:
+        newsletter["enabled"] = enabled
+
+
 def update_summarizer_settings(config: "Config", **fields: str) -> None:
     """Persists one or more summarizer.yaml fields (e.g. backend,
     groq_api_key, ollama_url, model) straight into config.yaml on disk —

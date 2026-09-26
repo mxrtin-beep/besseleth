@@ -37,6 +37,7 @@ from ..config import (
     discover_industries,
     load_config,
     update_industry_settings,
+    update_newsletter_settings,
     update_schedule_settings,
     update_summarizer_settings,
 )
@@ -852,6 +853,25 @@ def create_app(
             if not keywords:
                 return jsonify({"ok": False, "message": "At least one keyword is required."}), 400
         update_industry_settings(_industry_config(app), name=name, keywords=keywords)
+        return jsonify({"ok": True})
+
+    @app.get("/api/settings/newsletter")
+    def api_get_newsletter_settings():
+        newsletter = _industry_config(app).newsletter
+        return jsonify({"enabled": bool(newsletter.get("enabled", False)), "to": newsletter.get("to", [])})
+
+    @app.post("/api/settings/newsletter")
+    def api_set_newsletter_settings():
+        payload = request.get_json(silent=True) or {}
+        to = payload.get("to")
+        enabled = payload.get("enabled")
+        if to is not None:
+            if not isinstance(to, list) or not all(isinstance(a, str) for a in to):
+                return jsonify({"ok": False, "message": "to must be a list of email addresses."}), 400
+            to = [a.strip() for a in to if a.strip()]
+        if enabled is not None and not isinstance(enabled, bool):
+            return jsonify({"ok": False, "message": "enabled must be true or false."}), 400
+        update_newsletter_settings(_industry_config(app), to=to, enabled=enabled)
         return jsonify({"ok": True})
 
     @app.get("/api/metrics-table")
