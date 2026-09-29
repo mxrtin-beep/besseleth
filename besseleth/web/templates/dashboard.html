@@ -185,6 +185,10 @@
     <button id="tabSettings">Settings</button>
   </div>
 
+  <p id="reportActions" style="display:none;">
+    <button class="btn" id="copyForSubstackBtn" title="Copies the report as rich formatted text (not raw markdown) — paste directly into Substack's editor and headers/bold/links carry over, the same way pasting from Google Docs does">Copy for Substack</button>
+    <span class="hint" id="copyForSubstackResult"></span>
+  </p>
   <div id="reportPane"><p class="hint">Pick a report from the sidebar.</p></div>
 
   <div id="papersPane" style="display:none">
@@ -615,6 +619,7 @@ let currentTab = null;
 function showTab(which) {
   currentTab = which;
   reportPane.style.display = which === 'report' ? 'block' : 'none';
+  document.getElementById('reportActions').style.display = which === 'report' ? '' : 'none';
   papersPane.style.display = which === 'papers' ? 'block' : 'none';
   enrichLogPane.style.display = which === 'enrichlog' ? 'block' : 'none';
   orgsPane.style.display = which === 'orgs' ? 'block' : 'none';
@@ -654,6 +659,38 @@ tabTrends.onclick = () => showTab('trends');
 tabPaste.onclick = () => showTab('paste');
 tabSettings.onclick = () => showTab('settings');
 tabContacts.onclick = () => showTab('contacts');
+
+document.getElementById('copyForSubstackBtn').onclick = async () => {
+  const result = document.getElementById('copyForSubstackResult');
+  try {
+    // Rich HTML on the clipboard — not raw markdown/plain text — is
+    // what makes this "paste directly into Substack" rather than
+    // "paste, then re-apply every bold/link/header by hand." Same
+    // mechanism as copying formatted text from Google Docs: the
+    // destination editor reads the text/html clipboard entry and
+    // reconstructs its own formatting from it. A plain text/plain
+    // fallback rides along for anywhere that can't accept text/html.
+    const html = reportPane.innerHTML;
+    const plain = reportPane.innerText;
+    await navigator.clipboard.write([
+      new ClipboardItem({
+        'text/html': new Blob([html], { type: 'text/html' }),
+        'text/plain': new Blob([plain], { type: 'text/plain' }),
+      }),
+    ]);
+    result.textContent = 'Copied — paste directly into Substack\'s editor.';
+  } catch (e) {
+    // Clipboard API needs a secure context (https, or localhost) and
+    // browser support — falls back to a plain-text copy rather than
+    // failing silently, though that loses bold/links/headers.
+    try {
+      await navigator.clipboard.writeText(reportPane.innerText);
+      result.textContent = 'Copied as plain text only (rich copy unavailable here) — formatting won\'t carry over.';
+    } catch (e2) {
+      result.textContent = 'Copy failed — select the report text manually and copy instead.';
+    }
+  }
+};
 
 function wireReportNav() {
   document.querySelectorAll('.reportBtn').forEach(btn => {
