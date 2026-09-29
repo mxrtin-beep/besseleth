@@ -271,12 +271,10 @@ def main(argv=None):
         return
 
     if args.command == "report-delete":
-        from pathlib import Path
-
         if not args.report_id:
             print("[cli] Usage: besseleth.cli report-delete <report-id>", file=sys.stderr)
             sys.exit(1)
-        path = Path(config.report.get("output_dir", "reports")) / f"report-{args.report_id}.md"
+        path = config.reports_dir / f"report-{args.report_id}.md"
         if not path.exists():
             print(f"[cli] No report found at {path}.", file=sys.stderr)
             sys.exit(1)

@@ -105,7 +105,7 @@ def _paper_lines(items: list[Item]) -> str:
     anyone who wants it."""
     lines = []
     for i in items:
-        lines.append(f"- **{i.title}**" + (f" ([link]({i.url}))" if i.url else ""))
+        lines.append(f"- {i.title}" + (f" ([link]({i.url}))" if i.url else ""))
     return "\n".join(lines) or "_None this week._"
 
 
@@ -211,7 +211,7 @@ def build_report(
         return f"_Relevant because **{item.matched_contact}** works at **{item.matched_company}**._"
 
     personalized_lines = "\n".join(
-        f"- **{item.title}**" + (f" [{i}]({item.url})" if item.url else "") + f"\n  {_relevance_tag(item)}"
+        f"- {item.title}" + (f" [{i}]({item.url})" if item.url else "") + f"\n  {_relevance_tag(item)}"
         for i, item in enumerate(personalized_items, start=1)
     )
 

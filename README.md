@@ -3,7 +3,7 @@
 A weekly industry-briefing bot. Point it at an industry (e.g.
 *neurotechnology*), and it:
 
-- Pulls **papers** matching your keywords/categories from two complementary feeds under one `papers` source: **arXiv** (free, official API — preprints, same-day freshness, no citation data) and **OpenAlex** (free, keyless — published journal/conference papers, real authors and a citation count for ranking by impact, but indexes with a lag of days to weeks). The report's papers section is one list, sorted by citations, highest first
+- Pulls **papers** matching your keywords/categories from three complementary feeds under one `papers` source: **arXiv** (free, official API — physics/CS/quantitative-biology preprints, same-day freshness, no citation data), **OpenAlex** (free, keyless — published journal/conference papers, real authors and a citation count for ranking by impact, but indexes with a lag of days to weeks), and **Europe PMC** (free, keyless — bioRxiv/medRxiv/ChemRxiv/Research Square preprints, arXiv's parallels for biology/medicine/chemistry, which arXiv itself rarely touches). The report's papers section is one list, sorted by citations, highest first
 - Pulls **news** from RSS feeds — including a free Google News search feed by default (optionally NewsAPI.org too); add more from the dashboard's **Feeds** tab, no config-file editing needed
 - Pulls **blogs** (company/lab blogs, researcher Substacks) from RSS — Substack needs no code, just its `/feed` URL; also addable from the Feeds tab
 - Tracks a curated **conferences** watchlist, plus optional **conference news** (CFPs, accepted talks) via each conference's own RSS feed
@@ -444,9 +444,10 @@ want a subset.
 Unlike the weekly report (a rolling snapshot of what's new), the
 dashboard's **Papers** tab is a standing index of every papers/news/blog
 item besseleth has ever fetched, filterable and sortable. `papers`
-covers both feeds — arXiv preprints and OpenAlex-indexed published
-papers — as one source, since to a reader they're the same thing: a
-research paper, just via two complementary feeds with different
+covers all three feeds — arXiv preprints, OpenAlex-indexed published
+papers, and Europe PMC-indexed bioRxiv/medRxiv/ChemRxiv/Research Square
+preprints — as one source, since to a reader they're the same thing: a
+research paper, just via complementary feeds with different
 tradeoffs (see the intro bullets above). An OpenAlex-sourced item
 carries **Authors** and **Citations** columns straight from the API —
 not LLM-derived, so they're exact; an arXiv-sourced one shows "citations
@@ -735,6 +736,28 @@ what a previous report already showed. Re-running — while developing, or
 because something new got scraped or pasted — always reflects the current
 window exactly as if no report had ever run before; it never skips an
 item just because an earlier report already included it.
+
+## Newsletter (a separate, non-personalized digest for a mailing list)
+
+Set `newsletter.enabled: true` in `config.yaml` and a newsletter is built
+automatically every time a report is — same run, same already-fetched/
+enriched/near-duplicate-merged items, no extra fetch or re-enrichment.
+Unlike the report, it isn't personalized to you: it's organized into fixed
+categories (Funding, Regulatory, Clinical, Commercial, Hiring) instead of
+by source, meant to be read/forwarded by people who aren't you. Each
+bullet's first word links to its source.
+
+```yaml
+newsletter:
+  enabled: true
+  output_dir: "newsletters"
+  to: ["list@yourdomain.com"]   # the mailing list — separate from report.email.to (your own address)
+```
+
+It reuses `report.email`'s SMTP host/credentials (same sending account),
+just a different recipient list. Newsletters show up in their own sidebar
+section on the dashboard, next to Reports — click one to open the actual
+sent HTML in a new tab, ✉ to resend it, 🗑 to delete it.
 
 The report opens with **🏆 Most surprising / important this week** —
 every item that scored at least `report.top_findings_min_novelty` (1-5,
