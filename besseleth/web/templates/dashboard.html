@@ -148,6 +148,7 @@
     {% for nid in newsletter_ids %}
     <div class="reportRow" data-newsletter-row="{{ nid }}">
       <a href="/api/newsletter/{{ nid }}" target="_blank" rel="noopener" style="display:block; text-decoration:none; color:inherit; flex:1; padding:.5rem;">{{ industry }} — {{ nid }}</a>
+      <button class="btn" data-copy-substack-newsletter="{{ nid }}" title="Copy for Substack — rich formatted text, paste directly into Substack's editor" style="padding:.2rem .4rem;">📋</button>
       <button class="btn" data-resend-newsletter="{{ nid }}" title="Resend this newsletter to the mailing list" style="padding:.2rem .4rem;">✉</button>
       <button class="delNewsletterBtn" data-del-newsletter="{{ nid }}" title="Delete this newsletter">🗑</button>
     </div>
@@ -660,36 +661,38 @@ tabPaste.onclick = () => showTab('paste');
 tabSettings.onclick = () => showTab('settings');
 tabContacts.onclick = () => showTab('contacts');
 
-document.getElementById('copyForSubstackBtn').onclick = async () => {
-  const result = document.getElementById('copyForSubstackResult');
+// Shared by the report pane's button and each newsletter row's own copy
+// button — writes RICH html (not raw markdown) to the clipboard, the
+// same mechanism pasting formatted text from Google Docs uses, so
+// headers/bold/links carry over directly into Substack's editor
+// instead of needing to be reapplied by hand. `html` for a newsletter
+// is its whole saved document (own <html><body>...), which browsers
+// happily accept in a text/html clipboard write same as a fragment.
+async function copyHtmlForSubstack(html, plain) {
   try {
-    // Rich HTML on the clipboard — not raw markdown/plain text — is
-    // what makes this "paste directly into Substack" rather than
-    // "paste, then re-apply every bold/link/header by hand." Same
-    // mechanism as copying formatted text from Google Docs: the
-    // destination editor reads the text/html clipboard entry and
-    // reconstructs its own formatting from it. A plain text/plain
-    // fallback rides along for anywhere that can't accept text/html.
-    const html = reportPane.innerHTML;
-    const plain = reportPane.innerText;
     await navigator.clipboard.write([
       new ClipboardItem({
         'text/html': new Blob([html], { type: 'text/html' }),
         'text/plain': new Blob([plain], { type: 'text/plain' }),
       }),
     ]);
-    result.textContent = 'Copied — paste directly into Substack\'s editor.';
+    return 'Copied — paste directly into Substack\'s editor.';
   } catch (e) {
     // Clipboard API needs a secure context (https, or localhost) and
     // browser support — falls back to a plain-text copy rather than
     // failing silently, though that loses bold/links/headers.
     try {
-      await navigator.clipboard.writeText(reportPane.innerText);
-      result.textContent = 'Copied as plain text only (rich copy unavailable here) — formatting won\'t carry over.';
+      await navigator.clipboard.writeText(plain);
+      return 'Copied as plain text only (rich copy unavailable here) — formatting won\'t carry over.';
     } catch (e2) {
-      result.textContent = 'Copy failed — select the report text manually and copy instead.';
+      return 'Copy failed — open it in a new tab, select the text manually, and copy instead.';
     }
   }
+}
+
+document.getElementById('copyForSubstackBtn').onclick = async () => {
+  const result = document.getElementById('copyForSubstackResult');
+  result.textContent = await copyHtmlForSubstack(reportPane.innerHTML, reportPane.innerText);
 };
 
 function wireReportNav() {
@@ -735,6 +738,30 @@ document.querySelector('.reportBtn').click();
 {% endif %}
 
 function wireNewsletterNav() {
+  document.querySelectorAll('[data-copy-substack-newsletter]').forEach(btn => {
+    btn.onclick = async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const nid = btn.dataset.copySubstackNewsletter;
+      const original = btn.textContent;
+      btn.textContent = '…';
+      try {
+        const res = await apiFetch(`/api/newsletter/${nid}`);
+        const fullHtml = await res.text();
+        // The saved file is a whole <html><body>...</body></html>
+        // document — parse it and copy just the body's content, not
+        // the outer <html>/<head> tags, which some paste targets
+        // handle worse than a plain fragment.
+        const doc = new DOMParser().parseFromString(fullHtml, 'text/html');
+        const message = await copyHtmlForSubstack(doc.body.innerHTML, doc.body.innerText);
+        alert(message);
+      } catch (e) {
+        alert('Copy failed — open the newsletter in a new tab, select the text manually, and copy instead.');
+      } finally {
+        btn.textContent = original;
+      }
+    };
+  });
   document.querySelectorAll('[data-resend-newsletter]').forEach(btn => {
     btn.onclick = async (ev) => {
       ev.stopPropagation();
