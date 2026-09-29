@@ -100,6 +100,20 @@ industry:
       unit: "USD"
       type: "numeric"
 
+  # The example vocabulary enrichment's LLM prompt suggests for the
+  # "modality"/"therapeutic_target" fields it extracts per item — this
+  # matters more than it looks: the LLM tends to lean on whatever
+  # examples it's shown, so leaving these unset (defaulting to
+  # besseleth's original neurotech vocabulary below) on a DIFFERENT
+  # industry — Longevity, AI, whatever — biases every item toward
+  # neurotech-flavored answers ("CNS implant" on a longevity paper)
+  # instead of genuinely relevant categories. Set these to short labels
+  # that actually fit your industry; the LLM still picks freely beyond
+  # this list ("or another short label if none fit"), these just steer
+  # its first instinct toward your field instead of neurotech's.
+  # modality_examples: ["senolytic", "caloric restriction", "gene therapy", "epigenetic reprogramming"]
+  # therapeutic_target_examples: ["aging/lifespan", "cardiovascular", "neurodegenerative", "metabolic"]
+
 sources:
   arxiv:
     enabled: true

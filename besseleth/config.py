@@ -52,6 +52,26 @@ class Config:
     def company_metrics(self) -> list[dict]:
         return list(self.raw["industry"].get("company_metrics", []))
 
+    # Defaults match besseleth's original neurotech vocabulary exactly —
+    # unset for any industry, behavior is identical to before these
+    # became configurable. A DIFFERENT industry (e.g. Longevity) left
+    # unset was the actual bug this fixes: the enrichment prompt's
+    # example vocabulary is a strong signal to the LLM, and neurotech
+    # terms ("CNS implant", "EEG", ...) were being suggested — and
+    # picked — for items in a completely unrelated field.
+    _DEFAULT_MODALITY_EXAMPLES = ["EEG", "ECoG", "CNS implant", "PNS implant", "EMG", "fMRI", "fNIRS", "eye movement (EM)"]
+    _DEFAULT_THERAPEUTIC_TARGET_EXAMPLES = [
+        "motor", "speech", "vision", "hearing", "memory", "mood/psychiatric", "epilepsy", "pain",
+    ]
+
+    @property
+    def modality_examples(self) -> list[str]:
+        return list(self.raw["industry"].get("modality_examples", self._DEFAULT_MODALITY_EXAMPLES))
+
+    @property
+    def therapeutic_target_examples(self) -> list[str]:
+        return list(self.raw["industry"].get("therapeutic_target_examples", self._DEFAULT_THERAPEUTIC_TARGET_EXAMPLES))
+
     @property
     def devices_path(self) -> Path:
         """Devices/companies live in the main sqlite db now (see db.py) —

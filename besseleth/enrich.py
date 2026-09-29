@@ -164,28 +164,27 @@ def _build_prompt(row, config: Config, context: str, author_affiliations: str = 
         'progress overall, policy/regulatory coverage not tied to one company, etc. Reserve "unknown" for when a '
         "specific org clearly IS involved but you can't tell what kind of org it is (rare, since org_type is usually "
         'inferable once "org" is non-null) — "unknown" should almost never co-occur with a null "org"\n'
-        '  "modality": a JSON ARRAY of the technical approach(es)/category(ies) actually used, e.g. ["EEG"], '
-        '["ECoG"], ["CNS implant"], ["PNS implant"], ["EMG"], ["fMRI"], ["fNIRS"], ["eye movement (EM)"], or '
-        'another short label if none fit — MULTIPLE entries when the item genuinely combines more than one, e.g. '
-        'a study using both EEG and eye-tracking is ["EEG", "eye movement (EM)"], never a single combined string '
-        'like "EEG + eye movement (EM)". Make your best-effort call from what the text actually describes (the '
-        'device/method used) even if that word never appears verbatim — e.g. "electrodes implanted in the motor '
-        'cortex" is "CNS implant" even without that exact phrase. NEVER use "BCI", "brain-computer interface", '
-        '"brain-machine interface", or a synonym for the field itself as an entry here — that names the whole '
-        f'topic ({config.industry_name}), not a specific technique, so it is true of nearly everything and useless '
-        'as a category; name the actual technique(s) instead. Two different "nothing specific" cases, don\'t '
-        'conflate them: ["general"] when the item discusses the technology/field broadly, spanning modalities or '
-        'not tied to one — e.g. an industry overview, a funding-market roundup, a policy piece — that\'s a genuine '
-        'answer, not a gap. ["unknown"] only when the item is clearly about a SPECIFIC technique/device but the '
-        "text just never says which one — a real gap, not merely because it isn't spelled out casually (in which "
-        "case still make your best-effort call per the instructions above)\n"
-        '  "therapeutic_target": what it addresses, e.g. "motor", "speech", "vision", "hearing", "memory", '
-        '"mood/psychiatric", "epilepsy", "pain", "other", "general", or "unknown". Same standard as modality — '
-        'infer from what\'s described (a paralyzed patient regaining hand control is "motor") rather than requiring '
-        'the word itself. "general" when the item is about the technology/field broadly, not addressing any one '
-        'condition/target (an industry overview, a funding piece, a policy piece) — that\'s a real answer. '
-        '"unknown" only when a specific application IS clearly being discussed but the target genuinely can\'t be '
-        "determined from the text — not simply because it isn't spelled out explicitly\n"
+        f'  "modality": a JSON ARRAY of the technical approach(es)/category(ies) actually used — for '
+        f'{config.industry_name}, that typically looks like '
+        + ", ".join(f'["{m}"]' for m in config.modality_examples)
+        + ', or another short label if none of these fit — MULTIPLE entries when the item genuinely combines more '
+        'than one (e.g. two techniques used together is ["Technique A", "Technique B"], never a single combined '
+        'string like "Technique A + Technique B"). Make your best-effort call from what the text actually describes '
+        '(the device/method used) even if the exact label never appears verbatim. NEVER use the industry name '
+        f'itself ("{config.industry_name}") or a synonym for the whole field as an entry here — that\'s true of '
+        'nearly everything and useless as a category; name the actual technique(s) instead. Two different '
+        '"nothing specific" cases, don\'t conflate them: ["general"] when the item discusses the technology/field '
+        'broadly, spanning modalities or not tied to one — e.g. an industry overview, a funding-market roundup, a '
+        'policy piece — that\'s a genuine answer, not a gap. ["unknown"] only when the item is clearly about a '
+        "SPECIFIC technique/device but the text just never says which one — a real gap, not merely because it "
+        "isn't spelled out casually (in which case still make your best-effort call per the instructions above)\n"
+        f'  "therapeutic_target": what it addresses — for {config.industry_name}, that typically looks like '
+        + ", ".join(f'"{t}"' for t in config.therapeutic_target_examples)
+        + ', or "other", "general", or "unknown". Same standard as modality — infer from what\'s described rather '
+        'than requiring the exact word itself. "general" when the item is about the technology/field broadly, not '
+        'addressing any one condition/target (an industry overview, a funding piece, a policy piece) — that\'s a '
+        'real answer. "unknown" only when a specific application IS clearly being discussed but the target '
+        "genuinely can't be determined from the text — not simply because it isn't spelled out explicitly\n"
         '  "novelty_score": integer 1-5 — how surprising/novel this is COMPARED TO the other recent items on the '
         "same topic listed below (1 = incremental/expected, 5 = a genuine surprise or breakthrough relative to them) "
         "AND, if this item reports a number for one of the device_metrics above, compared to the best value "
